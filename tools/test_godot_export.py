@@ -64,7 +64,7 @@ def export_configuration(
                     "codesign/codesign=1"
                 ),
                 (
-                    "libgodot_rs_host.dylib",
+                    "libgodot_host.dylib",
                     "libgodot_rs_project_module.dylib",
                 ),
             )
@@ -87,7 +87,7 @@ def export_configuration(
             ),
             (
                 "godothub_project.exe",
-                "godot_rs_host.dll",
+                "godot_host.dll",
                 "godot_rs_project_module.dll",
             ),
         )
@@ -104,7 +104,7 @@ def export_configuration(
             (
                 "godothub_project.x86_64",
                 "godothub_project.pck",
-                "libgodot_rs_host.so",
+                "libgodot_host.so",
                 "libgodot_rs_project_module.so",
             ),
         )

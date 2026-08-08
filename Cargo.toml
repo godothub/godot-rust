@@ -1,12 +1,11 @@
 [workspace]
 members = [
     "crates/godot_rs",
-    "crates/godot_rs_api_policy",
-    "crates/godot_rs_buildd",
-    "crates/godot_rs_codegen",
-    "crates/godot_rs_host",
-    "crates/godot_rs_macros",
-    "crates/godot_rs_api",
+    "crates/godot_build",
+    "crates/godot_codegen",
+    "crates/godot_host",
+    "crates/godot_macro",
+    "crates/godot_api",
     "tests/fixtures/native_extension",
     "tests/fixtures/project_module",
 ]
@@ -23,9 +22,8 @@ homepage = "https://github.com/godothub/godot-rust"
 [workspace.dependencies]
 bindgen = { version = "0.72.1", default-features = false, features = ["runtime"] }
 godot_rs = { version = "0.9.0", path = "crates/godot_rs" }
-godot_rs_api_policy = { path = "crates/godot_rs_api_policy" }
-godot_rs_macros = { version = "0.9.0", path = "crates/godot_rs_macros" }
-godot_rs_api = { version = "0.9.0", path = "crates/godot_rs_api" }
+godot_macro = { version = "0.9.0", path = "crates/godot_macro" }
+godot_api = { version = "0.9.0", path = "crates/godot_api", default-features = false }
 inventory = "0.3.24"
 libloading = "0.8.9"
 object = { version = "0.37.3", default-features = false, features = ["read", "std", "wasm"] }

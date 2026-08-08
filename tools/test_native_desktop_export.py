@@ -27,7 +27,7 @@ from test_native_load import (
 
 
 EXAMPLE_ADDON = ROOT / "example" / "addons" / "godot-rust"
-NATIVE_MODULE_BASENAME = "godot_rs_native_smoke"
+NATIVE_MODULE_BASENAME = "godot_native_smoke"
 
 
 def prepare_native_project(

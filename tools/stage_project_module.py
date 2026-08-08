@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = "godot_rs_host_smoke_module"
+PACKAGE = "godot_host_smoke_module"
 READY_MARKER = "GODOT_RUST_MODULE_READY"
 PROCESS_MARKER = "GODOT_RUST_MODULE_PROCESS"
 METHOD_MARKER = "GODOT_RUST_MODULE_METHOD"
@@ -51,9 +51,9 @@ def validate_project_module(module: Path) -> None:
             "--quiet",
             "--locked",
             "-p",
-            "godot_rs_host",
+            "godot_host",
             "--bin",
-            "godot_rs_module_check",
+            "godot_module_check",
             "--",
             str(module),
             "--exercise",

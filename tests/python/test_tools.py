@@ -66,15 +66,15 @@ def write_release_binary_matrix(root: Path) -> None:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(f"{platform_name}/{name}".encode())
 
-    xcframework = root / "apple" / "godot_rs_host.xcframework"
+    xcframework = root / "apple" / "godot_host.xcframework"
     libraries = []
     for identifier, expected in (
         create_apple_xcframework.EXPECTED_LIBRARIES.items()
     ):
         library = {
-            "BinaryPath": "godot_rs_host.framework/godot_rs_host",
+            "BinaryPath": "godot_host.framework/godot_host",
             "LibraryIdentifier": identifier,
-            "LibraryPath": "godot_rs_host.framework",
+            "LibraryPath": "godot_host.framework",
             "SupportedArchitectures": sorted(expected["architectures"]),
             "SupportedPlatform": expected["platform"],
         }
@@ -89,7 +89,7 @@ def write_release_binary_matrix(root: Path) -> None:
         framework_info = (
             xcframework
             / identifier
-            / "godot_rs_host.framework"
+            / "godot_host.framework"
             / "Info.plist"
         )
         with framework_info.open("wb") as output:
@@ -116,7 +116,7 @@ class AppleXCFrameworkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             binaries = Path(directory) / "binaries"
             write_release_binary_matrix(binaries)
-            xcframework = binaries / "apple" / "godot_rs_host.xcframework"
+            xcframework = binaries / "apple" / "godot_host.xcframework"
             create_apple_xcframework.normalize_xcframework_metadata(xcframework)
             with (xcframework / "Info.plist").open("rb") as source:
                 metadata = plistlib.load(source)
@@ -158,6 +158,13 @@ class DependencyProvenanceTests(unittest.TestCase):
 
 
 class CratePublicationTests(unittest.TestCase):
+    def test_public_crates_have_package_readmes_and_the_project_license(self):
+        project_license = (ROOT / "LICENSE").read_bytes()
+        for crate in ("godot_rs", "godot_api", "godot_macro"):
+            root = ROOT / "crates" / crate
+            self.assertTrue((root / "README.md").read_text(encoding="utf-8").strip())
+            self.assertEqual((root / "LICENSE").read_bytes(), project_license)
+
     def test_sparse_index_paths_match_the_cargo_registry_layout(self):
         self.assertEqual(publish_crate.sparse_index_path("a"), "1/a")
         self.assertEqual(publish_crate.sparse_index_path("ab"), "2/ab")
@@ -206,7 +213,7 @@ class OfficialApiTests(unittest.TestCase):
     def test_authenticated_api_inputs_keep_lf_on_every_platform(self):
         attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
         self.assertIn(
-            "crates/godot_rs_api/metadata/**/extension_api.json text eol=lf",
+            "crates/godot_api/metadata/**/extension_api.json text eol=lf",
             attributes.splitlines(),
         )
 
@@ -260,7 +267,7 @@ class RepositoryMarkerTests(unittest.TestCase):
             "example/.godot/editor/filesystem_cache8",
             "tests/fixtures/native_extension/rust/native.gdextension",
             "tests/fixtures/host_load/addons/godot-rust/bin/apple/"
-            "godot_rs_host.xcframework/Info.plist",
+            "godot_host.xcframework/Info.plist",
             "tools/__pycache__/tool.pyc",
             ".idea/workspace.xml",
             ".env.local",
@@ -333,7 +340,7 @@ class StageHostTests(unittest.TestCase):
         self.assertIn("generate-engine-api", workflow)
         self.assertIn("cmp /tmp/engine-api-a.rs /tmp/engine-api-b.rs", workflow)
         self.assertIn(
-            "crates/godot_rs_api/metadata/godot-",
+            "crates/godot_api/metadata/godot-",
             workflow,
         )
 
@@ -357,35 +364,35 @@ class StageHostTests(unittest.TestCase):
 
     def test_platform_library_names(self):
         self.assertEqual(
-            stage_host.library_name("darwin"), "libgodot_rs_host.dylib"
+            stage_host.library_name("darwin"), "libgodot_host.dylib"
         )
         self.assertEqual(
-            stage_host.library_name("linux"), "libgodot_rs_host.so"
+            stage_host.library_name("linux"), "libgodot_host.so"
         )
-        self.assertEqual(stage_host.library_name("win32"), "godot_rs_host.dll")
+        self.assertEqual(stage_host.library_name("win32"), "godot_host.dll")
         self.assertEqual(
             stage_example_plugin.host_library_name("darwin"),
-            "libgodot_rs_host.dylib",
+            "libgodot_host.dylib",
         )
         self.assertEqual(
-            stage_example_plugin.executable_name("godot_rs_buildd", "win32"),
-            "godot_rs_buildd.exe",
+            stage_example_plugin.executable_name("godot_build", "win32"),
+            "godot_build.exe",
         )
         self.assertEqual(
-            stage_example_plugin.executable_name("godot_rs_buildd", "linux"),
-            "godot_rs_buildd",
+            stage_example_plugin.executable_name("godot_build", "linux"),
+            "godot_build",
         )
         self.assertEqual(
             stage_project_module.library_name("darwin"),
-            "libgodot_rs_host_smoke_module.dylib",
+            "libgodot_host_smoke_module.dylib",
         )
         self.assertEqual(
             stage_project_module.library_name("linux"),
-            "libgodot_rs_host_smoke_module.so",
+            "libgodot_host_smoke_module.so",
         )
         self.assertEqual(
             stage_project_module.library_name("win32"),
-            "godot_rs_host_smoke_module.dll",
+            "godot_host_smoke_module.dll",
         )
         self.assertEqual(
             plugin_platform.platform_directory("darwin", "arm64"),
@@ -463,12 +470,12 @@ class StageHostTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn(
-            "bin/macos-universal/libgodot_rs_host.dylib",
+            "bin/macos-universal/libgodot_host.dylib",
             descriptor,
         )
         self.assertIn(
             'ios.release = "res://addons/godot-rust/bin/apple/'
-            'godot_rs_host.xcframework"',
+            'godot_host.xcframework"',
             descriptor,
         )
 
@@ -608,7 +615,7 @@ class StageHostTests(unittest.TestCase):
         self.assertIn("assemble-release:\n    name: Assemble release package", workflow)
         self.assertIn("publish-crates:", workflow)
         self.assertIn(
-            "for crate in godot_rs_api godot_rs_macros godot_rs; do",
+            "for crate in godot_api godot_macro godot_rs; do",
             workflow,
         )
         self.assertIn("CARGO_REGISTRY_TOKEN", workflow)
@@ -667,7 +674,7 @@ class StageHostTests(unittest.TestCase):
             "tools/test_native_desktop_export.py",
             "tools/test_platform_export.py",
             "tools/test_native_platform_export.py",
-            "godot_rs_host.xcframework",
+            "godot_host.xcframework",
             'release: "4.5.2"',
             'release: "4.6.3"',
             'release: "4.7.1"',
@@ -1110,7 +1117,7 @@ class StageHostTests(unittest.TestCase):
             self.assertEqual(
                 (
                     addon
-                    / "bin/web-godot-4.4/godot_rs_host.wasm"
+                    / "bin/web-godot-4.4/godot_host.wasm"
                 ).read_bytes(),
                 b"web host",
             )
@@ -1124,7 +1131,7 @@ class StageHostTests(unittest.TestCase):
             self.assertEqual(
                 (
                     addon
-                    / "bin/web-godot-4.7/godot_rs_host.wasm"
+                    / "bin/web-godot-4.7/godot_host.wasm"
                 ).read_bytes(),
                 b"web host",
             )
@@ -1140,7 +1147,7 @@ class StageHostTests(unittest.TestCase):
             self.assertEqual(
                 (
                     addon
-                    / "bin/android-x86_64/libgodot_rs_host.so"
+                    / "bin/android-x86_64/libgodot_host.so"
                 ).read_bytes(),
                 b"android host",
             )
@@ -1148,7 +1155,7 @@ class StageHostTests(unittest.TestCase):
             binaries = root / "binaries"
             write_release_binary_matrix(binaries)
             xcframework = (
-                binaries / "apple" / "godot_rs_host.xcframework"
+                binaries / "apple" / "godot_host.xcframework"
             )
             test_platform_export.stage_target_host(
                 addon,
@@ -1159,7 +1166,7 @@ class StageHostTests(unittest.TestCase):
             self.assertTrue(
                 (
                     addon
-                    / "bin/apple/godot_rs_host.xcframework/Info.plist"
+                    / "bin/apple/godot_host.xcframework/Info.plist"
                 ).is_file()
             )
 
@@ -1308,7 +1315,7 @@ class StageHostTests(unittest.TestCase):
             package = root / "project.apk"
             with zipfile.ZipFile(package, "w") as archive:
                 archive.writestr(
-                    "lib/x86_64/libgodot_rs_host.so",
+                    "lib/x86_64/libgodot_host.so",
                     b"host",
                 )
                 archive.writestr(
@@ -1318,7 +1325,7 @@ class StageHostTests(unittest.TestCase):
             test_platform_export.verify_android_export(package, "x86_64")
             with zipfile.ZipFile(package, "w") as archive:
                 archive.writestr(
-                    "lib/x86_64/libgodot_rs_host.so",
+                    "lib/x86_64/libgodot_host.so",
                     b"host",
                 )
             with self.assertRaisesRegex(RuntimeError, "omitted Rust libraries"):
@@ -1334,12 +1341,12 @@ class StageHostTests(unittest.TestCase):
                 "godothub_project.pck",
                 "godothub_project.side.wasm",
                 "godothub_project.wasm",
-                "godot_rs_host.wasm",
+                "godot_host.wasm",
                 "godot_rs_project_module.wasm",
             ):
                 (web / name).write_bytes(b"payload")
             (web / "godothub_project.html").write_text(
-                "godot_rs_host.wasm godot_rs_project_module.wasm",
+                "godot_host.wasm godot_rs_project_module.wasm",
                 encoding="utf-8",
             )
             test_platform_export.verify_web_export(
@@ -1426,7 +1433,7 @@ class StageHostTests(unittest.TestCase):
                 test_native_platform_export.verify_native_web(web),
                 module.name,
             )
-            (web / "duplicate-godot_rs_native_smoke.wasm").write_bytes(
+            (web / "duplicate-godot_native_smoke.wasm").write_bytes(
                 b"native"
             )
             with self.assertRaisesRegex(RuntimeError, "exactly one"):
@@ -1499,7 +1506,7 @@ class ReleaseTests(unittest.TestCase):
     def test_release_zip_path_policy_has_stable_properties(self):
         accepted = (
             "addons/godot-rust/plugin.cfg",
-            "addons/godot-rust/bin/linux-x86_64/libgodot_rs_host.so",
+            "addons/godot-rust/bin/linux-x86_64/libgodot_host.so",
             "中文/资源.rs",
         )
         rejected = (
@@ -1857,12 +1864,12 @@ class ReleaseTests(unittest.TestCase):
                         )
                 framework_root = (
                     "addons/godot-rust/bin/apple/"
-                    "godot_rs_host.xcframework/ios-arm64/"
-                    "godot_rs_host.framework/"
+                    "godot_host.xcframework/ios-arm64/"
+                    "godot_host.framework/"
                 )
                 self.assertEqual(
                     archive.getinfo(
-                        framework_root + "godot_rs_host"
+                        framework_root + "godot_host"
                     ).external_attr
                     >> 16
                     & 0o777,
@@ -1879,7 +1886,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(
                     archive.getinfo(
                         "addons/godot-rust/bin/macos-universal/"
-                        "libgodot_rs_host.dylib"
+                        "libgodot_host.dylib"
                     ).external_attr
                     >> 16
                     & 0o777,

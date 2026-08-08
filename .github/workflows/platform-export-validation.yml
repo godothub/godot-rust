@@ -111,7 +111,7 @@ jobs:
             echo "${variable}=${linker}" >> "${GITHUB_ENV}"
             cargo build --release --locked \
               --target "${target}" \
-              -p godot_rs_host --lib
+              -p godot_host --lib
           done
       - name: Create isolated Android debug key
         run: |
@@ -133,7 +133,7 @@ jobs:
           --template
           "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
           --host
-          "target/x86_64-linux-android/release/libgodot_rs_host.so"
+          "target/x86_64-linux-android/release/libgodot_host.so"
           --debug-keystore
           "${RUNNER_TEMP}/godot-rust-debug.keystore"
           --android-sdk "${ANDROID_HOME}"
@@ -195,7 +195,7 @@ jobs:
           --template
           "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
           --host
-          "target/x86_64-linux-android/release/libgodot_rs_host.so"
+          "target/x86_64-linux-android/release/libgodot_host.so"
           --debug-keystore
           "${RUNNER_TEMP}/godot-rust-debug.keystore"
           --android-sdk "${ANDROID_HOME}"
@@ -230,7 +230,7 @@ jobs:
               --template
               "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
               --host
-              "target/${target}/release/libgodot_rs_host.so"
+              "target/${target}/release/libgodot_host.so"
               --debug-keystore
               "${RUNNER_TEMP}/godot-rust-debug.keystore"
               --android-sdk "${ANDROID_HOME}"
@@ -353,9 +353,9 @@ jobs:
             -C panic=abort"
           cargo build -Z build-std=std,panic_abort --release --locked \
             --target wasm32-unknown-emscripten \
-            -p godot_rs_host --lib
+            -p godot_host --lib
           if wasm-dis \
-            target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            target/wasm32-unknown-emscripten/release/godot_host.wasm \
             -o - \
             | grep -E '\(import "env" "(invoke_|__cxa|__resumeException)'; then
             echo "Web Host imports an unsupported JavaScript exception bridge"
@@ -369,7 +369,7 @@ jobs:
             --template \
               "${RUNNER_TEMP}/export-templates/templates/web_dlink_nothreads_release.zip" \
             --host \
-              target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+              target/wasm32-unknown-emscripten/release/godot_host.wasm \
             --no-build \
             --run-web \
             --evidence-output "artifacts/web-${{ matrix.api }}"
@@ -381,7 +381,7 @@ jobs:
             --template \
               "${RUNNER_TEMP}/export-templates/templates/web_dlink_nothreads_release.zip" \
             --host \
-              target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+              target/wasm32-unknown-emscripten/release/godot_host.wasm \
             --no-build \
             --run-web \
             --evidence-output "artifacts/native-web-${{ matrix.api }}"
@@ -461,15 +461,15 @@ jobs:
         run: |
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --locked --target "${target}" \
-              -p godot_rs_host --lib
+              -p godot_host --lib
           done
           lipo -create \
-            target/aarch64-apple-darwin/release/libgodot_rs_host.dylib \
-            target/x86_64-apple-darwin/release/libgodot_rs_host.dylib \
+            target/aarch64-apple-darwin/release/libgodot_host.dylib \
+            target/x86_64-apple-darwin/release/libgodot_host.dylib \
             -output \
-              example/addons/godot-rust/bin/macos-universal/libgodot_rs_host.dylib
+              example/addons/godot-rust/bin/macos-universal/libgodot_host.dylib
           lipo \
-            example/addons/godot-rust/bin/macos-universal/libgodot_rs_host.dylib \
+            example/addons/godot-rust/bin/macos-universal/libgodot_host.dylib \
             -verify_arch arm64 x86_64
       - name: Export and run a complete macOS application
         run: >-
@@ -491,23 +491,23 @@ jobs:
             x86_64-apple-ios
           do
             cargo build --release --locked --target "${target}" \
-              -p godot_rs_host --lib
+              -p godot_host --lib
           done
           mkdir -p artifacts/apple-input
           lipo -create \
-            target/aarch64-apple-ios-sim/release/libgodot_rs_host.dylib \
-            target/x86_64-apple-ios/release/libgodot_rs_host.dylib \
+            target/aarch64-apple-ios-sim/release/libgodot_host.dylib \
+            target/x86_64-apple-ios/release/libgodot_host.dylib \
             -output artifacts/apple-input/ios-simulator-host.dylib
       - name: Create iOS Script Host XCFramework
         run: >-
           python3 tools/create_apple_xcframework.py
           --ios-device
-          target/aarch64-apple-ios/release/libgodot_rs_host.dylib
+          target/aarch64-apple-ios/release/libgodot_host.dylib
           --ios-simulator
           artifacts/apple-input/ios-simulator-host.dylib
           --version
           "$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
-          --output artifacts/godot_rs_host.xcframework
+          --output artifacts/godot_host.xcframework
       - name: Export iOS Xcode project with Rust frameworks
         run: >-
           python3 tools/test_platform_export.py
@@ -515,7 +515,7 @@ jobs:
           --platform iOS
           --architecture arm64
           --template "${RUNNER_TEMP}/export-templates/templates/ios.zip"
-          --host artifacts/godot_rs_host.xcframework
+          --host artifacts/godot_host.xcframework
           --no-build
           --build-ios
           --run-ios
@@ -527,7 +527,7 @@ jobs:
           --platform iOS
           --architecture arm64
           --template "${RUNNER_TEMP}/export-templates/templates/ios.zip"
-          --host artifacts/godot_rs_host.xcframework
+          --host artifacts/godot_host.xcframework
           --no-build
           --build-ios
           --run-ios

@@ -1,5 +1,5 @@
 [package]
-name = "godot_rs_native_smoke"
+name = "godot_native_smoke"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

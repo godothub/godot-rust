@@ -4,7 +4,7 @@ use core::cell::OnceCell;
 use core::fmt;
 use std::rc::Rc;
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_CALLABLE_MAGIC, ABI_CALLABLE_OWNED, ABI_CALLABLE_VERSION, callable_value_ownership_token,
     validate_callable_value,
 };

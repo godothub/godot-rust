@@ -11,7 +11,7 @@ from plugin_platform import platform_directory
 
 LOCAL_HOST = Path(
     platform_directory("darwin", "universal")
-) / "libgodot_rs_host.dylib"
+) / "libgodot_host.dylib"
 
 
 def stage_macos_host(binary: Path, addon_bin: Path) -> Path:

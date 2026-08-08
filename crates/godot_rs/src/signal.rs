@@ -4,7 +4,7 @@ use alloc::{boxed::Box, string::String};
 use core::cell::OnceCell;
 use core::marker::PhantomData;
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_SIGNAL_MAGIC, ABI_SIGNAL_VERSION, AbiStatus, AbiValueType, AbiValueV1,
     validate_signal_value,
 };
@@ -478,7 +478,7 @@ macro_rules! fixed_math_signal_value {
                     unreachable!("fixed-size math signal backing was installed")
                 };
                 AbiValueV1::from_borrowed_f32_components(
-                    godot_rs_api::abi::AbiValueType::$abi_type,
+                    godot_api::abi::AbiValueType::$abi_type,
                     components,
                 )
             }
@@ -685,14 +685,8 @@ mod tests {
         let name = StringName::from("玩家");
         let count = (name.clone(), &name).encode(&mut output, &mut backing);
         assert_eq!(count, 2);
-        assert_eq!(
-            output[0].type_,
-            godot_rs_api::abi::AbiValueType::STRING_NAME
-        );
-        assert_eq!(
-            output[1].type_,
-            godot_rs_api::abi::AbiValueType::STRING_NAME
-        );
+        assert_eq!(output[0].type_, godot_api::abi::AbiValueType::STRING_NAME);
+        assert_eq!(output[1].type_, godot_api::abi::AbiValueType::STRING_NAME);
         assert_eq!(abi_text(output[0]), "玩家");
         assert_eq!(abi_text(output[1]), "玩家");
     }
@@ -756,7 +750,7 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(
             output[0].type_,
-            godot_rs_api::abi::AbiValueType::PACKED_STRING_ARRAY
+            godot_api::abi::AbiValueType::PACKED_STRING_ARRAY
         );
         assert_eq!(output[0].reserved_flags, 0);
         assert!(matches!(
@@ -764,7 +758,7 @@ mod tests {
             Some(SignalBacking::Packed(bytes)) if bytes.as_ref() == expected
         ));
         let (pointer, length) = output[0]
-            .byte_range(godot_rs_api::abi::AbiValueType::PACKED_STRING_ARRAY)
+            .byte_range(godot_api::abi::AbiValueType::PACKED_STRING_ARRAY)
             .expect("packed signal bytes");
         // SAFETY: The call-scoped backing is still retained above.
         let actual = unsafe { core::slice::from_raw_parts(pointer, length) };

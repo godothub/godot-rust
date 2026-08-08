@@ -36,6 +36,6 @@ jobs:
       - name: Run Workspace tests
         run: cargo test --workspace --locked
       - name: Build Host dynamic library
-        run: cargo build --locked -p godot_rs_host
+        run: cargo build --locked -p godot_host
       - name: Assemble the Host test project
         run: python tools/stage_host.py

@@ -157,7 +157,7 @@ def resolve_publication(
             "--quiet",
             "--locked",
             "-p",
-            "godot_rs_buildd",
+            "godot_build",
             "--",
             "--request",
             request,

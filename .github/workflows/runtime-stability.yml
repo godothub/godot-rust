@@ -6,9 +6,9 @@ on:
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
-      - "crates/godot_rs_buildd/**"
-      - "crates/godot_rs_codegen/**"
-      - "crates/godot_rs_host/**"
+      - "crates/godot_build/**"
+      - "crates/godot_codegen/**"
+      - "crates/godot_host/**"
       - "fuzz/**"
       - "tools/assemble_release.py"
       - "tools/verify_release_package.py"
@@ -71,9 +71,9 @@ jobs:
         run: >-
           cargo +"${RUST_NIGHTLY_TOOLCHAIN}" test -Z build-std --locked
           --target x86_64-unknown-linux-gnu
-          -p godot_rs_api
-          -p godot_rs_buildd
-          -p godot_rs_host
+          -p godot_api
+          -p godot_build
+          -p godot_host
           --lib
       - name: Run LeakSanitizer tests
         env:
@@ -82,9 +82,9 @@ jobs:
         run: >-
           cargo +"${RUST_NIGHTLY_TOOLCHAIN}" test -Z build-std --locked
           --target x86_64-unknown-linux-gnu
-          -p godot_rs_api
-          -p godot_rs_buildd
-          -p godot_rs_host
+          -p godot_api
+          -p godot_build
+          -p godot_host
           --lib
 
   concurrency-sanitizer:
@@ -105,8 +105,8 @@ jobs:
         run: >-
           cargo +"${RUST_NIGHTLY_TOOLCHAIN}" test -Z build-std --locked
           --target x86_64-unknown-linux-gnu
-          -p godot_rs_buildd
-          -p godot_rs_host
+          -p godot_build
+          -p godot_host
           --lib
 
   valgrind:
@@ -130,8 +130,8 @@ jobs:
         run: >-
           cargo test --locked
           --target x86_64-unknown-linux-gnu
-          -p godot_rs_api
-          -p godot_rs_host
+          -p godot_api
+          -p godot_host
           --lib
 
   undefined-behavior:
@@ -149,7 +149,7 @@ jobs:
           MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
         run: >-
           cargo +"${RUST_NIGHTLY_TOOLCHAIN}" miri test
-          --locked -p godot_rs_api
+          --locked -p godot_api
 
   generation-stress:
     name: 10,000 generation and fault cycles
@@ -162,6 +162,6 @@ jobs:
           rustup default 1.85.0
       - name: Run long stability tests
         run: >-
-          cargo test --locked -p godot_rs_host --lib
+          cargo test --locked -p godot_host --lib
           -- --ignored --exact
           last_known_good::tests::ten_thousand_generation_records_remain_fail_closed

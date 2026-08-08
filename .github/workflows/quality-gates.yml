@@ -39,7 +39,7 @@ jobs:
         run: |
           for api in 4.4 4.5 4.6 4.7; do
             GODOT_RS_GODOT="${api}" cargo test --locked \
-              -p godot_rs_api -p godot_rs --lib
+              -p godot_api -p godot_rs --lib
           done
       - name: Generated engine API performance
         run: |
@@ -54,12 +54,12 @@ jobs:
       - name: Official Godot API provenance
         run: |
           python3 tools/verify_official_api.py
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             verify-targets godot-api.toml
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             verify-bundles \
-            godot-api.toml crates/godot_rs_api/generated
-          cargo test --locked -p godot_rs_api \
+            godot-api.toml crates/godot_api/generated
+          cargo test --locked -p godot_api \
             --features generator every_bundled_api_is_authenticated_and_complete
       - name: Verify publishable API package
-        run: cargo package --locked -p godot_rs_api
+        run: cargo package --locked -p godot_api

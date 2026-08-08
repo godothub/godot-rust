@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 
-FRAMEWORK_NAME = "godot_rs_host"
+FRAMEWORK_NAME = "godot_host"
 BUNDLE_IDENTIFIER = "io.godothub.godot-rust.host"
 EXPECTED_LIBRARIES = {
     "ios-arm64": {

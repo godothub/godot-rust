@@ -128,17 +128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "godot_rs"
-version = "0.9.0"
-dependencies = [
- "godot_rs_api",
- "godot_rs_macros",
- "inventory",
- "trybuild",
-]
-
-[[package]]
-name = "godot_rs_api"
+name = "godot_api"
 version = "0.9.0"
 dependencies = [
  "serde",
@@ -147,19 +137,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_api_policy"
+name = "godot_build"
 version = "0.9.0"
 dependencies = [
- "serde",
- "sha2",
- "toml",
-]
-
-[[package]]
-name = "godot_rs_buildd"
-version = "0.9.0"
-dependencies = [
- "godot_rs_api_policy",
+ "godot_api",
  "object",
  "serde",
  "serde_json",
@@ -170,22 +151,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_codegen"
+name = "godot_codegen"
 version = "0.9.0"
 dependencies = [
  "bindgen",
- "godot_rs_api",
- "godot_rs_api_policy",
+ "godot_api",
  "serde",
  "serde_json",
  "sha2",
+ "toml",
 ]
 
 [[package]]
-name = "godot_rs_host"
+name = "godot_host"
 version = "0.9.0"
 dependencies = [
- "godot_rs_api",
+ "godot_api",
  "libloading",
  "proc-macro2",
  "serde",
@@ -195,14 +176,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_host_smoke_module"
+name = "godot_host_smoke_module"
 version = "0.9.0"
 dependencies = [
  "godot_rs",
 ]
 
 [[package]]
-name = "godot_rs_macros"
+name = "godot_macro"
 version = "0.9.0"
 dependencies = [
  "proc-macro2",
@@ -211,10 +192,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_native_smoke"
+name = "godot_native_smoke"
 version = "0.9.0"
 dependencies = [
  "godot_rs",
+]
+
+[[package]]
+name = "godot_rs"
+version = "0.9.0"
+dependencies = [
+ "godot_api",
+ "godot_macro",
+ "inventory",
+ "trybuild",
 ]
 
 [[package]]

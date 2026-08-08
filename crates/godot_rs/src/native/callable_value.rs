@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     AbiValueType, AbiValueV1, callable_value_ownership_token, validate_callable_value,
 };
 
@@ -269,7 +269,7 @@ impl NativeCallable {
             .ok_or_else(|| EngineError::unavailable("Native Callable.get_method is unavailable"))?;
         let mut method = super::engine_call::NativeTextValue::empty(
             self.interface,
-            godot_rs_api::abi::AbiPtrcallType::STRING_NAME,
+            godot_api::abi::AbiPtrcallType::STRING_NAME,
         )?;
         // SAFETY: Method takes no arguments and writes one StringName.
         unsafe {

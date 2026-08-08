@@ -1,5 +1,5 @@
 use core::fmt;
-use godot_rs_api::abi::{AbiByteSlice, AbiCallResult, AbiStatus};
+use godot_api::abi::{AbiByteSlice, AbiCallResult, AbiStatus};
 
 /// Error returned by a fallible Godot script callback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

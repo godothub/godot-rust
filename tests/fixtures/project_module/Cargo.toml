@@ -1,5 +1,5 @@
 [package]
-name = "godot_rs_host_smoke_module"
+name = "godot_host_smoke_module"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

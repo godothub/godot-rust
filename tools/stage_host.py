@@ -25,15 +25,15 @@ FIXTURE_BIN = (
 def library_name(platform: str) -> str:
     """Return Cargo's native cdylib filename for the current platform."""
     if platform == "darwin":
-        return "libgodot_rs_host.dylib"
+        return "libgodot_host.dylib"
     if platform.startswith("win"):
-        return "godot_rs_host.dll"
-    return "libgodot_rs_host.so"
+        return "godot_host.dll"
+    return "libgodot_host.so"
 
 
 def build_host(release: bool) -> Path:
     """Build and return the exact Host library produced by Cargo."""
-    command = ["cargo", "build", "--locked", "-p", "godot_rs_host"]
+    command = ["cargo", "build", "--locked", "-p", "godot_host"]
     profile = "debug"
     if release:
         command.append("--release")

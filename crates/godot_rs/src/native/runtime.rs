@@ -389,7 +389,7 @@ impl Interface {
 
         let classdb_register_extension_class = {
             // SAFETY: The selected symbol and normalized function signature are
-            // emitted together by godot_rs_api from one official ABI generation.
+            // emitted together by godot_api from one official ABI generation.
             let raw = unsafe {
                 get_proc_address(
                     sys::CLASSDB_REGISTER_EXTENSION_CLASS_SYMBOL
@@ -403,7 +403,7 @@ impl Interface {
                 )));
             }
             // SAFETY: The symbol suffix and selected creation-info pointer type
-            // are normalized together in godot_rs_api.
+            // are normalized together in godot_api.
             unsafe {
                 core::mem::transmute::<
                     sys::GDExtensionInterfaceFunctionPtr,

@@ -36,7 +36,7 @@ macro_rules! engine_classes {
     };
 }
 
-godot_rs_api::godot_rs_for_each_engine_class!(engine_classes);
+godot_api::godot_rs_for_each_engine_class!(engine_classes);
 
 /// Typed access to the Godot object that owns one Rust Native class instance.
 ///

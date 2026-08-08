@@ -401,13 +401,13 @@ func _failure_module_path(platform_name: String) -> String:
 
 func _web_host_path(godot_api: String) -> String:
 	return (
-		"res://addons/godot-rust/bin/web-godot-%s/godot_rs_host.wasm"
+		"res://addons/godot-rust/bin/web-godot-%s/godot_host.wasm"
 		% godot_api
 	)
 
 
 func _staged_web_host_path() -> String:
-	return "res://.godot/rust/web-host/godot_rs_host.wasm"
+	return "res://.godot/rust/web-host/godot_host.wasm"
 
 
 func _stage_web_host(godot_api: String) -> String:

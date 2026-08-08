@@ -27,17 +27,17 @@ pub use method::{MethodRegistration, NativeMethod, NativeVirtualContract, Native
 pub use value::GodotValue;
 
 pub(crate) use callable_value::{NativeCallableToken, retain_rust_callable};
-pub(crate) use godot_rs_api::api_snapshot;
-pub use godot_rs_api::native as sys;
+pub(crate) use godot_api::api_snapshot;
+pub use godot_api::native as sys;
 
 #[doc(hidden)]
 pub use engine_call::NativeEngineValue;
 pub(crate) use engine_call::{NativeGodotRefToken, invoke_engine_method, invoke_godot_api};
 
 /// Godot Major/Minor selected by the plugin for this Native build.
-pub const GODOT_API: &str = godot_rs_api::NATIVE_GODOT_API;
+pub const GODOT_API: &str = godot_api::NATIVE_GODOT_API;
 /// Entry symbol written into generated `.gdextension` descriptors.
-pub const ENTRY_SYMBOL: &str = godot_rs_api::NATIVE_ENTRY_SYMBOL;
+pub const ENTRY_SYMBOL: &str = godot_api::NATIVE_ENTRY_SYMBOL;
 
 const GDEXTENSION_FALSE: sys::GDExtensionBool = 0;
 const GDEXTENSION_TRUE: sys::GDExtensionBool = 1;

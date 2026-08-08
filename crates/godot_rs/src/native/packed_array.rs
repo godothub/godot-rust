@@ -1,7 +1,7 @@
 use core::mem;
 use core::ptr;
 
-use godot_rs_api::abi::{AbiPtrcallType, AbiValueType, AbiValueV1};
+use godot_api::abi::{AbiPtrcallType, AbiValueType, AbiValueV1};
 
 use super::runtime::Interface;
 use super::sys;

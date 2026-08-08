@@ -19,19 +19,19 @@ pub mod string_name;
 pub mod task;
 pub mod variant;
 
-pub use godot_rs_macros::script;
+pub use godot_macro::script;
 #[doc(hidden)]
 pub use inventory;
 
 /// SDK version compiled into the project module.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Minimum Godot Major/Minor API selected for this project build.
-pub const GODOT_API: &str = godot_rs_api::SELECTED_GODOT_API;
+pub const GODOT_API: &str = godot_api::SELECTED_GODOT_API;
 
 /// Host ABI used by generated Script Mode modules.
 #[doc(hidden)]
 pub mod abi {
-    pub use godot_rs_api::abi::*;
+    pub use godot_api::abi::*;
 }
 
 /// Imports used by ordinary Rust scripts.

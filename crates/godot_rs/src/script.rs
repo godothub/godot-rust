@@ -24,7 +24,7 @@ use crate::rid::Rid;
 use crate::signal::Signal;
 use crate::string_name::StringName;
 use crate::variant::{Array, Dictionary, Variant, VariantConvert};
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_FIELD_EXTENSION_GODOT_INTEGER_SCHEMA, ABI_FIELD_EXTENSION_NODE_SCHEMA,
     ABI_FIELD_EXTENSION_PROPERTY_SCHEMA, ABI_FIELD_EXTENSION_SIGNAL_SCHEMA,
     ABI_METHOD_EXTENSION_SCHEMA_V1, ABI_METHOD_SCHEMA_VARARG, ABI_SCRIPT_EXTENSION_FIELD_ACCESS,
@@ -282,7 +282,7 @@ impl<T: ScriptClass> ScriptSuper for T {}
 fn borrow_module_output(mut value: AbiValueV1) -> AbiValueV1 {
     if matches!(
         value.reserved_flags,
-        godot_rs_api::abi::ABI_VALUE_OWNED_UTF8 | godot_rs_api::abi::ABI_VALUE_OWNED_BYTES
+        godot_api::abi::ABI_VALUE_OWNED_UTF8 | godot_api::abi::ABI_VALUE_OWNED_BYTES
     ) {
         value.reserved_flags = 0;
     }
@@ -316,7 +316,7 @@ impl SuperArgumentBuffer {
         let mut borrowed = encoded;
         if matches!(
             encoded.reserved_flags,
-            godot_rs_api::abi::ABI_VALUE_OWNED_UTF8 | godot_rs_api::abi::ABI_VALUE_OWNED_BYTES
+            godot_api::abi::ABI_VALUE_OWNED_UTF8 | godot_api::abi::ABI_VALUE_OWNED_BYTES
         ) {
             borrowed.reserved_flags = 0;
             self.owned.push(encoded);
@@ -1402,7 +1402,7 @@ fn copy_dynamic_value(
     // SAFETY: Reflected method arguments synchronously borrow this range from
     // Host-owned call backing.
     let bytes = unsafe { core::slice::from_raw_parts(pointer, length) }.to_vec();
-    let ownership = match godot_rs_api::abi::dynamic_value_ownership_token(&bytes) {
+    let ownership = match godot_api::abi::dynamic_value_ownership_token(&bytes) {
         Some(token) => crate::module::retain_dynamic_value(expected, token).ok()?,
         None => None,
     };
@@ -1523,7 +1523,7 @@ impl FromAbiValue for Callable {
         // SAFETY: Reflected method arguments synchronously borrow this range
         // from Host-owned call backing.
         let bytes = unsafe { core::slice::from_raw_parts(pointer, length) }.to_vec();
-        let ownership = match godot_rs_api::abi::callable_value_ownership_token(&bytes) {
+        let ownership = match godot_api::abi::callable_value_ownership_token(&bytes) {
             Some(token) => crate::module::retain_callable_value(token).ok()?,
             None => None,
         };
@@ -1537,7 +1537,7 @@ impl IntoMethodResult for Callable {
             Ok(bytes) => bytes.to_vec(),
             Err(error) => return AbiCallResult::callback_failed(error.message()),
         };
-        if let Some(token) = godot_rs_api::abi::callable_value_ownership_token(&bytes) {
+        if let Some(token) = godot_api::abi::callable_value_ownership_token(&bytes) {
             if let Err(error) = crate::module::retain_callable_for_transfer(token) {
                 return AbiCallResult::callback_failed(engine_error_callback_message(error.kind()));
             }
@@ -1906,7 +1906,7 @@ pub unsafe extern "C" fn abi_get_field<T: ScriptClass>(
             ABI_FIELD_EXTENSION_GODOT_INTEGER_SCHEMA,
             property.group.unwrap_or_default(),
             [
-                usize::from(property.hint == godot_rs_api::abi::ABI_PROPERTY_HINT_ENUM),
+                usize::from(property.hint == godot_api::abi::ABI_PROPERTY_HINT_ENUM),
                 options.as_ptr() as usize,
                 options.len(),
                 default as *const () as usize,
@@ -1963,7 +1963,7 @@ pub unsafe extern "C" fn abi_get_field<T: ScriptClass>(
         )
     } else if let Some(value_type) = field.reload_value_type {
         (
-            godot_rs_api::abi::ABI_FIELD_EXTENSION_RELOAD_SCHEMA,
+            godot_api::abi::ABI_FIELD_EXTENSION_RELOAD_SCHEMA,
             field.options,
             [value_type.0 as usize, 0, 0, 0],
         )
@@ -2197,14 +2197,14 @@ pub fn abi_script_descriptor<T: ScriptMethods>(
     let uid_words = uid_words.unwrap_or([0; 2]);
     let (global_flag, global_name) = match T::DESCRIPTOR.global_name {
         Some(name) => (
-            godot_rs_api::abi::ABI_SCRIPT_EXTENSION_GLOBAL_CLASS,
+            godot_api::abi::ABI_SCRIPT_EXTENSION_GLOBAL_CLASS,
             (name.as_ptr() as usize, name.len()),
         ),
         None => (0, (0, 0)),
     };
     let (base_script_flag, base_script) = match T::DESCRIPTOR.base_script {
         Some(path) => (
-            godot_rs_api::abi::ABI_SCRIPT_EXTENSION_BASE_SCRIPT,
+            godot_api::abi::ABI_SCRIPT_EXTENSION_BASE_SCRIPT,
             (path.as_ptr() as usize, path.len()),
         ),
         None => (0, (0, 0)),

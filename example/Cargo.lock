@@ -60,13 +60,13 @@ dependencies = [
 name = "godot_rs"
 version = "0.9.0"
 dependencies = [
- "godot_rs_api",
- "godot_rs_macros",
+ "godot_api",
+ "godot_macro",
  "inventory",
 ]
 
 [[package]]
-name = "godot_rs_api"
+name = "godot_api"
 version = "0.9.0"
 dependencies = [
  "serde",
@@ -75,7 +75,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_macros"
+name = "godot_macro"
 version = "0.9.0"
 dependencies = [
  "proc-macro2",

@@ -39,7 +39,7 @@ def render_manifest(api: str, godot_rs_path: Path) -> str:
 [workspace]
 
 [package]
-name = "godot_rs_native_smoke"
+name = "godot_native_smoke"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -91,7 +91,7 @@ def build_native_fixture(directory: Path, api: str) -> dict[str, object]:
             "--quiet",
             "--locked",
             "-p",
-            "godot_rs_buildd",
+            "godot_build",
             "--",
             "--request",
             request,

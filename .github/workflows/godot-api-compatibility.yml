@@ -5,12 +5,11 @@ on:
     paths:
       - "godot-api.toml"
       - "crates/godot_rs/**"
-      - "crates/godot_rs_api_policy/**"
-      - "crates/godot_rs_buildd/**"
-      - "crates/godot_rs_codegen/**"
-      - "crates/godot_rs_host/**"
-      - "crates/godot_rs_macros/**"
-      - "crates/godot_rs_api/**"
+      - "crates/godot_build/**"
+      - "crates/godot_codegen/**"
+      - "crates/godot_host/**"
+      - "crates/godot_macro/**"
+      - "crates/godot_api/**"
       - "example/addons/godot-rust/**"
       - "tests/fixtures/editor_flow/**"
       - "tests/fixtures/editor_diagnostics/**"
@@ -129,46 +128,46 @@ jobs:
             )
           fi
           python3 tools/verify_official_api.py "${verifier_args[@]}"
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             validate \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/extension_api.json
       - name: Prove deterministic Rust binding generation
         run: |
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-snapshot \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/extension_api.json \
             /tmp/api-snapshot-a.rs
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-snapshot \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/extension_api.json \
             /tmp/api-snapshot-b.rs
           cmp /tmp/api-snapshot-a.rs /tmp/api-snapshot-b.rs
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-sys \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/gdextension_interface.h \
             /tmp/raw-ffi-a.rs
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-sys \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/gdextension_interface.h \
             /tmp/raw-ffi-b.rs
           cmp /tmp/raw-ffi-a.rs /tmp/raw-ffi-b.rs
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-engine-api \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/extension_api.json \
             /tmp/engine-api-a.rs
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-engine-api \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
@@ -185,13 +184,13 @@ jobs:
               /tmp/godot-api/gdextension_interface.json
             )
           fi
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-bundle \
             "${bundle_args[@]}" \
             /tmp/godot-api/gdextension_interface.h \
             /tmp/godot-api/extension_api.json \
             "/tmp/bundle-a/godot-${{ matrix.api }}"
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             generate-bundle \
             "${bundle_args[@]}" \
             /tmp/godot-api/gdextension_interface.h \
@@ -200,29 +199,29 @@ jobs:
           diff --recursive \
             "/tmp/bundle-a/godot-${{ matrix.api }}" \
             "/tmp/bundle-b/godot-${{ matrix.api }}"
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             check-bundle \
             "${bundle_args[@]}" \
             /tmp/godot-api/gdextension_interface.h \
             /tmp/godot-api/extension_api.json \
-            "crates/godot_rs_api/generated/godot-${{ matrix.api }}"
+            "crates/godot_api/generated/godot-${{ matrix.api }}"
       - name: Check the versioned Raw and Script API bindings
         run: |
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             check-snapshot \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/extension_api.json \
-            "crates/godot_rs_api/generated/godot-${{ matrix.api }}/api_snapshot.rs"
-          cargo run --locked -p godot_rs_codegen -- \
+            "crates/godot_api/generated/godot-${{ matrix.api }}/api_snapshot.rs"
+          cargo run --locked -p godot_codegen -- \
             check-sys \
             --godot "${{ matrix.api }}" \
             --source "${SOURCE_MANIFEST}" \
             /tmp/godot-api/gdextension_interface.h \
-            "crates/godot_rs_api/generated/godot-${{ matrix.api }}/raw.rs"
+            "crates/godot_api/generated/godot-${{ matrix.api }}/raw.rs"
           cmp \
             /tmp/godot-api/extension_api.json \
-            "crates/godot_rs_api/metadata/godot-${{ matrix.api }}/extension_api.json"
+            "crates/godot_api/metadata/godot-${{ matrix.api }}/extension_api.json"
           GODOT_RS_GODOT="${{ matrix.api }}" \
             cargo test --locked -p godot_rs --lib
       - name: Build and load the 4.4-compatible Script Host

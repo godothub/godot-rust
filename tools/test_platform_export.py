@@ -278,7 +278,7 @@ def stage_target_host(
         if godot_api not in ("4.4", "4.5", "4.6", "4.7"):
             raise ValueError(f"unsupported Web Godot API: {godot_api}")
         destination = (
-            addon / f"bin/web-godot-{godot_api}/godot_rs_host.wasm"
+            addon / f"bin/web-godot-{godot_api}/godot_host.wasm"
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -288,7 +288,7 @@ def stage_target_host(
             raise ValueError(f"Android Host is not a file: {source}")
         destination = (
             addon
-            / f"bin/android-{architecture}/libgodot_rs_host.so"
+            / f"bin/android-{architecture}/libgodot_host.so"
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
@@ -296,12 +296,12 @@ def stage_target_host(
     if platform_name == "iOS":
         if (
             not source.is_dir()
-            or source.name != "godot_rs_host.xcframework"
+            or source.name != "godot_host.xcframework"
             or not (source / "Info.plist").is_file()
         ):
             raise ValueError(f"iOS Host is not the expected XCFramework: {source}")
         validate_xcframework(source)
-        destination = addon / "bin/apple/godot_rs_host.xcframework"
+        destination = addon / "bin/apple/godot_host.xcframework"
         if destination.exists() or destination.is_symlink():
             if destination.is_symlink() or not destination.is_dir():
                 raise ValueError(
@@ -576,7 +576,7 @@ def verify_web_export(output_directory: Path, output_name: str) -> None:
         f"{base}.pck",
         f"{base}.side.wasm",
         f"{base}.wasm",
-        "godot_rs_host.wasm",
+        "godot_host.wasm",
         "godot_rs_project_module.wasm",
     }
     actual = {
@@ -588,7 +588,7 @@ def verify_web_export(output_directory: Path, output_name: str) -> None:
     if missing:
         raise RuntimeError(f"Web export omitted runtime files: {missing}")
     html = (output_directory / output_name).read_text(encoding="utf-8")
-    for library in ("godot_rs_host.wasm", "godot_rs_project_module.wasm"):
+    for library in ("godot_host.wasm", "godot_rs_project_module.wasm"):
         if library not in html:
             raise RuntimeError(f"Web bootstrap omitted {library}")
 
@@ -606,7 +606,7 @@ def verify_android_export(
     if abi is None:
         raise ValueError(f"unsupported Android test architecture: {architecture}")
     required = {
-        f"lib/{abi}/libgodot_rs_host.so",
+        f"lib/{abi}/libgodot_host.so",
         f"lib/{abi}/libgodot_rs_project_module.so",
     }
     with zipfile.ZipFile(package) as archive:
@@ -627,7 +627,7 @@ def verify_ios_export(
     application = output_directory / "godothub_project"
     if not project.is_file() or not application.is_dir():
         raise RuntimeError("iOS export omitted its Xcode project")
-    host_frameworks = list(application.rglob("godot_rs_host.xcframework"))
+    host_frameworks = list(application.rglob("godot_host.xcframework"))
     expected_host_count = 1 if require_script_host else 0
     if len(host_frameworks) != expected_host_count:
         if not require_script_host:
@@ -648,7 +648,7 @@ def verify_ios_export(
     project_text = project.read_text(encoding="utf-8")
     libraries = ["godot_rs_project_module.xcframework"]
     if require_script_host:
-        libraries.append("godot_rs_host.xcframework")
+        libraries.append("godot_host.xcframework")
     for library in libraries:
         if library not in project_text:
             raise RuntimeError(f"iOS Xcode project does not link {library}")
@@ -834,7 +834,7 @@ def build_ios_xcode_targets(
             required_binaries = [executable]
             if require_script_host:
                 required_binaries.append(
-                    frameworks / "godot_rs_host.framework/godot_rs_host"
+                    frameworks / "godot_host.framework/godot_host"
                 )
             required_binaries.append(
                 frameworks

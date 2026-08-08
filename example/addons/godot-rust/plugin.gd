@@ -274,7 +274,7 @@ func _build_project() -> void:
 			"id": 3,
 			"root": _project_root(),
 			"kind": "build",
-			"validator": _tool_path("godot_rs_module_check"),
+			"validator": _tool_path("godot_module_check"),
 		}
 	)
 
@@ -329,7 +329,7 @@ func _build() -> bool:
 			"command": "build_receipt",
 			"id": 8,
 			"root": _project_root(),
-			"validator": _tool_path("godot_rs_module_check"),
+			"validator": _tool_path("godot_module_check"),
 		}
 	):
 		return false
@@ -373,7 +373,7 @@ func _build() -> bool:
 			"id": 7,
 			"root": _project_root(),
 			"kind": "build",
-			"validator": _tool_path("godot_rs_module_check"),
+			"validator": _tool_path("godot_module_check"),
 		}
 	):
 		return false
@@ -437,7 +437,7 @@ func prepare_rust_export(
 			"is_debug": is_debug,
 			"runtime_godot": _runtime_godot_api(),
 			"android_sdk": _android_sdk_path(platform),
-			"validator": _tool_path("godot_rs_module_check"),
+			"validator": _tool_path("godot_module_check"),
 		}
 	):
 		return _rust_export_failure(
@@ -774,7 +774,7 @@ func _start_pending_idle_build() -> void:
 			"id": 12,
 			"root": _project_root(),
 			"kind": "build",
-			"validator": _tool_path("godot_rs_module_check"),
+			"validator": _tool_path("godot_module_check"),
 		}
 	):
 		return
@@ -897,7 +897,7 @@ func _run_request(action: String, request: Dictionary) -> bool:
 	if _build_process.is_running():
 		push_warning("godot-rust is already running %s." % _active_action)
 		return false
-	var build_daemon := _tool_path("godot_rs_buildd")
+	var build_daemon := _tool_path("godot_build")
 	if not FileAccess.file_exists(build_daemon):
 		var message := (
 			"Tool is missing: %s. Install a complete release package or run "
@@ -1009,7 +1009,7 @@ func _create_support_bundle() -> void:
 		return
 	if (
 		_safe_mode_enabled
-		or not FileAccess.file_exists(_tool_path("godot_rs_buildd"))
+		or not FileAccess.file_exists(_tool_path("godot_build"))
 	):
 		_write_support_bundle({})
 		return

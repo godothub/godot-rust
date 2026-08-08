@@ -1,6 +1,6 @@
 #![no_main]
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     AbiValueType, callable_value_ownership_token, dynamic_value_ownership_token,
     validate_callable_value, validate_dynamic_value, validate_signal_value,
     visit_dynamic_callable_tokens,

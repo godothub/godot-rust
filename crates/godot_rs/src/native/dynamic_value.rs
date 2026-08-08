@@ -1,6 +1,6 @@
 use core::ptr;
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_DYNAMIC_MAX_ELEMENTS, ABI_GODOT_VALUE_TYPED_ARRAY, AbiGodotValueSpecV1, AbiPtrcallType,
     AbiValueType, AbiValueV1, validate_dynamic_value,
 };

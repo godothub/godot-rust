@@ -3,7 +3,7 @@ use core::fmt::{self, Write};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_MODULE_EXTENSION_GODOT_API, ABI_MODULE_EXTENSION_OWNED_VALUES, ABI_MODULE_EXTENSION_TASKS,
     ABI_VALUE_OWNED_BYTES, ABI_VALUE_OWNED_CALLABLE, ABI_VALUE_OWNED_DYNAMIC_GROUP,
     ABI_VALUE_OWNED_OBJECT_REF, ABI_VALUE_OWNED_UTF8, AbiByteSlice, AbiCallGodotApiFn,
@@ -59,8 +59,8 @@ pub unsafe fn initialize(
 
     let mut reserved = [0; 13];
     reserved[MODULE_API_SLOT_DROP_VALUE] = drop_owned_value as *const () as usize;
-    reserved[MODULE_API_SLOT_GODOT_API_MAJOR] = godot_rs_api::SELECTED_GODOT_API_MAJOR as usize;
-    reserved[MODULE_API_SLOT_GODOT_API_MINOR] = godot_rs_api::SELECTED_GODOT_API_MINOR as usize;
+    reserved[MODULE_API_SLOT_GODOT_API_MAJOR] = godot_api::SELECTED_GODOT_API_MAJOR as usize;
+    reserved[MODULE_API_SLOT_GODOT_API_MINOR] = godot_api::SELECTED_GODOT_API_MINOR as usize;
     reserved[MODULE_API_SLOT_POLL_TASKS] = poll_tasks as *const () as usize;
     reserved[MODULE_API_SLOT_CANCEL_TASKS] = cancel_tasks as *const () as usize;
     let module = ModuleApiV1 {
@@ -214,13 +214,13 @@ pub unsafe extern "C" fn drop_owned_value(value: AbiValueV1) -> AbiStatus {
         true
     };
     if value.type_ == AbiValueType::CALLABLE {
-        if let Some(token) = godot_rs_api::abi::callable_value_ownership_token(bytes) {
+        if let Some(token) = godot_api::abi::callable_value_ownership_token(bytes) {
             let _ = release_callable(token);
         }
     } else if matches!(
         value.type_,
         AbiValueType::VARIANT | AbiValueType::ARRAY | AbiValueType::DICTIONARY
-    ) && !godot_rs_api::abi::visit_dynamic_callable_tokens(bytes, &mut release_callable)
+    ) && !godot_api::abi::visit_dynamic_callable_tokens(bytes, &mut release_callable)
         && release_status == AbiStatus::Ok
     {
         release_status = AbiStatus::InvalidArgument;
@@ -810,21 +810,19 @@ pub(crate) fn retain_callable_for_transfer(token: u64) -> EngineResult<()> {
 pub(crate) fn retain_dynamic_callables_for_transfer(bytes: &[u8]) -> EngineResult<()> {
     let mut retained = Vec::new();
     let mut error = None;
-    let valid =
-        godot_rs_api::abi::visit_dynamic_callable_tokens(
-            bytes,
-            |token| match retain_callable_value(token) {
-                Ok(Some(ownership)) => {
-                    retained.push(ownership);
-                    true
-                }
-                Ok(None) => true,
-                Err(value) => {
-                    error = Some(value);
-                    false
-                }
-            },
-        );
+    let valid = godot_api::abi::visit_dynamic_callable_tokens(bytes, |token| {
+        match retain_callable_value(token) {
+            Ok(Some(ownership)) => {
+                retained.push(ownership);
+                true
+            }
+            Ok(None) => true,
+            Err(value) => {
+                error = Some(value);
+                false
+            }
+        }
+    });
     if !valid {
         return Err(error.unwrap_or_else(|| {
             EngineError::invalid_result("dynamic Callable ownership metadata is invalid")
@@ -907,7 +905,7 @@ impl Write for StackMessage {
 
 /// Internal function shape used by generated script indexes.
 #[doc(hidden)]
-pub type ScriptDescriptorWriter = fn(*mut godot_rs_api::abi::AbiScriptDescriptorV1) -> AbiStatus;
+pub type ScriptDescriptorWriter = fn(*mut godot_api::abi::AbiScriptDescriptorV1) -> AbiStatus;
 
 /// Generates the one stable project-module entry from a plugin-managed script
 /// index. Ordinary script files never invoke this macro themselves.
@@ -1033,14 +1031,14 @@ mod tests {
     fn native_engine_return_release_does_not_call_the_script_host() {
         let method = b"bound";
         let mut bytes = Vec::with_capacity(32 + method.len());
-        bytes.extend_from_slice(&godot_rs_api::abi::ABI_CALLABLE_MAGIC);
-        bytes.extend_from_slice(&godot_rs_api::abi::ABI_CALLABLE_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&godot_rs_api::abi::ABI_CALLABLE_OWNED.to_le_bytes());
+        bytes.extend_from_slice(&godot_api::abi::ABI_CALLABLE_MAGIC);
+        bytes.extend_from_slice(&godot_api::abi::ABI_CALLABLE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&godot_api::abi::ABI_CALLABLE_OWNED.to_le_bytes());
         bytes.extend_from_slice(&7_u64.to_le_bytes());
         bytes.extend_from_slice(&42_u64.to_le_bytes());
         bytes.extend_from_slice(&(method.len() as u32).to_le_bytes());
         bytes.extend_from_slice(method);
-        assert!(godot_rs_api::abi::validate_callable_value(&bytes));
+        assert!(godot_api::abi::validate_callable_value(&bytes));
 
         let value = owned_bytes(AbiValueType::CALLABLE, bytes);
         // SAFETY: This is the only release of the allocation above. Native

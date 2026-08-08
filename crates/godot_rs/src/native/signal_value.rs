@@ -1,6 +1,6 @@
 use core::ptr;
 
-use godot_rs_api::abi::{AbiValueType, AbiValueV1, validate_signal_value};
+use godot_api::abi::{AbiValueType, AbiValueV1, validate_signal_value};
 
 use super::dynamic_value::NativeVariant;
 use super::runtime::Interface;
@@ -110,8 +110,8 @@ impl NativeSignal {
         let name_length = u32::try_from(name.len())
             .map_err(|_| EngineError::invalid_result("Native Signal name is too large"))?;
         let mut bytes = Vec::with_capacity(SIGNAL_HEADER_BYTES + name.len());
-        bytes.extend_from_slice(&godot_rs_api::abi::ABI_SIGNAL_MAGIC);
-        bytes.extend_from_slice(&godot_rs_api::abi::ABI_SIGNAL_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&godot_api::abi::ABI_SIGNAL_MAGIC);
+        bytes.extend_from_slice(&godot_api::abi::ABI_SIGNAL_VERSION.to_le_bytes());
         bytes.extend_from_slice(&0_u16.to_le_bytes());
         bytes.extend_from_slice(&object_id.to_le_bytes());
         bytes.extend_from_slice(&name_length.to_le_bytes());
@@ -147,7 +147,7 @@ impl NativeSignal {
             .ok_or_else(|| EngineError::unavailable("Native Signal.get_name is unavailable"))?;
         let mut name = super::engine_call::NativeTextValue::empty(
             self.interface,
-            godot_rs_api::abi::AbiPtrcallType::STRING_NAME,
+            godot_api::abi::AbiPtrcallType::STRING_NAME,
         )?;
         // SAFETY: Method takes no arguments and writes one StringName.
         unsafe {

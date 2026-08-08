@@ -4,7 +4,7 @@ use core::cell::OnceCell;
 use core::fmt;
 use core::ops::{Deref, Index};
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_DYNAMIC_MAGIC as WIRE_MAGIC, ABI_DYNAMIC_MAX_BYTES as MAX_WIRE_BYTES,
     ABI_DYNAMIC_MAX_DEPTH as MAX_NESTING_DEPTH, ABI_DYNAMIC_MAX_ELEMENTS as MAX_CONTAINER_ELEMENTS,
     ABI_DYNAMIC_VERSION as WIRE_VERSION, AbiValueType, validate_dynamic_value,
@@ -242,14 +242,14 @@ impl Variant {
 
     #[doc(hidden)]
     pub fn __from_bytes(bytes: &[u8]) -> Option<Self> {
-        (godot_rs_api::abi::dynamic_value_ownership_token(bytes).is_none()
+        (godot_api::abi::dynamic_value_ownership_token(bytes).is_none()
             && validate_dynamic_value(AbiValueType::VARIANT, bytes))
         .then(|| decode_root(bytes, CallableDecodeMode::RejectOwned).ok())
         .flatten()
     }
 
     pub(crate) fn __from_native_bytes(bytes: &[u8]) -> Option<Self> {
-        (godot_rs_api::abi::dynamic_value_ownership_token(bytes).is_none()
+        (godot_api::abi::dynamic_value_ownership_token(bytes).is_none()
             && validate_dynamic_value(AbiValueType::VARIANT, bytes))
         .then(|| decode_root(bytes, CallableDecodeMode::Native).ok())
         .flatten()
@@ -260,8 +260,7 @@ impl Variant {
         ownership: Option<crate::module::HostDynamicValueToken>,
     ) -> Option<Self> {
         if !validate_dynamic_value(AbiValueType::VARIANT, bytes)
-            || godot_rs_api::abi::dynamic_value_ownership_token(bytes).is_some()
-                != ownership.is_some()
+            || godot_api::abi::dynamic_value_ownership_token(bytes).is_some() != ownership.is_some()
         {
             return None;
         }
@@ -398,7 +397,7 @@ impl<T: VariantConvert> Array<T> {
 
     #[doc(hidden)]
     pub fn __from_bytes(bytes: &[u8]) -> Option<Self> {
-        if godot_rs_api::abi::dynamic_value_ownership_token(bytes).is_some()
+        if godot_api::abi::dynamic_value_ownership_token(bytes).is_some()
             || !validate_dynamic_value(AbiValueType::ARRAY, bytes)
         {
             return None;
@@ -591,7 +590,7 @@ impl Dictionary {
 
     #[doc(hidden)]
     pub fn __from_bytes(bytes: &[u8]) -> Option<Self> {
-        if godot_rs_api::abi::dynamic_value_ownership_token(bytes).is_some()
+        if godot_api::abi::dynamic_value_ownership_token(bytes).is_some()
             || !validate_dynamic_value(AbiValueType::DICTIONARY, bytes)
         {
             return None;
@@ -1204,7 +1203,7 @@ fn decode_node(
         37 => decode_array(bytes, payload_start, payload_end, depth, callable_mode)?,
         38 => decode_dictionary(bytes, payload_start, payload_end, depth, callable_mode)?,
         39 => {
-            let ownership = match godot_rs_api::abi::callable_value_ownership_token(payload) {
+            let ownership = match godot_api::abi::callable_value_ownership_token(payload) {
                 Some(token) if matches!(callable_mode, CallableDecodeMode::Host) => {
                     crate::module::retain_callable_value(token).map_err(|_| {
                         VariantError::new("Host Callable ownership could not be retained")

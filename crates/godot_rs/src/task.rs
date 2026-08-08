@@ -288,8 +288,8 @@ impl Future for SignalFuture {
                 Ok(bytes) => bytes,
                 Err(error) => return Poll::Ready(Err(error)),
             };
-            let value = godot_rs_api::abi::AbiValueV1::from_borrowed_bytes(
-                godot_rs_api::abi::AbiValueType::SIGNAL,
+            let value = godot_api::abi::AbiValueV1::from_borrowed_bytes(
+                godot_api::abi::AbiValueType::SIGNAL,
                 &bytes,
             );
             match crate::module::watch_signal(value) {

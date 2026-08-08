@@ -26,53 +26,53 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT_LICENSE = ROOT / "LICENSE"
 ADDON_SOURCE = ROOT / "example" / "addons" / "godot-rust"
 EXPECTED_BINARIES = {
-    "android-arm32": ("libgodot_rs_host.so",),
-    "android-arm64": ("libgodot_rs_host.so",),
-    "android-x86_32": ("libgodot_rs_host.so",),
-    "android-x86_64": ("libgodot_rs_host.so",),
+    "android-arm32": ("libgodot_host.so",),
+    "android-arm64": ("libgodot_host.so",),
+    "android-x86_32": ("libgodot_host.so",),
+    "android-x86_64": ("libgodot_host.so",),
     "apple": (
-        "godot_rs_host.xcframework/Info.plist",
-        "godot_rs_host.xcframework/ios-arm64/"
-        "godot_rs_host.framework/_CodeSignature/CodeResources",
-        "godot_rs_host.xcframework/ios-arm64/"
-        "godot_rs_host.framework/Info.plist",
-        "godot_rs_host.xcframework/ios-arm64/"
-        "godot_rs_host.framework/godot_rs_host",
-        "godot_rs_host.xcframework/ios-arm64_x86_64-simulator/"
-        "godot_rs_host.framework/_CodeSignature/CodeResources",
-        "godot_rs_host.xcframework/ios-arm64_x86_64-simulator/"
-        "godot_rs_host.framework/Info.plist",
-        "godot_rs_host.xcframework/ios-arm64_x86_64-simulator/"
-        "godot_rs_host.framework/godot_rs_host",
+        "godot_host.xcframework/Info.plist",
+        "godot_host.xcframework/ios-arm64/"
+        "godot_host.framework/_CodeSignature/CodeResources",
+        "godot_host.xcframework/ios-arm64/"
+        "godot_host.framework/Info.plist",
+        "godot_host.xcframework/ios-arm64/"
+        "godot_host.framework/godot_host",
+        "godot_host.xcframework/ios-arm64_x86_64-simulator/"
+        "godot_host.framework/_CodeSignature/CodeResources",
+        "godot_host.xcframework/ios-arm64_x86_64-simulator/"
+        "godot_host.framework/Info.plist",
+        "godot_host.xcframework/ios-arm64_x86_64-simulator/"
+        "godot_host.framework/godot_host",
     ),
-    "linux-arm32": ("libgodot_rs_host.so",),
+    "linux-arm32": ("libgodot_host.so",),
     "linux-x86_64": (
-        "libgodot_rs_host.so",
-        "godot_rs_buildd",
-        "godot_rs_module_check",
+        "libgodot_host.so",
+        "godot_build",
+        "godot_module_check",
     ),
     "linux-arm64": (
-        "libgodot_rs_host.so",
-        "godot_rs_buildd",
-        "godot_rs_module_check",
+        "libgodot_host.so",
+        "godot_build",
+        "godot_module_check",
     ),
-    "linux-x86_32": ("libgodot_rs_host.so",),
+    "linux-x86_32": ("libgodot_host.so",),
     "macos-universal": (
-        "libgodot_rs_host.dylib",
-        "godot_rs_buildd",
-        "godot_rs_module_check",
+        "libgodot_host.dylib",
+        "godot_build",
+        "godot_module_check",
     ),
     "windows-x86_64": (
-        "godot_rs_host.dll",
-        "godot_rs_buildd.exe",
-        "godot_rs_module_check.exe",
+        "godot_host.dll",
+        "godot_build.exe",
+        "godot_module_check.exe",
     ),
-    "windows-arm64": ("godot_rs_host.dll",),
-    "windows-x86_32": ("godot_rs_host.dll",),
-    "web-godot-4.4": ("godot_rs_host.wasm",),
-    "web-godot-4.5": ("godot_rs_host.wasm",),
-    "web-godot-4.6": ("godot_rs_host.wasm",),
-    "web-godot-4.7": ("godot_rs_host.wasm",),
+    "windows-arm64": ("godot_host.dll",),
+    "windows-x86_32": ("godot_host.dll",),
+    "web-godot-4.4": ("godot_host.wasm",),
+    "web-godot-4.5": ("godot_host.wasm",),
+    "web-godot-4.6": ("godot_host.wasm",),
+    "web-godot-4.7": ("godot_host.wasm",),
 }
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 MAX_ZIP_ENTRIES = 10_000
@@ -133,7 +133,7 @@ def validate_binaries(binaries: Path) -> None:
                 f"expected {sorted(expected_names)}, "
                 f"found {sorted(actual_names)}"
             )
-    validate_xcframework(binaries / "apple" / "godot_rs_host.xcframework")
+    validate_xcframework(binaries / "apple" / "godot_host.xcframework")
 
 
 def copy_release_tree(
@@ -195,7 +195,7 @@ def release_package_ids(metadata: dict) -> set[str]:
     roots = {
         package["id"]
         for package in packages
-        if package.get("name") in {"godot_rs_host", "godot_rs_buildd"}
+        if package.get("name") in {"godot_host", "godot_build"}
     }
     if len(roots) != 2:
         raise ValueError("release metadata must contain the Host and build service")
@@ -311,7 +311,7 @@ def write_supply_chain_files(addon: Path, version: str, source_commit: str) -> N
     binary_roots = sorted(
         references[package["id"]]
         for package in packages
-        if package["name"] in {"godot_rs_host", "godot_rs_buildd"}
+        if package["name"] in {"godot_host", "godot_build"}
     )
     dependencies.append({"ref": application_reference, "dependsOn": binary_roots})
     for node in sorted(resolve.get("nodes", []), key=lambda value: value["id"]):
@@ -408,14 +408,14 @@ def write_zip(tree: Path, output: Path) -> None:
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3
             executable_names = {
-                "godot_rs_buildd",
-                "godot_rs_buildd.exe",
-                "godot_rs_host",
-                "godot_rs_host.dll",
-                "godot_rs_module_check",
-                "godot_rs_module_check.exe",
-                "libgodot_rs_host.dylib",
-                "libgodot_rs_host.so",
+                "godot_build",
+                "godot_build.exe",
+                "godot_host",
+                "godot_host.dll",
+                "godot_module_check",
+                "godot_module_check.exe",
+                "libgodot_host.dylib",
+                "libgodot_host.so",
             }
             mode = 0o755 if path.name in executable_names else 0o644
             info.external_attr = (stat.S_IFREG | mode) << 16

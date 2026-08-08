@@ -1,6 +1,6 @@
 use core::fmt;
 use core::marker::PhantomData;
-use godot_rs_api::abi::{AbiGodotApiSpecV1, AbiGodotMethodSpecV1, AbiValueType, AbiValueV1};
+use godot_api::abi::{AbiGodotApiSpecV1, AbiGodotMethodSpecV1, AbiValueType, AbiValueV1};
 use std::rc::Rc;
 
 use crate::callable::Callable;
@@ -42,7 +42,7 @@ macro_rules! define_engine_classes {
     };
 }
 
-godot_rs_api::godot_rs_for_each_engine_class!(define_engine_classes);
+godot_api::godot_rs_for_each_engine_class!(define_engine_classes);
 
 /// Marks a Godot class that is the same as or derives from `Base`.
 pub trait Inherits<Base: GodotClass>: GodotClass {}
@@ -374,7 +374,7 @@ pub trait EngineBuiltinValue: EngineReturn {
 #[doc(hidden)]
 pub trait GodotIntegerValue: Copy {
     const SIGNED: bool;
-    const PROPERTY_OPTIONS: &'static [godot_rs_api::abi::AbiGodotIntegerOptionV1];
+    const PROPERTY_OPTIONS: &'static [godot_api::abi::AbiGodotIntegerOptionV1];
     const PROPERTY_DEFAULT_RAW: u64;
 
     fn __raw(self) -> u64;
@@ -1182,7 +1182,7 @@ impl EngineReturn for Variant {
 
     fn __from_host_return(value: crate::module::HostMethodValue) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value.abi(), AbiValueType::VARIANT)?;
-        let token = godot_rs_api::abi::dynamic_value_ownership_token(&bytes).ok_or_else(|| {
+        let token = godot_api::abi::dynamic_value_ownership_token(&bytes).ok_or_else(|| {
             EngineError::invalid_result("Godot returned a Variant without Host ownership")
         })?;
         let ownership = crate::module::retain_dynamic_value(AbiValueType::VARIANT, token)?;
@@ -1223,7 +1223,7 @@ impl<T: VariantConvert> EngineReturn for Array<T> {
 
     fn __from_host_return(value: crate::module::HostMethodValue) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value.abi(), AbiValueType::ARRAY)?;
-        let token = godot_rs_api::abi::dynamic_value_ownership_token(&bytes).ok_or_else(|| {
+        let token = godot_api::abi::dynamic_value_ownership_token(&bytes).ok_or_else(|| {
             EngineError::invalid_result("Godot returned an Array without Host ownership")
         })?;
         let ownership = crate::module::retain_dynamic_value(AbiValueType::ARRAY, token)?;
@@ -1266,7 +1266,7 @@ impl EngineReturn for Dictionary {
 
     fn __from_host_return(value: crate::module::HostMethodValue) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value.abi(), AbiValueType::DICTIONARY)?;
-        let token = godot_rs_api::abi::dynamic_value_ownership_token(&bytes).ok_or_else(|| {
+        let token = godot_api::abi::dynamic_value_ownership_token(&bytes).ok_or_else(|| {
             EngineError::invalid_result("Godot returned a Dictionary without Host ownership")
         })?;
         let ownership = crate::module::retain_dynamic_value(AbiValueType::DICTIONARY, token)?;
@@ -1324,7 +1324,7 @@ impl EngineReturn for Callable {
 
     fn __from_host_return(value: crate::module::HostMethodValue) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value.abi(), AbiValueType::CALLABLE)?;
-        let token = godot_rs_api::abi::callable_value_ownership_token(&bytes).ok_or_else(|| {
+        let token = godot_api::abi::callable_value_ownership_token(&bytes).ok_or_else(|| {
             EngineError::invalid_result("Godot returned a Callable without Host ownership")
         })?;
         let ownership = crate::module::retain_callable_value(token)?;
@@ -1626,14 +1626,14 @@ fn decode_native_engine_value<R: EngineReturn>(
 fn release_native_engine_value(value: AbiValueV1) -> EngineResult<()> {
     if !matches!(
         value.reserved_flags,
-        godot_rs_api::abi::ABI_VALUE_OWNED_UTF8 | godot_rs_api::abi::ABI_VALUE_OWNED_BYTES
+        godot_api::abi::ABI_VALUE_OWNED_UTF8 | godot_api::abi::ABI_VALUE_OWNED_BYTES
     ) {
         return Ok(());
     }
     // SAFETY: Native engine calls allocate these values through the same SDK
     // module allocator immediately before returning them.
     let status = unsafe { crate::module::drop_native_engine_value(value) };
-    if status == godot_rs_api::abi::AbiStatus::Ok {
+    if status == godot_api::abi::AbiStatus::Ok {
         Ok(())
     } else {
         Err(EngineError::invalid_result(
@@ -1672,7 +1672,7 @@ fn fixed_f32_components<const N: usize>(
 }
 
 fn copy_owned_engine_bytes(value: AbiValueV1, expected: AbiValueType) -> EngineResult<Vec<u8>> {
-    if value.reserved_flags != godot_rs_api::abi::ABI_VALUE_OWNED_BYTES {
+    if value.reserved_flags != godot_api::abi::ABI_VALUE_OWNED_BYTES {
         return Err(invalid_return());
     }
     let (pointer, length) = value.byte_range(expected).ok_or_else(invalid_return)?;
@@ -1685,7 +1685,7 @@ fn copy_owned_engine_bytes(value: AbiValueV1, expected: AbiValueType) -> EngineR
 }
 
 fn owned_engine_text(value: AbiValueV1, expected: AbiValueType) -> EngineResult<String> {
-    if value.type_ != expected || value.reserved_flags != godot_rs_api::abi::ABI_VALUE_OWNED_UTF8 {
+    if value.type_ != expected || value.reserved_flags != godot_api::abi::ABI_VALUE_OWNED_UTF8 {
         return Err(invalid_return());
     }
     let address = usize::try_from(value.payload[0]).map_err(|_| invalid_return())?;
@@ -1808,7 +1808,7 @@ mod tests {
         );
         let text = "你好，Godot";
         let mut encoded = AbiValueV1::from_borrowed_utf8(text);
-        encoded.reserved_flags = godot_rs_api::abi::ABI_VALUE_OWNED_UTF8;
+        encoded.reserved_flags = godot_api::abi::ABI_VALUE_OWNED_UTF8;
         assert_eq!(String::__from_engine_return(encoded).expect("String"), text);
         encoded.type_ = AbiValueType::STRING_NAME;
         assert_eq!(
@@ -1893,7 +1893,7 @@ mod tests {
             .set_process(true)
             .expect_err("unit test has no initialized Host");
         assert_eq!(error.kind(), crate::error::EngineErrorKind::Unsupported);
-        assert_eq!(GENERATED_GODOT_API, godot_rs_api::SELECTED_GODOT_API);
+        assert_eq!(GENERATED_GODOT_API, godot_api::SELECTED_GODOT_API);
         let generated_methods = std::hint::black_box(GENERATED_ENGINE_METHOD_COUNT);
         let generated_static_methods = std::hint::black_box(GENERATED_STATIC_ENGINE_METHOD_COUNT);
         let generated_vararg_methods = std::hint::black_box(GENERATED_VARARG_ENGINE_METHOD_COUNT);

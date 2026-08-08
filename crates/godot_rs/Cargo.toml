@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "README.md"
 description = "Godot-first Rust scripting SDK for the godot-rust editor plugin"
 keywords = ["godot", "gamedev", "scripting", "plugin", "rust"]
 categories = ["game-development", "api-bindings"]
@@ -13,12 +14,12 @@ exclude = ["benches/**", "tests/**"]
 build = "build.rs"
 
 [dependencies]
-godot_rs_macros.workspace = true
-godot_rs_api.workspace = true
+godot_macro.workspace = true
+godot_api = { workspace = true, features = ["bindings"] }
 inventory.workspace = true
 
 [build-dependencies]
-godot_rs_api = { workspace = true, features = ["generator"] }
+godot_api = { workspace = true, default-features = false, features = ["generator"] }
 
 [dev-dependencies]
 trybuild = "1.0.118"

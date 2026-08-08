@@ -22,10 +22,10 @@ PLUGIN_BIN = PLUGIN_ROOT / "bin"
 def host_library_name(platform: str) -> str:
     """Return the Host cdylib filename for a Python platform."""
     if platform == "darwin":
-        return "libgodot_rs_host.dylib"
+        return "libgodot_host.dylib"
     if platform.startswith("win"):
-        return "godot_rs_host.dll"
-    return "libgodot_rs_host.so"
+        return "godot_host.dll"
+    return "libgodot_host.so"
 
 
 def executable_name(name: str, platform: str) -> str:
@@ -43,10 +43,10 @@ def stage_example_plugin(release: bool) -> list[Path]:
             "build",
             "--locked",
             "-p",
-            "godot_rs_host",
+            "godot_host",
             "--lib",
             "--bin",
-            "godot_rs_module_check",
+            "godot_module_check",
             *profile_argument,
         ],
         cwd=ROOT,
@@ -58,9 +58,9 @@ def stage_example_plugin(release: bool) -> list[Path]:
             "build",
             "--locked",
             "-p",
-            "godot_rs_buildd",
+            "godot_build",
             "--bin",
-            "godot_rs_buildd",
+            "godot_build",
             *profile_argument,
         ],
         cwd=ROOT,
@@ -69,8 +69,8 @@ def stage_example_plugin(release: bool) -> list[Path]:
 
     host_filename = host_library_name(sys.platform)
     filenames = [
-        executable_name("godot_rs_buildd", sys.platform),
-        executable_name("godot_rs_module_check", sys.platform),
+        executable_name("godot_build", sys.platform),
+        executable_name("godot_module_check", sys.platform),
     ]
     plugin_bin = PLUGIN_BIN / platform_directory(sys.platform, platform.machine())
     plugin_bin.mkdir(parents=True, exist_ok=True)

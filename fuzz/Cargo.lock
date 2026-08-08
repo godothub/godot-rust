@@ -166,15 +166,15 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "godot-rust-fuzz"
 version = "0.0.0"
 dependencies = [
- "godot_rs_api",
- "godot_rs_buildd",
- "godot_rs_codegen",
+ "godot_api",
+ "godot_build",
+ "godot_codegen",
  "libfuzzer-sys",
  "serde_json",
 ]
 
 [[package]]
-name = "godot_rs_api"
+name = "godot_api"
 version = "0.9.0"
 dependencies = [
  "serde",
@@ -183,19 +183,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_api_policy"
+name = "godot_build"
 version = "0.9.0"
 dependencies = [
- "serde",
- "sha2",
- "toml",
-]
-
-[[package]]
-name = "godot_rs_buildd"
-version = "0.9.0"
-dependencies = [
- "godot_rs_api_policy",
+ "godot_api",
  "object",
  "serde",
  "serde_json",
@@ -206,15 +197,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "godot_rs_codegen"
+name = "godot_codegen"
 version = "0.9.0"
 dependencies = [
  "bindgen",
- "godot_rs_api",
- "godot_rs_api_policy",
+ "godot_api",
  "serde",
  "serde_json",
  "sha2",
+ "toml",
 ]
 
 [[package]]

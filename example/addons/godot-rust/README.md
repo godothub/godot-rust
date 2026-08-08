@@ -9,9 +9,9 @@ Rust interface files.
 
 Each platform directory contains:
 
-- `godot_rs_host` dynamic library;
-- `godot_rs_buildd` executable;
-- `godot_rs_module_check` executable.
+- `godot_host` dynamic library;
+- `godot_build` executable;
+- `godot_module_check` executable.
 
 The editor plugin keeps the project as a standard Cargo package. It monitors
 Rust inputs, coalesces rapid saves into one background Cargo Check, displays

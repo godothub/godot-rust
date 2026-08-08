@@ -1,6 +1,6 @@
 #![no_main]
 
-use godot_rs_buildd::{decode_hex_request, handle_json_request};
+use godot_build::{decode_hex_request, handle_json_request};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

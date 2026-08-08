@@ -2,7 +2,7 @@ use core::ffi::{c_char, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 
-use godot_rs_api::abi::{
+use godot_api::abi::{
     ABI_GODOT_API_CONST, ABI_GODOT_API_MUTATES_BASE, ABI_GODOT_API_STATIC, ABI_GODOT_API_VARARG,
     ABI_GODOT_METHOD_STATIC, ABI_GODOT_METHOD_VARARG, AbiByteSlice, AbiGodotApiKind,
     AbiGodotApiSpecV1, AbiGodotMethodSpecV1, AbiGodotValueSpecV1, AbiPtrcallType, AbiValueType,

@@ -65,16 +65,16 @@ jobs:
           cargo audit
           for api in 4.4 4.5 4.6 4.7; do
             GODOT_RS_GODOT="${api}" cargo test --locked \
-              -p godot_rs_api -p godot_rs --lib
+              -p godot_api -p godot_rs --lib
           done
           python3 -m unittest discover -s tests/python -v
           python3 tools/check_dependency_provenance.py
           python3 tools/verify_official_api.py
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             verify-targets godot-api.toml
-          cargo run --locked -p godot_rs_codegen -- \
+          cargo run --locked -p godot_codegen -- \
             verify-bundles \
-            godot-api.toml crates/godot_rs_api/generated
+            godot-api.toml crates/godot_api/generated
 
   build-linux:
     name: Build ${{ matrix.platform }}
@@ -119,22 +119,22 @@ jobs:
         run: |
           if [[ "${{ matrix.tools }}" == "true" ]]; then
             cargo build --release --locked --target "${{ matrix.target }}" \
-              -p godot_rs_host --lib --bin godot_rs_module_check
+              -p godot_host --lib --bin godot_module_check
             cargo build --release --locked --target "${{ matrix.target }}" \
-              -p godot_rs_buildd --bin godot_rs_buildd
+              -p godot_build --bin godot_build
           else
             cargo build --release --locked --target "${{ matrix.target }}" \
-              -p godot_rs_host --lib
+              -p godot_host --lib
           fi
       - name: Stage platform
         run: |
           output="dist/bin/${{ matrix.platform }}"
           source="target/${{ matrix.target }}/release"
           mkdir -p "${output}"
-          cp "${source}/libgodot_rs_host.so" "${output}/"
+          cp "${source}/libgodot_host.so" "${output}/"
           if [[ "${{ matrix.tools }}" == "true" ]]; then
-            cp "${source}/godot_rs_buildd" "${output}/"
-            cp "${source}/godot_rs_module_check" "${output}/"
+            cp "${source}/godot_build" "${output}/"
+            cp "${source}/godot_module_check" "${output}/"
           fi
           chmod 755 "${output}/"*
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -166,9 +166,9 @@ jobs:
         run: |
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --release --locked --target "${target}" \
-              -p godot_rs_host --lib --bin godot_rs_module_check
+              -p godot_host --lib --bin godot_module_check
             cargo build --release --locked --target "${target}" \
-              -p godot_rs_buildd --bin godot_rs_buildd
+              -p godot_build --bin godot_build
           done
       - name: Build iOS device and simulator Hosts
         run: |
@@ -178,20 +178,20 @@ jobs:
             x86_64-apple-ios
           do
             cargo build --release --locked --target "${target}" \
-              -p godot_rs_host --lib
+              -p godot_host --lib
           done
       - name: Create universal Apple binaries
         run: |
           mkdir -p dist/apple-input dist/bin/macos-universal
           lipo -create \
-            target/aarch64-apple-darwin/release/libgodot_rs_host.dylib \
-            target/x86_64-apple-darwin/release/libgodot_rs_host.dylib \
-            -output dist/bin/macos-universal/libgodot_rs_host.dylib
+            target/aarch64-apple-darwin/release/libgodot_host.dylib \
+            target/x86_64-apple-darwin/release/libgodot_host.dylib \
+            -output dist/bin/macos-universal/libgodot_host.dylib
           lipo -create \
-            target/aarch64-apple-ios-sim/release/libgodot_rs_host.dylib \
-            target/x86_64-apple-ios/release/libgodot_rs_host.dylib \
+            target/aarch64-apple-ios-sim/release/libgodot_host.dylib \
+            target/x86_64-apple-ios/release/libgodot_host.dylib \
             -output dist/apple-input/ios-simulator-host.dylib
-          for name in godot_rs_buildd godot_rs_module_check; do
+          for name in godot_build godot_module_check; do
             lipo -create \
               "target/aarch64-apple-darwin/release/${name}" \
               "target/x86_64-apple-darwin/release/${name}" \
@@ -202,10 +202,10 @@ jobs:
         run: |
           python3 tools/create_apple_xcframework.py \
             --ios-device \
-              target/aarch64-apple-ios/release/libgodot_rs_host.dylib \
+              target/aarch64-apple-ios/release/libgodot_host.dylib \
             --ios-simulator dist/apple-input/ios-simulator-host.dylib \
             --version "${{ inputs.version }}" \
-            --output dist/bin/apple/godot_rs_host.xcframework
+            --output dist/bin/apple/godot_host.xcframework
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: plugin-binaries-apple
@@ -242,12 +242,12 @@ jobs:
         run: |
           if [[ "${{ matrix.tools }}" == "true" ]]; then
             cargo build --release --locked --target "${{ matrix.target }}" \
-              -p godot_rs_host --lib --bin godot_rs_module_check
+              -p godot_host --lib --bin godot_module_check
             cargo build --release --locked --target "${{ matrix.target }}" \
-              -p godot_rs_buildd --bin godot_rs_buildd
+              -p godot_build --bin godot_build
           else
             cargo build --release --locked --target "${{ matrix.target }}" \
-              -p godot_rs_host --lib
+              -p godot_host --lib
           fi
       - name: Stage platform
         shell: bash
@@ -255,10 +255,10 @@ jobs:
           output="dist/bin/${{ matrix.platform }}"
           source="target/${{ matrix.target }}/release"
           mkdir -p "${output}"
-          cp "${source}/godot_rs_host.dll" "${output}/"
+          cp "${source}/godot_host.dll" "${output}/"
           if [[ "${{ matrix.tools }}" == "true" ]]; then
-            cp "${source}/godot_rs_buildd.exe" "${output}/"
-            cp "${source}/godot_rs_module_check.exe" "${output}/"
+            cp "${source}/godot_build.exe" "${output}/"
+            cp "${source}/godot_module_check.exe" "${output}/"
           fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -306,15 +306,15 @@ jobs:
             | tr '[:lower:]-' '[:upper:]_')_LINKER"
           export "${variable}=${linker}"
           cargo build --release --locked --target "${{ matrix.target }}" \
-            -p godot_rs_host --lib
+            -p godot_host --lib
       - name: Stage Android Script Host
         run: |
           output="dist/bin/${{ matrix.platform }}"
           mkdir -p "${output}"
           cp \
-            "target/${{ matrix.target }}/release/libgodot_rs_host.so" \
+            "target/${{ matrix.target }}/release/libgodot_host.so" \
             "${output}/"
-          chmod 755 "${output}/libgodot_rs_host.so"
+          chmod 755 "${output}/libgodot_host.so"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: plugin-binaries-${{ matrix.platform }}
@@ -374,9 +374,9 @@ jobs:
             -C panic=abort"
           cargo build -Z build-std=std,panic_abort --release --locked \
             --target wasm32-unknown-emscripten \
-            -p godot_rs_host --lib
+            -p godot_host --lib
           if wasm-dis \
-            target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            target/wasm32-unknown-emscripten/release/godot_host.wasm \
             -o - \
             | grep -E '\(import "env" "(invoke_|__cxa|__resumeException)'; then
             echo "Web Host imports an unsupported JavaScript exception bridge"
@@ -387,7 +387,7 @@ jobs:
           output="dist/bin/web-godot-${{ matrix.godot }}"
           mkdir -p "${output}"
           cp \
-            target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            target/wasm32-unknown-emscripten/release/godot_host.wasm \
             "${output}/"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -468,7 +468,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           test -n "${CARGO_REGISTRY_TOKEN}"
-          for crate in godot_rs_api godot_rs_macros godot_rs; do
+          for crate in godot_api godot_macro godot_rs; do
             python3 tools/publish_crate.py \
               --version "${{ inputs.version }}" \
               "${crate}"

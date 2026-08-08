@@ -10,9 +10,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
-godot_rs_api = { path = "../crates/godot_rs_api" }
-godot_rs_buildd = { path = "../crates/godot_rs_buildd" }
-godot_rs_codegen = { path = "../crates/godot_rs_codegen" }
+godot_api = { path = "../crates/godot_api" }
+godot_build = { path = "../crates/godot_build" }
+godot_codegen = { path = "../crates/godot_codegen" }
 
 [[bin]]
 name = "abi_wire"

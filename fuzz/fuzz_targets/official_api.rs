@@ -1,6 +1,6 @@
 #![no_main]
 
-use godot_rs_codegen::{ExpectedApiVersion, ExtensionApi, validate_api};
+use godot_codegen::{ExpectedApiVersion, ExtensionApi, validate_api};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

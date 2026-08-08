@@ -203,6 +203,13 @@ class CratePublicationTests(unittest.TestCase):
 
 
 class OfficialApiTests(unittest.TestCase):
+    def test_authenticated_api_inputs_keep_lf_on_every_platform(self):
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn(
+            "crates/godot_rs_api/metadata/**/extension_api.json text eol=lf",
+            attributes.splitlines(),
+        )
+
     def test_sha256_is_lowercase_and_stable(self):
         self.assertEqual(
             verify_official_api.sha256_bytes(b"godot-rust"),

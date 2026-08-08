@@ -1,0 +1,72 @@
+{
+  "header": {
+    "version_major": 4,
+    "version_minor": 4,
+    "version_patch": 1,
+    "version_status": "stable",
+    "version_build": "official",
+    "version_full_name": "Godot Engine v4.4.1.stable.official"
+  },
+  "builtin_class_sizes": [
+    {"build_configuration": "float_32", "sizes": [{"name": "bool", "size": 1}]},
+    {"build_configuration": "float_64", "sizes": [{"name": "bool", "size": 1}]},
+    {"build_configuration": "double_32", "sizes": [{"name": "bool", "size": 1}]},
+    {"build_configuration": "double_64", "sizes": [{"name": "bool", "size": 1}]}
+  ],
+  "builtin_class_member_offsets": [
+    {"build_configuration": "float_32", "classes": []},
+    {"build_configuration": "float_64", "classes": []},
+    {"build_configuration": "double_32", "classes": []},
+    {"build_configuration": "double_64", "classes": []}
+  ],
+  "global_constants": [],
+  "global_enums": [],
+  "utility_functions": [],
+  "builtin_classes": [
+    {
+      "name": "String",
+      "has_destructor": true,
+      "is_keyed": false,
+      "constructors": [{"index": 0}],
+      "operators": []
+    }
+  ],
+  "classes": [
+    {
+      "name": "Object",
+      "is_refcounted": false,
+      "is_instantiable": true,
+      "api_type": "core",
+      "methods": [
+        {
+          "name": "get_instance_id",
+          "is_const": true,
+          "is_vararg": false,
+          "is_static": false,
+          "is_virtual": false,
+          "hash": 3905245786,
+          "return_value": {
+            "type": "int",
+            "meta": "uint64"
+          }
+        }
+      ]
+    },
+    {
+      "name": "ScriptExtension",
+      "inherits": "Object",
+      "is_refcounted": false,
+      "is_instantiable": false,
+      "api_type": "core"
+    },
+    {
+      "name": "ScriptLanguageExtension",
+      "inherits": "Object",
+      "is_refcounted": false,
+      "is_instantiable": false,
+      "api_type": "core"
+    }
+  ],
+  "singletons": [],
+  "native_structures": []
+}

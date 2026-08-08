@@ -1,0 +1,14 @@
+[gd_scene load_steps=3 format=3 uid="uid://b3"]
+
+[ext_resource type="Script" uid="uid://b2" path="res://src/scripts/hello.rs" id="1_rust"]
+[ext_resource type="Resource" path="res://game_tuning.tres" id="2_tuning"]
+
+[node name="HelloRust" type="Node"]
+script = ExtResource("1_rust")
+prefix = "你好"
+greeting_count = 3
+greeting = "你好，来自 Rust"
+tuning = ExtResource("2_tuning")
+
+[node name="Target" type="Node" parent="."]
+unique_name_in_owner = true

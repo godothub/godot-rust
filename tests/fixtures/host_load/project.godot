@@ -1,0 +1,14 @@
+; Engine configuration file.
+; Used only by the automated godot-rust Host load test.
+
+config_version=5
+
+[application]
+
+config/name="godot-rust Host Load Test"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+

@@ -1,0 +1,5 @@
+error: `range(...)` requires an integer or float field
+ --> tests/ui/fail/bad_export.rs:5:14
+  |
+5 |     #[export(range(min = 0, max = 10))]
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^

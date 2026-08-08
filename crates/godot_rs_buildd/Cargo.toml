@@ -1,0 +1,19 @@
+[package]
+name = "godot_rs_buildd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+godot_rs_api_policy.workspace = true
+object.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+syn.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+
+[lints]
+workspace = true

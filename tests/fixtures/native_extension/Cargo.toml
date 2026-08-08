@@ -1,0 +1,20 @@
+[package]
+name = "godot_rs_native_smoke"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+godot_rs.workspace = true
+
+[package.metadata.godot-rust]
+enabled = true
+mode = "extension"
+godot = "4.4"
+
+[lints]
+workspace = true

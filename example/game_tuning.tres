@@ -1,0 +1,8 @@
+[gd_resource type="Resource" script_class="GameTuning" load_steps=2 format=3]
+
+[ext_resource type="Script" uid="uid://d2" path="res://src/scripts/game_tuning.rs" id="1_rust"]
+
+[resource]
+script = ExtResource("1_rust")
+max_health = 150
+movement_speed = 320.0

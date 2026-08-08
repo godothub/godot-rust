@@ -1,0 +1,5 @@
+error: an optional node field must use `Option<NodeRef<T>>`
+ --> tests/ui/fail/bad_node.rs:5:5
+  |
+5 |     #[node("%Camera", optional)]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

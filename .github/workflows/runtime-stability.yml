@@ -1,0 +1,167 @@
+name: Runtime stability
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/godot_rs_buildd/**"
+      - "crates/godot_rs_codegen/**"
+      - "crates/godot_rs_host/**"
+      - "fuzz/**"
+      - "tools/assemble_release.py"
+      - "tools/verify_release_package.py"
+      - "tests/python/test_tools.py"
+      - ".github/workflows/runtime-stability.yml"
+  schedule:
+    - cron: "41 3 * * 3"
+  workflow_dispatch:
+
+concurrency:
+  group: runtime-stability-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_NIGHTLY_TOOLCHAIN: nightly-2026-07-15
+
+jobs:
+  fuzz:
+    name: Structured parser fuzzing
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust fuzz toolchain
+        run: |
+          rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}" --profile minimal
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" install \
+            cargo-fuzz --version 0.13.2 --locked
+      - name: Run bounded libFuzzer gates
+        env:
+          FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '300' || '30' }}
+        run: |
+          for target in abi_wire official_api build_protocol; do
+            corpus="${RUNNER_TEMP}/godot-rust-fuzz-corpus/${target}"
+            mkdir -p "${corpus}"
+            cp fuzz/corpus/"${target}"/* "${corpus}/"
+            cargo +"${RUST_NIGHTLY_TOOLCHAIN}" fuzz run \
+              "${target}" "${corpus}" -- \
+              -max_total_time="${FUZZ_SECONDS}" \
+              -timeout=10 \
+              -rss_limit_mb=4096
+          done
+
+  sanitizers:
+    name: Address and leak sanitizers
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust sanitizer toolchain
+        run: |
+          rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}" \
+            --profile minimal --component rust-src
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" fetch --locked
+      - name: Run AddressSanitizer tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+          RUSTFLAGS: -Zsanitizer=address
+        run: >-
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" test -Z build-std --locked
+          --target x86_64-unknown-linux-gnu
+          -p godot_rs_api
+          -p godot_rs_buildd
+          -p godot_rs_host
+          --lib
+      - name: Run LeakSanitizer tests
+        env:
+          LSAN_OPTIONS: exitcode=23:report_objects=1
+          RUSTFLAGS: -Zsanitizer=leak
+        run: >-
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" test -Z build-std --locked
+          --target x86_64-unknown-linux-gnu
+          -p godot_rs_api
+          -p godot_rs_buildd
+          -p godot_rs_host
+          --lib
+
+  concurrency-sanitizer:
+    name: Thread sanitizer
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust sanitizer toolchain
+        run: |
+          rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}" \
+            --profile minimal --component rust-src
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" fetch --locked
+      - name: Check concurrent build and Host state
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: >-
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" test -Z build-std --locked
+          --target x86_64-unknown-linux-gnu
+          -p godot_rs_buildd
+          -p godot_rs_host
+          --lib
+
+  valgrind:
+    name: Valgrind memory and descriptor checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Valgrind and Rust MSRV
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes valgrind
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup default 1.85.0
+      - name: Check ABI and Host test processes
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: >-
+            valgrind --error-exitcode=24 --leak-check=full
+            --show-leak-kinds=definite,indirect,possible
+            --errors-for-leak-kinds=definite,indirect
+            --track-fds=yes
+        run: >-
+          cargo test --locked
+          --target x86_64-unknown-linux-gnu
+          -p godot_rs_api
+          -p godot_rs_host
+          --lib
+
+  undefined-behavior:
+    name: Miri ABI undefined-behavior checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Miri toolchain
+        run: |
+          rustup toolchain install "${RUST_NIGHTLY_TOOLCHAIN}" \
+            --profile minimal --component miri
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" miri setup
+      - name: Check ABI parsers under strict provenance
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
+        run: >-
+          cargo +"${RUST_NIGHTLY_TOOLCHAIN}" miri test
+          --locked -p godot_rs_api
+
+  generation-stress:
+    name: 10,000 generation and fault cycles
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust MSRV
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup default 1.85.0
+      - name: Run long stability tests
+        run: >-
+          cargo test --locked -p godot_rs_host --lib
+          -- --ignored --exact
+          last_known_good::tests::ten_thousand_generation_records_remain_fail_closed

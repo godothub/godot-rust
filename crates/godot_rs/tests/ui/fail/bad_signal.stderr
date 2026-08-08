@@ -1,0 +1,5 @@
+error: signal declares 1 argument name(s) but its tuple contains 2 type(s)
+ --> tests/ui/fail/bad_signal.rs:5:5
+  |
+5 |     #[signal(args(only_one))]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^

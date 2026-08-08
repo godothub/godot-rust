@@ -1,0 +1,256 @@
+name: Godot API compatibility
+
+on:
+  pull_request:
+    paths:
+      - "godot-api.toml"
+      - "crates/godot_rs/**"
+      - "crates/godot_rs_api_policy/**"
+      - "crates/godot_rs_buildd/**"
+      - "crates/godot_rs_codegen/**"
+      - "crates/godot_rs_host/**"
+      - "crates/godot_rs_macros/**"
+      - "crates/godot_rs_api/**"
+      - "example/addons/godot-rust/**"
+      - "tests/fixtures/editor_flow/**"
+      - "tests/fixtures/editor_diagnostics/**"
+      - "tests/fixtures/host_load/**"
+      - "tests/fixtures/native_extension/**"
+      - "tests/fixtures/project_module/**"
+      - "tools/create_apple_xcframework.py"
+      - "tools/stage_macos_host.py"
+      - "tools/stage_host.py"
+      - "tools/stage_example_plugin.py"
+      - "tools/stage_project_module.py"
+      - "tools/test_editor_plugin.py"
+      - "tools/test_godot_load.py"
+      - "tools/test_native_load.py"
+      - "tools/test_native_hot_reload.py"
+      - ".github/workflows/godot-api-compatibility.yml"
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: godot-api-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  api-generation:
+    name: Godot ${{ matrix.api }} binding generation
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: "4.4"
+            release: "4.4.1"
+            interface_json: false
+            native_targets: "4.4"
+          - api: "4.5"
+            release: "4.5.2"
+            interface_json: false
+            native_targets: "4.4 4.5"
+          - api: "4.6"
+            release: "4.6.3"
+            interface_json: true
+            native_targets: "4.4 4.5 4.6"
+          - api: "4.7"
+            release: "4.7.1"
+            interface_json: true
+            native_targets: "4.4 4.5 4.6 4.7"
+    env:
+      GODOT_ARCHIVE: Godot_v${{ matrix.release }}-stable_linux.x86_64.zip
+      GODOT_BINARY: Godot_v${{ matrix.release }}-stable_linux.x86_64
+      GODOT_TAG: ${{ matrix.release }}-stable
+      SOURCE_MANIFEST: godot-api.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install Raw FFI generator prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libclang-dev
+          if [[ "${{ matrix.api }}" == "4.4" || "${{ matrix.api }}" == "4.5" ]]; then
+            sudo apt-get install --yes valgrind
+          fi
+      - name: Download authenticated official Godot editor
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/SHA512-SUMS.txt" \
+            --output /tmp/SHA512-SUMS.txt
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_ARCHIVE}" \
+            --output "/tmp/${GODOT_ARCHIVE}"
+          awk \
+            -v archive="${GODOT_ARCHIVE}" \
+            -v archive_path="/tmp/${GODOT_ARCHIVE}" \
+            '$2 == archive { print $1 "  " archive_path; found = 1 }
+             END { if (!found) exit 1 }' \
+            /tmp/SHA512-SUMS.txt \
+            | sha512sum --check -
+          unzip -q "/tmp/${GODOT_ARCHIVE}" -d /tmp/godot
+          chmod +x "/tmp/godot/${GODOT_BINARY}"
+      - name: Dump exact official API inputs
+        run: |
+          mkdir -p /tmp/godot-api
+          cd /tmp/godot-api
+          "/tmp/godot/${GODOT_BINARY}" \
+            --headless --dump-gdextension-interface
+          "/tmp/godot/${GODOT_BINARY}" \
+            --headless --dump-extension-api
+          if [[ "${{ matrix.interface_json }}" == "true" ]]; then
+            "/tmp/godot/${GODOT_BINARY}" \
+              --headless --dump-gdextension-interface-json
+          fi
+      - name: Authenticate and validate official inputs
+        run: |
+          verifier_args=(
+            --manifest "${SOURCE_MANIFEST}"
+            --godot "${{ matrix.api }}"
+            --extension-api /tmp/godot-api/extension_api.json
+            --gdextension-interface /tmp/godot-api/gdextension_interface.h
+          )
+          if [[ "${{ matrix.interface_json }}" == "true" ]]; then
+            verifier_args+=(
+              --gdextension-interface-json
+              /tmp/godot-api/gdextension_interface.json
+            )
+          fi
+          python3 tools/verify_official_api.py "${verifier_args[@]}"
+          cargo run --locked -p godot_rs_codegen -- \
+            validate \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/extension_api.json
+      - name: Prove deterministic Rust binding generation
+        run: |
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-snapshot \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/extension_api.json \
+            /tmp/api-snapshot-a.rs
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-snapshot \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/extension_api.json \
+            /tmp/api-snapshot-b.rs
+          cmp /tmp/api-snapshot-a.rs /tmp/api-snapshot-b.rs
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-sys \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/gdextension_interface.h \
+            /tmp/raw-ffi-a.rs
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-sys \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/gdextension_interface.h \
+            /tmp/raw-ffi-b.rs
+          cmp /tmp/raw-ffi-a.rs /tmp/raw-ffi-b.rs
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-engine-api \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/extension_api.json \
+            /tmp/engine-api-a.rs
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-engine-api \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/extension_api.json \
+            /tmp/engine-api-b.rs
+          cmp /tmp/engine-api-a.rs /tmp/engine-api-b.rs
+          bundle_args=(
+            --godot "${{ matrix.api }}"
+            --source "${SOURCE_MANIFEST}"
+          )
+          if [[ "${{ matrix.interface_json }}" == "true" ]]; then
+            bundle_args+=(
+              --gdextension-interface-json
+              /tmp/godot-api/gdextension_interface.json
+            )
+          fi
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-bundle \
+            "${bundle_args[@]}" \
+            /tmp/godot-api/gdextension_interface.h \
+            /tmp/godot-api/extension_api.json \
+            "/tmp/bundle-a/godot-${{ matrix.api }}"
+          cargo run --locked -p godot_rs_codegen -- \
+            generate-bundle \
+            "${bundle_args[@]}" \
+            /tmp/godot-api/gdextension_interface.h \
+            /tmp/godot-api/extension_api.json \
+            "/tmp/bundle-b/godot-${{ matrix.api }}"
+          diff --recursive \
+            "/tmp/bundle-a/godot-${{ matrix.api }}" \
+            "/tmp/bundle-b/godot-${{ matrix.api }}"
+          cargo run --locked -p godot_rs_codegen -- \
+            check-bundle \
+            "${bundle_args[@]}" \
+            /tmp/godot-api/gdextension_interface.h \
+            /tmp/godot-api/extension_api.json \
+            "crates/godot_rs_api/generated/godot-${{ matrix.api }}"
+      - name: Check the versioned Raw and Script API bindings
+        run: |
+          cargo run --locked -p godot_rs_codegen -- \
+            check-snapshot \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/extension_api.json \
+            "crates/godot_rs_api/generated/godot-${{ matrix.api }}/api_snapshot.rs"
+          cargo run --locked -p godot_rs_codegen -- \
+            check-sys \
+            --godot "${{ matrix.api }}" \
+            --source "${SOURCE_MANIFEST}" \
+            /tmp/godot-api/gdextension_interface.h \
+            "crates/godot_rs_api/generated/godot-${{ matrix.api }}/raw.rs"
+          cmp \
+            /tmp/godot-api/extension_api.json \
+            "crates/godot_rs_api/metadata/godot-${{ matrix.api }}/extension_api.json"
+          GODOT_RS_GODOT="${{ matrix.api }}" \
+            cargo test --locked -p godot_rs --lib
+      - name: Build and load the 4.4-compatible Script Host
+        run: |
+          host_args=(--godot "/tmp/godot/${GODOT_BINARY}")
+          if [[ "${{ matrix.api }}" == "4.5" ]]; then
+            host_args+=(--valgrind)
+          fi
+          GODOT_RS_GODOT="${{ matrix.api }}" \
+            python3 tools/test_godot_load.py "${host_args[@]}"
+      - name: Build and load compatible Native targets
+        run: |
+          for native_target in ${{ matrix.native_targets }}; do
+            native_args=(
+              --api "${native_target}"
+              --godot "/tmp/godot/${GODOT_BINARY}"
+            )
+            if [[ "${{ matrix.api }}" == "4.4" ]]; then
+              native_args+=(--valgrind)
+            fi
+            python3 tools/test_native_load.py "${native_args[@]}"
+            python3 tools/test_native_hot_reload.py \
+              --api "${native_target}" \
+              --godot "/tmp/godot/${GODOT_BINARY}"
+          done
+      - name: Upload generated binding evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: godot-${{ matrix.api }}-generated-bindings
+          path: /tmp/bundle-a/godot-${{ matrix.api }}
+          if-no-files-found: error

@@ -1,0 +1,5 @@
+error: unsupported reflected value type; use a supported scalar, text, math, packed array, dynamic container, `Callable`, `Signal`, `Rid`, `ObjectRef<Class>`, or `Option<ObjectRef<Class>>` type
+ --> tests/ui/fail/unsupported_func_type.rs:9:34
+  |
+9 |     fn set_name(&mut self, name: Vec<i64>) {
+  |                                  ^^^^^^^^

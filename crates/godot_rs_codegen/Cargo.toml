@@ -1,0 +1,24 @@
+[package]
+name = "godot_rs_codegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bindgen.workspace = true
+godot_rs_api = { workspace = true, features = ["generator"] }
+godot_rs_api_policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "godot_rs_codegen"
+path = "src/main.rs"
+
+[lints]
+workspace = true

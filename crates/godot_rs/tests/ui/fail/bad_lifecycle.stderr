@@ -1,0 +1,5 @@
+error: `_physics_process` must start with `&mut self`
+ --> tests/ui/fail/bad_lifecycle.rs:8:5
+  |
+8 |     fn _physics_process(&self, _delta: f32) {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

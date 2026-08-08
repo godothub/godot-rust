@@ -1,0 +1,539 @@
+name: Mobile and Web exports
+
+on:
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Platform group to validate
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - apple
+          - android
+          - web
+
+concurrency:
+  group: platform-export-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GODOT_RELEASE: 4.4.1
+  GODOT_TAG: 4.4.1-stable
+  GODOT_TEMPLATE_ARCHIVE: Godot_v4.4.1-stable_export_templates.tpz
+  RUST_EXPORT_TOOLCHAIN: 1.85.0
+  WEB_RUST_TOOLCHAIN: nightly-2025-02-20
+
+jobs:
+  android:
+    name: Android APK runtime
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.scope == 'all' ||
+      inputs.scope == 'android'
+    runs-on: ubuntu-22.04
+    env:
+      GODOT_ARCHIVE: Godot_v4.4.1-stable_linux.x86_64.zip
+      GODOT_BINARY_NAME: Godot_v4.4.1-stable_linux.x86_64
+      GODOT_SHA512: ef4e76880a514257175544952c61191106fdef3095b909bafed9fcbeb230c3e5533920a0f3012882dd4bbde83028a67549825794e2d2c3cf76eba7918b71370e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Rust export targets
+        run: |
+          rustup toolchain install "${RUST_EXPORT_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_EXPORT_TOOLCHAIN}"
+          rustup target add \
+            armv7-linux-androideabi \
+            aarch64-linux-android \
+            i686-linux-android \
+            x86_64-linux-android
+      - name: Download authenticated Godot editor and export templates
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}/${GODOT_ARCHIVE}" \
+            --output "${RUNNER_TEMP}/${GODOT_ARCHIVE}"
+          python3 -c \
+            'import hashlib, os, pathlib, sys; p=pathlib.Path(os.environ["RUNNER_TEMP"])/os.environ["GODOT_ARCHIVE"]; actual=hashlib.sha512(p.read_bytes()).hexdigest(); expected=os.environ["GODOT_SHA512"]; sys.exit(f"SHA-512 mismatch: {actual}") if actual != expected else None'
+          python3 -m zipfile -e \
+            "${RUNNER_TEMP}/${GODOT_ARCHIVE}" "${RUNNER_TEMP}/godot"
+          chmod +x "${RUNNER_TEMP}/godot/${GODOT_BINARY_NAME}"
+          echo "GODOT_BINARY=${RUNNER_TEMP}/godot/${GODOT_BINARY_NAME}" \
+            >> "${GITHUB_ENV}"
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/SHA512-SUMS.txt" \
+            --output "${RUNNER_TEMP}/SHA512-SUMS.txt"
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_TEMPLATE_ARCHIVE}" \
+            --output "${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}"
+          awk \
+            -v archive="${GODOT_TEMPLATE_ARCHIVE}" \
+            -v path="${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}" \
+            '$2 == archive { print $1 "  " path; found = 1 }
+             END { if (!found) exit 1 }' \
+            "${RUNNER_TEMP}/SHA512-SUMS.txt" \
+            | sha512sum --check -
+          python3 -m zipfile -e \
+            "${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}" \
+            "${RUNNER_TEMP}/export-templates"
+          test -f "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
+      - name: Stage native editor plugin tools
+        run: python3 tools/stage_example_plugin.py
+      - name: Build every Android Script Host architecture
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME}}"
+          prebuilt="$(find "${ndk}/toolchains/llvm/prebuilt" \
+            -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          for mapping in \
+            "armv7-linux-androideabi armv7a-linux-androideabi" \
+            "aarch64-linux-android aarch64-linux-android" \
+            "i686-linux-android i686-linux-android" \
+            "x86_64-linux-android x86_64-linux-android"
+          do
+            target="${mapping%% *}"
+            clang_target="${mapping#* }"
+            linker="${prebuilt}/bin/${clang_target}21-clang"
+            test -x "${linker}"
+            variable="CARGO_TARGET_$(echo "${target}" \
+              | tr '[:lower:]-' '[:upper:]_')_LINKER"
+            export "${variable}=${linker}"
+            echo "${variable}=${linker}" >> "${GITHUB_ENV}"
+            cargo build --release --locked \
+              --target "${target}" \
+              -p godot_rs_host --lib
+          done
+      - name: Create isolated Android debug key
+        run: |
+          keytool -genkeypair \
+            -keystore "${RUNNER_TEMP}/godot-rust-debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -dname "CN=Android Debug,O=GodotHub,C=US" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000
+      - name: Export Android APK with Rust libraries
+        run: >-
+          python3 tools/test_platform_export.py
+          --godot "${GODOT_BINARY}"
+          --platform Android
+          --architecture x86_64
+          --template
+          "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
+          --host
+          "target/x86_64-linux-android/release/libgodot_rs_host.so"
+          --debug-keystore
+          "${RUNNER_TEMP}/godot-rust-debug.keystore"
+          --android-sdk "${ANDROID_HOME}"
+          --java-sdk "${JAVA_HOME}"
+          --no-build
+          --evidence-output artifacts/android
+      - name: Boot isolated Android emulator
+        timeout-minutes: 15
+        run: |
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          avdmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/avdmanager"
+          adb="${ANDROID_HOME}/platform-tools/adb"
+          test -x "${sdkmanager}"
+          test -x "${avdmanager}"
+          "${sdkmanager}" \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-35;google_apis;x86_64"
+          echo no | "${avdmanager}" create avd \
+            --force \
+            --name godot-rust-runtime \
+            --package "system-images;android-35;google_apis;x86_64"
+          test -x "${adb}"
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+          nohup "${ANDROID_HOME}/emulator/emulator" \
+            -avd godot-rust-runtime \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -gpu swiftshader_indirect \
+            > artifacts/android/emulator.log 2>&1 &
+          "${adb}" wait-for-device
+          for attempt in {1..90}; do
+            if [[ "$("${adb}" shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]; then
+              break
+            fi
+            if [[ "${attempt}" == "90" ]]; then
+              echo "Android emulator did not finish booting after 180 seconds"
+            fi
+            sleep 2
+          done
+          test "$("${adb}" shell getprop sys.boot_completed | tr -d '\r')" = "1"
+          "${adb}" shell input keyevent 82
+      - name: Run Rust scripts inside Android
+        run: >-
+          python3 tools/test_android_runtime.py
+          --adb "${ANDROID_HOME}/platform-tools/adb"
+          --apk artifacts/android/godothub_project.apk
+          --package org.godothub.rusttest
+          --log-output artifacts/android/runtime.log
+      - name: Export Extension Mode Android APK
+        run: >-
+          python3 tools/test_native_platform_export.py
+          --godot "${GODOT_BINARY}"
+          --platform Android
+          --architecture x86_64
+          --template
+          "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
+          --host
+          "target/x86_64-linux-android/release/libgodot_rs_host.so"
+          --debug-keystore
+          "${RUNNER_TEMP}/godot-rust-debug.keystore"
+          --android-sdk "${ANDROID_HOME}"
+          --java-sdk "${JAVA_HOME}"
+          --no-build
+          --evidence-output artifacts/native-android
+      - name: Run Extension Mode inside Android
+        run: >-
+          python3 tools/test_android_runtime.py
+          --adb "${ANDROID_HOME}/platform-tools/adb"
+          --apk artifacts/native-android/godothub_project.apk
+          --package org.godothub.rusttest
+          --required-marker "GODOT_RS_NATIVE_READY api=4.4"
+          --required-marker GODOT_RS_NATIVE_CLASS_OK
+          --required-marker "GODOT_RS_NATIVE_STOPPED api=4.4"
+          --allow-process-exit
+          --log-output artifacts/native-android/runtime.log
+      - name: Validate remaining Android architecture exports
+        shell: bash
+        run: |
+          for mapping in \
+            "arm32 armv7-linux-androideabi" \
+            "arm64 aarch64-linux-android" \
+            "x86_32 i686-linux-android"
+          do
+            architecture="${mapping%% *}"
+            target="${mapping#* }"
+            common=(
+              --godot "${GODOT_BINARY}"
+              --platform Android
+              --architecture "${architecture}"
+              --template
+              "${RUNNER_TEMP}/export-templates/templates/android_source.zip"
+              --host
+              "target/${target}/release/libgodot_rs_host.so"
+              --debug-keystore
+              "${RUNNER_TEMP}/godot-rust-debug.keystore"
+              --android-sdk "${ANDROID_HOME}"
+              --java-sdk "${JAVA_HOME}"
+              --no-build
+            )
+            python3 tools/test_platform_export.py \
+              "${common[@]}" \
+              --evidence-output "artifacts/android-${architecture}"
+            python3 tools/test_native_platform_export.py \
+              "${common[@]}" \
+              --evidence-output "artifacts/native-android-${architecture}"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-export-evidence
+          path: artifacts
+          if-no-files-found: error
+
+  web:
+    name: Godot ${{ matrix.api }} Web runtime
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.scope == 'all' ||
+      inputs.scope == 'web'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: "4.4"
+            release: "4.4.1"
+            emscripten: "3.1.64"
+            emsdk_commit: 0b3bcbc3b005cbb811d48e497eabcc6846d43001
+          - api: "4.5"
+            release: "4.5.2"
+            emscripten: "4.0.10"
+            emsdk_commit: 62a853cd3b3134398ce85cde8bb5cbb2ef0194cb
+          - api: "4.6"
+            release: "4.6.3"
+            emscripten: "4.0.20"
+            emsdk_commit: e4fe26ef59168ff44f4c23c466e497bf60b3411e
+          - api: "4.7"
+            release: "4.7.1"
+            emscripten: "4.0.20"
+            emsdk_commit: e4fe26ef59168ff44f4c23c466e497bf60b3411e
+    env:
+      GODOT_TAG: ${{ matrix.release }}-stable
+      GODOT_ARCHIVE: Godot_v${{ matrix.release }}-stable_linux.x86_64.zip
+      GODOT_BINARY_NAME: Godot_v${{ matrix.release }}-stable_linux.x86_64
+      GODOT_TEMPLATE_ARCHIVE: >-
+        Godot_v${{ matrix.release }}-stable_export_templates.tpz
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned Rust Web toolchain
+        run: >-
+          rustup toolchain install "${WEB_RUST_TOOLCHAIN}"
+          --profile minimal --component rust-src
+      - name: Download authenticated Godot editor and Web template
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/SHA512-SUMS.txt" \
+            --output "${RUNNER_TEMP}/SHA512-SUMS.txt"
+          for archive in "${GODOT_ARCHIVE}" "${GODOT_TEMPLATE_ARCHIVE}"; do
+            path="${RUNNER_TEMP}/${archive}"
+            curl --fail --location --retry 3 \
+              "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${archive}" \
+              --output "${path}"
+            awk \
+              -v archive="${archive}" \
+              -v path="${path}" \
+              '$2 == archive { print $1 "  " path; found = 1 }
+               END { if (!found) exit 1 }' \
+              "${RUNNER_TEMP}/SHA512-SUMS.txt" \
+              | sha512sum --check -
+          done
+          python3 -m zipfile -e \
+            "${RUNNER_TEMP}/${GODOT_ARCHIVE}" "${RUNNER_TEMP}/godot"
+          chmod +x "${RUNNER_TEMP}/godot/${GODOT_BINARY_NAME}"
+          echo "GODOT_BINARY=${RUNNER_TEMP}/godot/${GODOT_BINARY_NAME}" \
+            >> "${GITHUB_ENV}"
+          python3 -m zipfile -e \
+            "${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}" \
+            "${RUNNER_TEMP}/export-templates"
+          test -f \
+            "${RUNNER_TEMP}/export-templates/templates/web_dlink_nothreads_release.zip"
+      - name: Stage native editor plugin tools
+        run: python3 tools/stage_example_plugin.py
+      - name: Install authenticated Emscripten toolchain
+        run: |
+          git clone --branch "${{ matrix.emscripten }}" --depth 1 \
+            https://github.com/emscripten-core/emsdk.git \
+            "${RUNNER_TEMP}/emsdk"
+          test "$(git -C "${RUNNER_TEMP}/emsdk" rev-parse HEAD)" = \
+            "${{ matrix.emsdk_commit }}"
+          "${RUNNER_TEMP}/emsdk/emsdk" install "${{ matrix.emscripten }}"
+          "${RUNNER_TEMP}/emsdk/emsdk" activate "${{ matrix.emscripten }}"
+      - name: Install pinned browser runtime
+        run: |
+          python3 -m pip install playwright==1.54.0
+          python3 -m playwright install --with-deps chromium
+      - name: Build and run Web Host and project module
+        shell: bash
+        run: |
+          source "${RUNNER_TEMP}/emsdk/emsdk_env.sh"
+          export RUSTUP_TOOLCHAIN="${WEB_RUST_TOOLCHAIN}"
+          export EMCC_SKIP_SANITY_CHECK=1
+          export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="\
+            -C link-arg=--no-entry \
+            -C link-arg=-sSIDE_MODULE=2 \
+            -C link-arg=-sWASM_BIGINT \
+            -C link-arg=-sERROR_ON_UNDEFINED_SYMBOLS=0 \
+            -C link-arg=-sSUPPORT_LONGJMP=0 \
+            -C link-arg=-sDISABLE_EXCEPTION_CATCHING=1 \
+            -C link-arg=-O0 \
+            -C symbol-mangling-version=v0 \
+            -C panic=abort"
+          cargo build -Z build-std=std,panic_abort --release --locked \
+            --target wasm32-unknown-emscripten \
+            -p godot_rs_host --lib
+          if wasm-dis \
+            target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            -o - \
+            | grep -E '\(import "env" "(invoke_|__cxa|__resumeException)'; then
+            echo "Web Host imports an unsupported JavaScript exception bridge"
+            exit 1
+          fi
+          python3 tools/test_platform_export.py \
+            --godot "${GODOT_BINARY}" \
+            --godot-api "${{ matrix.api }}" \
+            --platform Web \
+            --architecture wasm32 \
+            --template \
+              "${RUNNER_TEMP}/export-templates/templates/web_dlink_nothreads_release.zip" \
+            --host \
+              target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            --no-build \
+            --run-web \
+            --evidence-output "artifacts/web-${{ matrix.api }}"
+          python3 tools/test_native_platform_export.py \
+            --godot "${GODOT_BINARY}" \
+            --godot-api "${{ matrix.api }}" \
+            --platform Web \
+            --architecture wasm32 \
+            --template \
+              "${RUNNER_TEMP}/export-templates/templates/web_dlink_nothreads_release.zip" \
+            --host \
+              target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            --no-build \
+            --run-web \
+            --evidence-output "artifacts/native-web-${{ matrix.api }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-${{ matrix.api }}-export-evidence
+          path: artifacts
+          if-no-files-found: error
+
+  apple:
+    name: macOS application and iOS Xcode project
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.scope == 'all' ||
+      inputs.scope == 'apple'
+    runs-on: macos-latest
+    env:
+      GODOT_ARCHIVE: Godot_v4.4.1-stable_macos.universal.zip
+      GODOT_BINARY_NAME: Godot.app/Contents/MacOS/Godot
+      GODOT_SHA512: e72933ed15db495a29c918b27adc83596b6a4dc59ec72c927e1591333df14f0eb57c515a94f9f5a0ed8a13053d55f6aedf56f2a2d828add2ef3f79c698db714b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install Apple Rust targets
+        run: |
+          rustup toolchain install "${RUST_EXPORT_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_EXPORT_TOOLCHAIN}"
+          rustup target add \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+      - name: Download authenticated Godot editor and export templates
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot-builds/releases/download/${GODOT_TAG}/${GODOT_ARCHIVE}" \
+            --output "${RUNNER_TEMP}/${GODOT_ARCHIVE}"
+          python3 -c \
+            'import hashlib, os, pathlib, sys; p=pathlib.Path(os.environ["RUNNER_TEMP"])/os.environ["GODOT_ARCHIVE"]; actual=hashlib.sha512(p.read_bytes()).hexdigest(); expected=os.environ["GODOT_SHA512"]; sys.exit(f"SHA-512 mismatch: {actual}") if actual != expected else None'
+          python3 -m zipfile -e \
+            "${RUNNER_TEMP}/${GODOT_ARCHIVE}" "${RUNNER_TEMP}/godot"
+          chmod +x "${RUNNER_TEMP}/godot/${GODOT_BINARY_NAME}"
+          echo "GODOT_BINARY=${RUNNER_TEMP}/godot/${GODOT_BINARY_NAME}" \
+            >> "${GITHUB_ENV}"
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/SHA512-SUMS.txt" \
+            --output "${RUNNER_TEMP}/SHA512-SUMS.txt"
+          curl --fail --location --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_TAG}/${GODOT_TEMPLATE_ARCHIVE}" \
+            --output "${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}"
+          awk \
+            -v archive="${GODOT_TEMPLATE_ARCHIVE}" \
+            -v path="${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}" \
+            '$2 == archive { print $1 "  " path; found = 1 }
+             END { if (!found) exit 1 }' \
+            "${RUNNER_TEMP}/SHA512-SUMS.txt" \
+            | shasum --algorithm 512 --check
+          python3 -m zipfile -e \
+            "${RUNNER_TEMP}/${GODOT_TEMPLATE_ARCHIVE}" \
+            "${RUNNER_TEMP}/export-templates"
+          test -f "${RUNNER_TEMP}/export-templates/templates/ios.zip"
+          test -f "${RUNNER_TEMP}/export-templates/templates/macos.zip"
+          template_home="${HOME}/Library/Application Support/Godot/export_templates/${GODOT_RELEASE}.stable"
+          mkdir -p "${template_home}"
+          cp \
+            "${RUNNER_TEMP}/export-templates/templates/ios.zip" \
+            "${template_home}/ios.zip"
+          cp \
+            "${RUNNER_TEMP}/export-templates/templates/macos.zip" \
+            "${template_home}/macos.zip"
+      - name: Stage native editor plugin tools
+        run: python3 tools/stage_example_plugin.py
+      - name: Build Universal macOS Script Host
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "${target}" \
+              -p godot_rs_host --lib
+          done
+          lipo -create \
+            target/aarch64-apple-darwin/release/libgodot_rs_host.dylib \
+            target/x86_64-apple-darwin/release/libgodot_rs_host.dylib \
+            -output \
+              example/addons/godot-rust/bin/macos-universal/libgodot_rs_host.dylib
+          lipo \
+            example/addons/godot-rust/bin/macos-universal/libgodot_rs_host.dylib \
+            -verify_arch arm64 x86_64
+      - name: Export and run a complete macOS application
+        run: >-
+          python3 tools/test_godot_export.py
+          --godot "${GODOT_BINARY}"
+          --template "${RUNNER_TEMP}/export-templates/templates/macos.zip"
+          --no-build
+      - name: Export and run a Native macOS application
+        run: >-
+          python3 tools/test_native_desktop_export.py
+          --godot "${GODOT_BINARY}"
+          --template "${RUNNER_TEMP}/export-templates/templates/macos.zip"
+          --no-build
+      - name: Build iOS Script Host slices
+        run: |
+          for target in \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+          do
+            cargo build --release --locked --target "${target}" \
+              -p godot_rs_host --lib
+          done
+          mkdir -p artifacts/apple-input
+          lipo -create \
+            target/aarch64-apple-ios-sim/release/libgodot_rs_host.dylib \
+            target/x86_64-apple-ios/release/libgodot_rs_host.dylib \
+            -output artifacts/apple-input/ios-simulator-host.dylib
+      - name: Create iOS Script Host XCFramework
+        run: >-
+          python3 tools/create_apple_xcframework.py
+          --ios-device
+          target/aarch64-apple-ios/release/libgodot_rs_host.dylib
+          --ios-simulator
+          artifacts/apple-input/ios-simulator-host.dylib
+          --version
+          "$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          --output artifacts/godot_rs_host.xcframework
+      - name: Export iOS Xcode project with Rust frameworks
+        run: >-
+          python3 tools/test_platform_export.py
+          --godot "${GODOT_BINARY}"
+          --platform iOS
+          --architecture arm64
+          --template "${RUNNER_TEMP}/export-templates/templates/ios.zip"
+          --host artifacts/godot_rs_host.xcframework
+          --no-build
+          --build-ios
+          --run-ios
+          --evidence-output artifacts/ios
+      - name: Export Extension Mode iOS Xcode project
+        run: >-
+          python3 tools/test_native_platform_export.py
+          --godot "${GODOT_BINARY}"
+          --platform iOS
+          --architecture arm64
+          --template "${RUNNER_TEMP}/export-templates/templates/ios.zip"
+          --host artifacts/godot_rs_host.xcframework
+          --no-build
+          --build-ios
+          --run-ios
+          --evidence-output artifacts/native-ios
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apple-export-evidence
+          path: artifacts
+          if-no-files-found: error

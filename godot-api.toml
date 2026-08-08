@@ -1,0 +1,72 @@
+schema_version = 1
+host_baseline = "4.4"
+native_targets = ["4.4", "4.5", "4.6", "4.7"]
+source_repository = "https://github.com/godotengine/godot"
+
+[sources."4.4"]
+godot_tag = "4.4-stable"
+
+[sources."4.4".gdextension_interface]
+filename = "gdextension_interface.h"
+url = "https://raw.githubusercontent.com/godotengine/godot/4.4-stable/core/extension/gdextension_interface.h"
+sha256 = "355ff4c6254fdd434ea16d9a8ef0f18e3f95aeb3e3f00d98db10769ece3c7fe5"
+
+[sources."4.4".extension_api]
+filename = "extension_api.json"
+acquisition = "Run the official Godot 4.4.1 editor with --headless --dump-extension-api"
+generator_version = "4.4.1.stable.official.49a5bc7b6"
+sha256 = "1136ad8c676034a0d9ac15ec55f1f4c79f300fd645f45a08a129c0254ca95d51"
+
+[sources."4.5"]
+godot_tag = "4.5-stable"
+
+[sources."4.5".gdextension_interface]
+filename = "gdextension_interface.h"
+url = "https://raw.githubusercontent.com/godotengine/godot/4.5-stable/core/extension/gdextension_interface.h"
+sha256 = "a40ac4fca0f526910bd0e6afc6da6c169f50801c84d4e29c4ce2891cadc7b550"
+
+[sources."4.5".extension_api]
+filename = "extension_api.json"
+acquisition = "Run the official Godot 4.5.2 editor with --headless --dump-extension-api"
+generator_version = "4.5.2.stable.official.6ce3de25a"
+sha256 = "481ed7dc8efc79e951081187cd5d651d6b34e2365a463f4f12adeab2f63475c8"
+
+[sources."4.6"]
+godot_tag = "4.6-stable"
+
+[sources."4.6".gdextension_interface]
+filename = "gdextension_interface.h"
+acquisition = "Run the official Godot 4.6.3 editor with --headless --dump-gdextension-interface"
+generator_version = "4.6.3.stable.official.7d41c59c4"
+sha256 = "6228db9a0be9bb154a89911a69ee7ec767f2d40004b3ed5b1d08eebf90bcd16b"
+
+[sources."4.6".gdextension_interface_json]
+filename = "gdextension_interface.json"
+url = "https://raw.githubusercontent.com/godotengine/godot/4.6-stable/core/extension/gdextension_interface.json"
+sha256 = "34d7058f31af186d36b84567e70a9f9543da0d74f25cfe5266d4fe2d27e090f0"
+
+[sources."4.6".extension_api]
+filename = "extension_api.json"
+acquisition = "Run the official Godot 4.6.3 editor with --headless --dump-extension-api"
+generator_version = "4.6.3.stable.official.7d41c59c4"
+sha256 = "c7a3f647d9a6d6e7f3361d8a88ffc7486a708b59262ab2f0ceae54a3d87df74d"
+
+[sources."4.7"]
+godot_tag = "4.7-stable"
+
+[sources."4.7".gdextension_interface]
+filename = "gdextension_interface.h"
+acquisition = "Run the official Godot 4.7.1 editor with --headless --dump-gdextension-interface"
+generator_version = "4.7.1.stable.official.a13da4feb"
+sha256 = "640b48188708ba0016f8d7ace9e0e1d3279a41fa1226c59ff3193b15538bd254"
+
+[sources."4.7".gdextension_interface_json]
+filename = "gdextension_interface.json"
+url = "https://raw.githubusercontent.com/godotengine/godot/4.7-stable/core/extension/gdextension_interface.json"
+sha256 = "7d8c0a039d9743eb8ebf88681ae0c641d8d3aa5ffca11081745a84da803e09a1"
+
+[sources."4.7".extension_api]
+filename = "extension_api.json"
+acquisition = "Run the official Godot 4.7.1 editor with --headless --dump-extension-api"
+generator_version = "4.7.1.stable.official.a13da4feb"
+sha256 = "c5dbd0c117e67f96bd9fef2c2e2023913e1d750d072ad2417a559e698211800b"

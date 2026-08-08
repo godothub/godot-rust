@@ -1,0 +1,5 @@
+error: default arguments must be trailing; add defaults to every following fixed argument
+ --> tests/ui/fail/non_trailing_default.rs:9:12
+  |
+9 |     fn add(&self, #[default(20)] left: i64, right: i64) -> i64 {
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

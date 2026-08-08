@@ -1,0 +1,5 @@
+error: RPC channel must fit an unsigned 32-bit integer
+ --> tests/ui/fail/bad_rpc_channel.rs:8:21
+  |
+8 |     #[rpc(channel = -1)]
+  |                     ^

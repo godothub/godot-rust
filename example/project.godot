@@ -1,0 +1,18 @@
+; Open this directory with Godot 4.4 or newer.
+
+config_version=5
+
+[application]
+
+config/name="godot-rust Hello Rust"
+config/icon="res://icon.svg"
+run/main_scene="res://main.tscn"
+
+[editor_plugins]
+
+enabled=PackedStringArray("godot-rust")
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

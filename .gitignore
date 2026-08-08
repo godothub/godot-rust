@@ -1,0 +1,74 @@
+# Rust and Cargo build products
+**/target/
+*.rs.bk
+*.rlib
+*.rmeta
+
+# Cargo credentials are never project configuration. Keep .cargo/config.toml.
+**/.cargo/credentials
+**/.cargo/credentials.toml
+
+# Godot editor and imported-resource cache
+**/.godot/
+/.godot-rust/
+/godot_rs_project.gdextension
+
+# Python environments, bytecode, and tool caches
+**/__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# Native build and linker products
+*.dylib
+*.dll
+*.so
+*.a
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.exe
+*.wasm
+*.dSYM/
+
+# Coverage, profiling, and release assembly
+/coverage/
+/htmlcov/
+/dist/
+/artifacts/
+.coverage
+*.profraw
+*.profdata
+lcov.info
+
+# Local environment and editor state
+.env
+.env.*
+!.env.example
+.idea/
+.fleet/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+.AppleDouble
+Thumbs.db
+Desktop.ini
+
+# Canonical addon build tools are assembled locally.
+example/addons/godot-rust/bin/*
+!example/addons/godot-rust/bin/.godothub
+tests/fixtures/host_load/addons/godot-rust/bin/*
+!tests/fixtures/host_load/addons/godot-rust/bin/.godothub

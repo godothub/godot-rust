@@ -1,0 +1,5 @@
+error: the trailing `&[Variant]` variable-argument slice cannot have a default
+ --> tests/ui/fail/vararg_default.rs:9:14
+  |
+9 |     fn count(&self, #[default(&[])] values: &[Variant]) -> i64 {
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

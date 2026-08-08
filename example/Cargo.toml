@@ -1,0 +1,22 @@
+[package]
+name = "godothub_project"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+godot_rs = { version = "0.9", path = "../crates/godot_rs" }
+
+[package.metadata.godot-rust]
+enabled = true
+mode = "script"
+godot = "4.4"
+scripts = "src/scripts"
+auto-check = true
+build-before-play = true
+auto-build-on-idle = false
+
+[workspace]

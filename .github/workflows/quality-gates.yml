@@ -1,0 +1,65 @@
+name: Quality gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: quality-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality and policy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install Rust MSRV
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.85.0
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Rust documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+      - name: Selected Native binding matrix
+        run: |
+          for api in 4.4 4.5 4.6 4.7; do
+            GODOT_RS_GODOT="${api}" cargo test --locked \
+              -p godot_rs_api -p godot_rs --lib
+          done
+      - name: Generated engine API performance
+        run: |
+          for api in 4.4 4.5 4.6 4.7; do
+            GODOT_RS_GODOT="${api}" cargo bench --locked \
+              -p godot_rs --bench engine_api_hot_paths
+          done
+      - name: Python tool tests
+        run: python3 -m unittest discover -s tests/python -v
+      - name: Dependency provenance
+        run: python3 tools/check_dependency_provenance.py
+      - name: Official Godot API provenance
+        run: |
+          python3 tools/verify_official_api.py
+          cargo run --locked -p godot_rs_codegen -- \
+            verify-targets godot-api.toml
+          cargo run --locked -p godot_rs_codegen -- \
+            verify-bundles \
+            godot-api.toml crates/godot_rs_api/generated
+          cargo test --locked -p godot_rs_api \
+            --features generator every_bundled_api_is_authenticated_and_complete
+      - name: Verify publishable API package
+        run: cargo package --locked -p godot_rs_api

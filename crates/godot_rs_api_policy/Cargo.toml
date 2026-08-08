@@ -1,0 +1,14 @@
+[package]
+name = "godot_rs_api_policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

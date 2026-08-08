@@ -1,0 +1,5 @@
+error: `no_alpha` requires a Color field
+ --> tests/ui/fail/bad_color_hint.rs:5:14
+  |
+5 |     #[export(no_alpha)]
+  |              ^^^^^^^^

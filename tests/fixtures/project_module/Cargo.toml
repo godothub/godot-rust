@@ -1,0 +1,16 @@
+[package]
+name = "godot_rs_host_smoke_module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+godot_rs.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

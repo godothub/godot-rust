@@ -1,0 +1,5 @@
+[build]
+target-dir = ".godot/rust/target"
+
+[env]
+GODOT_RS_GODOT = { value = "4.4", force = true }

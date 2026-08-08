@@ -1,0 +1,5 @@
+error: attachable scripts require `#[script(base = GodotClass)]`
+ --> tests/ui/fail/missing_base.rs:4:8
+  |
+4 | struct Player;
+  |        ^^^^^^

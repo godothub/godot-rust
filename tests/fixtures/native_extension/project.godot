@@ -1,0 +1,16 @@
+; Engine configuration file.
+; Used only by the automated godot-rust Native Extension load test.
+
+config_version=5
+
+[application]
+
+config/name="godot-rust Native Extension Load Test"
+config/icon="res://icon.svg"
+run/main_scene="res://main.tscn"
+
+[rendering]
+
+textures/vram_compression/import_etc2_astc=true
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

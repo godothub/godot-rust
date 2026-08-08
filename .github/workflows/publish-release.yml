@@ -1,0 +1,540 @@
+name: Publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RUST_RELEASE_TOOLCHAIN: "1.85.0"
+  WEB_RUST_TOOLCHAIN: nightly-2025-02-20
+
+jobs:
+  functional-gates:
+    name: Functional editor gates
+    needs: validate
+    uses: ./.github/workflows/godot-editor-integration.yml
+
+  platform-export-gates:
+    name: Mobile and Web export gates
+    needs: validate
+    uses: ./.github/workflows/platform-export-validation.yml
+
+  stability-gates:
+    name: Runtime stability gates
+    needs: validate
+    uses: ./.github/workflows/runtime-stability.yml
+
+  validate:
+    name: Validate release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install release Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+      - name: Install RustSec audit tool
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Validate version and changelog
+        run: python3 tools/validate_release.py --version "${{ inputs.version }}"
+      - name: Ensure exact release tag does not exist
+        run: |
+          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "Tag already exists: ${{ inputs.version }}"
+            exit 1
+          fi
+      - name: Run policy checks
+        run: |
+          cargo test --workspace --locked
+          cargo audit
+          for api in 4.4 4.5 4.6 4.7; do
+            GODOT_RS_GODOT="${api}" cargo test --locked \
+              -p godot_rs_api -p godot_rs --lib
+          done
+          python3 -m unittest discover -s tests/python -v
+          python3 tools/check_dependency_provenance.py
+          python3 tools/verify_official_api.py
+          cargo run --locked -p godot_rs_codegen -- \
+            verify-targets godot-api.toml
+          cargo run --locked -p godot_rs_codegen -- \
+            verify-bundles \
+            godot-api.toml crates/godot_rs_api/generated
+
+  build-linux:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            tools: true
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            tools: true
+          - platform: linux-arm32
+            target: armv7-unknown-linux-gnueabihf
+            tools: false
+          - platform: linux-x86_32
+            target: i686-unknown-linux-gnu
+            tools: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install release Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+          rustup target add "${{ matrix.target }}"
+      - name: Install ARM64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
+      - name: Install ARM32 linker
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-arm-linux-gnueabihf
+      - name: Install x86 linker
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-multilib
+      - name: Build release binaries
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        run: |
+          if [[ "${{ matrix.tools }}" == "true" ]]; then
+            cargo build --release --locked --target "${{ matrix.target }}" \
+              -p godot_rs_host --lib --bin godot_rs_module_check
+            cargo build --release --locked --target "${{ matrix.target }}" \
+              -p godot_rs_buildd --bin godot_rs_buildd
+          else
+            cargo build --release --locked --target "${{ matrix.target }}" \
+              -p godot_rs_host --lib
+          fi
+      - name: Stage platform
+        run: |
+          output="dist/bin/${{ matrix.platform }}"
+          source="target/${{ matrix.target }}/release"
+          mkdir -p "${output}"
+          cp "${source}/libgodot_rs_host.so" "${output}/"
+          if [[ "${{ matrix.tools }}" == "true" ]]; then
+            cp "${source}/godot_rs_buildd" "${output}/"
+            cp "${source}/godot_rs_module_check" "${output}/"
+          fi
+          chmod 755 "${output}/"*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-binaries-${{ matrix.platform }}
+          path: dist/bin
+          if-no-files-found: error
+
+  build-apple:
+    name: Build Apple Hosts
+    needs: validate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install Apple release Rust targets
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+          rustup target add \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+      - name: Build macOS Host and tools
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "${target}" \
+              -p godot_rs_host --lib --bin godot_rs_module_check
+            cargo build --release --locked --target "${target}" \
+              -p godot_rs_buildd --bin godot_rs_buildd
+          done
+      - name: Build iOS device and simulator Hosts
+        run: |
+          for target in \
+            aarch64-apple-ios \
+            aarch64-apple-ios-sim \
+            x86_64-apple-ios
+          do
+            cargo build --release --locked --target "${target}" \
+              -p godot_rs_host --lib
+          done
+      - name: Create universal Apple binaries
+        run: |
+          mkdir -p dist/apple-input dist/bin/macos-universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/libgodot_rs_host.dylib \
+            target/x86_64-apple-darwin/release/libgodot_rs_host.dylib \
+            -output dist/bin/macos-universal/libgodot_rs_host.dylib
+          lipo -create \
+            target/aarch64-apple-ios-sim/release/libgodot_rs_host.dylib \
+            target/x86_64-apple-ios/release/libgodot_rs_host.dylib \
+            -output dist/apple-input/ios-simulator-host.dylib
+          for name in godot_rs_buildd godot_rs_module_check; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/${name}" \
+              "target/x86_64-apple-darwin/release/${name}" \
+              -output "dist/bin/macos-universal/${name}"
+          done
+          chmod 755 dist/apple-input/* dist/bin/macos-universal/*
+      - name: Create and verify Apple XCFramework
+        run: |
+          python3 tools/create_apple_xcframework.py \
+            --ios-device \
+              target/aarch64-apple-ios/release/libgodot_rs_host.dylib \
+            --ios-simulator dist/apple-input/ios-simulator-host.dylib \
+            --version "${{ inputs.version }}" \
+            --output dist/bin/apple/godot_rs_host.xcframework
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-binaries-apple
+          path: dist/bin
+          if-no-files-found: error
+
+  build-windows:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            tools: true
+          - platform: windows-x86_32
+            target: i686-pc-windows-msvc
+            tools: false
+          - platform: windows-arm64
+            target: aarch64-pc-windows-msvc
+            tools: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install release Rust target
+        shell: bash
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+          rustup target add "${{ matrix.target }}"
+      - name: Build release binaries
+        shell: bash
+        run: |
+          if [[ "${{ matrix.tools }}" == "true" ]]; then
+            cargo build --release --locked --target "${{ matrix.target }}" \
+              -p godot_rs_host --lib --bin godot_rs_module_check
+            cargo build --release --locked --target "${{ matrix.target }}" \
+              -p godot_rs_buildd --bin godot_rs_buildd
+          else
+            cargo build --release --locked --target "${{ matrix.target }}" \
+              -p godot_rs_host --lib
+          fi
+      - name: Stage platform
+        shell: bash
+        run: |
+          output="dist/bin/${{ matrix.platform }}"
+          source="target/${{ matrix.target }}/release"
+          mkdir -p "${output}"
+          cp "${source}/godot_rs_host.dll" "${output}/"
+          if [[ "${{ matrix.tools }}" == "true" ]]; then
+            cp "${source}/godot_rs_buildd.exe" "${output}/"
+            cp "${source}/godot_rs_module_check.exe" "${output}/"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-binaries-${{ matrix.platform }}
+          path: dist/bin
+          if-no-files-found: error
+
+  build-android:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android-arm32
+            target: armv7-linux-androideabi
+            clang_target: armv7a-linux-androideabi
+          - platform: android-arm64
+            target: aarch64-linux-android
+            clang_target: aarch64-linux-android
+          - platform: android-x86_32
+            target: i686-linux-android
+            clang_target: i686-linux-android
+          - platform: android-x86_64
+            target: x86_64-linux-android
+            clang_target: x86_64-linux-android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install release Rust target
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+          rustup target add "${{ matrix.target }}"
+      - name: Build Android Script Host
+        shell: bash
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME}}"
+          test -d "${ndk}/toolchains/llvm/prebuilt"
+          prebuilt="$(find "${ndk}/toolchains/llvm/prebuilt" \
+            -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          linker="${prebuilt}/bin/${{ matrix.clang_target }}21-clang"
+          test -x "${linker}"
+          variable="CARGO_TARGET_$(echo '${{ matrix.target }}' \
+            | tr '[:lower:]-' '[:upper:]_')_LINKER"
+          export "${variable}=${linker}"
+          cargo build --release --locked --target "${{ matrix.target }}" \
+            -p godot_rs_host --lib
+      - name: Stage Android Script Host
+        run: |
+          output="dist/bin/${{ matrix.platform }}"
+          mkdir -p "${output}"
+          cp \
+            "target/${{ matrix.target }}/release/libgodot_rs_host.so" \
+            "${output}/"
+          chmod 755 "${output}/libgodot_rs_host.so"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-binaries-${{ matrix.platform }}
+          path: dist/bin
+          if-no-files-found: error
+
+  build-web:
+    name: Build web-godot-${{ matrix.godot }}
+    needs: validate
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - godot: "4.4"
+            emscripten: "3.1.64"
+            emsdk_commit: 0b3bcbc3b005cbb811d48e497eabcc6846d43001
+          - godot: "4.5"
+            emscripten: "4.0.10"
+            emsdk_commit: 62a853cd3b3134398ce85cde8bb5cbb2ef0194cb
+          - godot: "4.6"
+            emscripten: "4.0.20"
+            emsdk_commit: e4fe26ef59168ff44f4c23c466e497bf60b3411e
+          - godot: "4.7"
+            emscripten: "4.0.20"
+            emsdk_commit: e4fe26ef59168ff44f4c23c466e497bf60b3411e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install release Rust target
+        run: |
+          rustup toolchain install "${WEB_RUST_TOOLCHAIN}" \
+            --profile minimal --component rust-src
+      - name: Install authenticated Emscripten toolchain
+        run: |
+          git clone --branch "${{ matrix.emscripten }}" --depth 1 \
+            https://github.com/emscripten-core/emsdk.git \
+            "${RUNNER_TEMP}/emsdk"
+          test "$(git -C "${RUNNER_TEMP}/emsdk" rev-parse HEAD)" = \
+            "${{ matrix.emsdk_commit }}"
+          "${RUNNER_TEMP}/emsdk/emsdk" install "${{ matrix.emscripten }}"
+          "${RUNNER_TEMP}/emsdk/emsdk" activate "${{ matrix.emscripten }}"
+      - name: Build Web Script Host side module
+        shell: bash
+        run: |
+          source "${RUNNER_TEMP}/emsdk/emsdk_env.sh"
+          export RUSTUP_TOOLCHAIN="${WEB_RUST_TOOLCHAIN}"
+          export EMCC_SKIP_SANITY_CHECK=1
+          export CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="\
+            -C link-arg=--no-entry \
+            -C link-arg=-sSIDE_MODULE=2 \
+            -C link-arg=-sWASM_BIGINT \
+            -C link-arg=-sERROR_ON_UNDEFINED_SYMBOLS=0 \
+            -C link-arg=-sSUPPORT_LONGJMP=0 \
+            -C link-arg=-sDISABLE_EXCEPTION_CATCHING=1 \
+            -C link-arg=-O0 \
+            -C symbol-mangling-version=v0 \
+            -C panic=abort"
+          cargo build -Z build-std=std,panic_abort --release --locked \
+            --target wasm32-unknown-emscripten \
+            -p godot_rs_host --lib
+          if wasm-dis \
+            target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            -o - \
+            | grep -E '\(import "env" "(invoke_|__cxa|__resumeException)'; then
+            echo "Web Host imports an unsupported JavaScript exception bridge"
+            exit 1
+          fi
+      - name: Stage Web Script Host
+        run: |
+          output="dist/bin/web-godot-${{ matrix.godot }}"
+          mkdir -p "${output}"
+          cp \
+            target/wasm32-unknown-emscripten/release/godot_rs_host.wasm \
+            "${output}/"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plugin-binaries-web-godot-${{ matrix.godot }}
+          path: dist/bin
+          if-no-files-found: error
+
+  assemble-release:
+    name: Assemble release package
+    needs:
+      - functional-gates
+      - platform-export-gates
+      - stability-gates
+      - validate
+      - build-linux
+      - build-apple
+      - build-windows
+      - build-android
+      - build-web
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install release Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: plugin-binaries-*
+          path: dist/binaries
+          merge-multiple: true
+      - name: Fetch locked dependency sources
+        run: cargo fetch --locked
+      - name: Read release notes and assemble plugin
+        run: |
+          python3 tools/validate_release.py \
+            --version "${{ inputs.version }}" \
+            --notes-output dist/release-notes.md
+          python3 tools/assemble_release.py \
+            --version "${{ inputs.version }}" \
+            --binaries dist/binaries \
+            --source-commit "${{ github.sha }}" \
+            --sbom-output "dist/godot-rust-${{ inputs.version }}.cyclonedx.json" \
+            --output "dist/godot-rust-${{ inputs.version }}.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-package
+          path: |
+            dist/godot-rust-${{ inputs.version }}.zip
+            dist/godot-rust-${{ inputs.version }}.cyclonedx.json
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-crates:
+    name: Publish Rust SDK
+    needs:
+      - assemble-release
+    runs-on: ubuntu-22.04
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install release Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_RELEASE_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_RELEASE_TOOLCHAIN}"
+      - name: Publish SDK crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          test -n "${CARGO_REGISTRY_TOKEN}"
+          for crate in godot_rs_api godot_rs_macros godot_rs; do
+            python3 tools/publish_crate.py \
+              --version "${{ inputs.version }}" \
+              "${crate}"
+          done
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - assemble-release
+      - publish-crates
+    runs-on: ubuntu-22.04
+    environment: release
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-package
+          path: dist
+      - name: Verify downloaded release package
+        run: >-
+          python3 tools/verify_release_package.py
+          --version "${{ inputs.version }}"
+          "dist/godot-rust-${{ inputs.version }}.zip"
+      - name: Attest release provenance
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: "dist/godot-rust-${{ inputs.version }}.zip"
+      - name: Attest release SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: "dist/godot-rust-${{ inputs.version }}.zip"
+          sbom-path: "dist/godot-rust-${{ inputs.version }}.cyclonedx.json"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.version }}" \
+            "dist/godot-rust-${{ inputs.version }}.zip" \
+            --target "${{ github.sha }}" \
+            --title "${{ inputs.version }}" \
+            --notes-file dist/release-notes.md
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release view "${VERSION}" --json isDraft,tagName,name,assets,url
+          test "$(gh release view "${VERSION}" --json isDraft --jq .isDraft)" = "false"
+          test "$(gh release view "${VERSION}" --json tagName --jq .tagName)" = "${VERSION}"
+          test "$(gh release view "${VERSION}" --json name --jq .name)" = "${VERSION}"
+          test "$(gh release view "${VERSION}" --json assets --jq '.assets | length')" = "1"
+          test "$(gh release view "${VERSION}" --json assets --jq '.assets[0].name')" = \
+            "godot-rust-${VERSION}.zip"
+          gh attestation verify "dist/godot-rust-${VERSION}.zip" \
+            --repo "${GITHUB_REPOSITORY}"
+          gh release view "${VERSION}" --json body \
+            > dist/published-release.json
+          python3 tools/validate_release.py \
+            --version "${VERSION}" \
+            --published-release-json dist/published-release.json

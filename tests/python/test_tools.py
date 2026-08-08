@@ -1448,6 +1448,14 @@ class StageHostTests(unittest.TestCase):
         self.assertIn("build_ios_xcode_targets(", source)
 
     def test_editor_flow_uses_an_isolated_project_copy(self):
+        canonical_plugin = (
+            ROOT / "example/addons/godot-rust/plugin.gd"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("_initialize_dialog", canonical_plugin)
+        self.assertIn(
+            'call_deferred("_initialize_project")',
+            canonical_plugin,
+        )
         self.assertTrue(test_editor_plugin.FLOW_PLUGIN.is_dir())
         flow = (test_editor_plugin.FLOW_PLUGIN / "plugin.gd").read_text(
             encoding="utf-8"
@@ -1478,6 +1486,39 @@ class StageHostTests(unittest.TestCase):
         )
         self.assertIn("GODOT_RUST_SETUP_USER_FILES_PRESERVED", setup)
         self.assertIn("GODOT_RUST_SETUP_BUILD_SUCCEEDED", setup)
+        self.assertTrue(test_editor_plugin.INITIALIZE_PLUGIN.is_dir())
+        initialize = (
+            test_editor_plugin.INITIALIZE_PLUGIN / "plugin.gd"
+        ).read_text(encoding="utf-8")
+        self.assertIn("GODOT_RUST_INITIALIZATION_AUTOMATIC", initialize)
+        self.assertIn("GODOT_RUST_INITIALIZATION_CONFIGURED", initialize)
+
+    def test_editor_initialization_starts_from_an_empty_cargo_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            test_editor_plugin.prepare_test_project(project, "initialize")
+
+            self.assertFalse((project / "Cargo.toml").exists())
+            self.assertFalse((project / "Cargo.lock").exists())
+            self.assertFalse((project / "src").exists())
+            self.assertFalse((project / ".cargo").exists())
+            self.assertFalse((project / "main.tscn").exists())
+            self.assertTrue(
+                (
+                    project
+                    / "addons"
+                    / "godot-rust-editor-initialize"
+                    / "plugin.cfg"
+                ).is_file()
+            )
+            settings = (project / "project.godot").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                'enabled=PackedStringArray("godot-rust", '
+                '"godot-rust-editor-initialize")',
+                settings,
+            )
 
     def test_expected_cargo_failure_does_not_hide_editor_errors(self):
         expected = "\n".join(

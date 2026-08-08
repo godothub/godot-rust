@@ -15,6 +15,7 @@ on:
       - "tests/fixtures/editor_flow/**"
       - "tests/fixtures/editor_diagnostics/**"
       - "tests/fixtures/editor_setup/**"
+      - "tests/fixtures/editor_initialize/**"
       - "tests/fixtures/host_load/**"
       - "tests/fixtures/project_module/**"
       - "tools/create_apple_xcframework.py"
@@ -109,6 +110,13 @@ jobs:
         run: >-
           python tools/test_editor_plugin.py
           --scenario setup
+          --godot "${GODOT_BINARY}"
+      - name: Automatically initialize an empty Godot project
+        shell: bash
+        run: >-
+          python tools/test_editor_plugin.py
+          --scenario initialize
+          --no-build
           --godot "${GODOT_BINARY}"
       - name: Export and run a Rust-script project
         shell: bash

@@ -49,6 +49,7 @@ REQUIRED_MARKERS = (
 FLOW_PLUGIN = ROOT / "tests" / "fixtures" / "editor_flow"
 DIAGNOSTICS_PLUGIN = ROOT / "tests" / "fixtures" / "editor_diagnostics"
 SETUP_PLUGIN = ROOT / "tests" / "fixtures" / "editor_setup"
+INITIALIZE_PLUGIN = ROOT / "tests" / "fixtures" / "editor_initialize"
 DIAGNOSTICS_MARKERS = (
     PROBE_MARKER,
     "GODOT_RUST_BASELINE_RECEIPT_RECORDED",
@@ -67,6 +68,11 @@ SETUP_MARKERS = (
     "GODOT_RUST_SETUP_USER_FILES_PRESERVED",
     "GODOT_RUST_SETUP_CONFIGURED",
     "GODOT_RUST_SETUP_BUILD_SUCCEEDED",
+)
+INITIALIZE_MARKERS = (
+    PROBE_MARKER,
+    "GODOT_RUST_INITIALIZATION_AUTOMATIC",
+    "GODOT_RUST_INITIALIZATION_CONFIGURED",
 )
 EXPECTED_CARGO_FAILURES = (
     (
@@ -186,6 +192,24 @@ enabled=PackedStringArray("godot-rust")
             encoding="utf-8",
         )
         (destination / "main.tscn").unlink()
+    elif scenario == "initialize":
+        fixture = INITIALIZE_PLUGIN
+        plugin_name = "godot-rust-editor-initialize"
+        (destination / "Cargo.toml").unlink()
+        (destination / "Cargo.lock").unlink()
+        shutil.rmtree(destination / "src")
+        shutil.rmtree(destination / ".cargo")
+        (destination / "project.godot").write_text(
+            """\
+[application]
+config/name="godot-rust editor initialization test"
+
+[editor_plugins]
+enabled=PackedStringArray("godot-rust")
+""",
+            encoding="utf-8",
+        )
+        (destination / "main.tscn").unlink()
     else:
         raise ValueError(f"unknown editor test scenario: {scenario}")
     addon = destination / "addons" / plugin_name
@@ -254,10 +278,13 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
     output = completed.stdout + completed.stderr + runtime_output
     diagnostics = scenario == "diagnostics"
     setup = scenario == "setup"
+    initialize = scenario == "initialize"
     if diagnostics:
         markers = DIAGNOSTICS_MARKERS
     elif setup:
         markers = SETUP_MARKERS
+    elif initialize:
+        markers = INITIALIZE_MARKERS
     else:
         markers = REQUIRED_MARKERS
     errors = output_errors(output, markers, diagnostics)
@@ -276,7 +303,7 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument(
         "--scenario",
-        choices=("flow", "diagnostics", "setup"),
+        choices=("flow", "diagnostics", "setup", "initialize"),
         default="flow",
     )
     parser.add_argument(

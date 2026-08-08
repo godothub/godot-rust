@@ -17,9 +17,6 @@ and the editor plugin coordinates the toolchain and runtime boundary.
 - **Godot-first workflow** — create and attach `.rs` files through Godot's
   standard script dialog; use the editor for Cargo setup, checking, builds,
   diagnostics, dependencies, play, and export.
-- **Native script concepts** — lifecycle callbacks, Inspector properties,
-  hidden properties, signals, RPC, node references, global classes, custom
-  Resources, script inheritance, and parent calls have typed Rust forms.
 - **Complete generated API** — classes, Builtins, utilities, singletons,
   constants, signals, and virtual methods are generated from the official
   Godot 4.4–4.7 APIs. Coverage gates require every official entry to be
@@ -35,23 +32,11 @@ and the editor plugin coordinates the toolchain and runtime boundary.
 - **One cross-platform plugin** — one plugin ZIP contains the supported editor
   hosts and export runtimes for desktop, Android, iOS, and Web.
 
-## Requirements
-
-- Godot 4.4, 4.5, 4.6, or 4.7. Patch versions do not change the selected API.
-- Rust 1.85 or newer with Cargo. `rustup` is recommended for export targets.
-- The normal platform toolchain required by the target: Xcode for Apple
-  platforms, Android SDK/NDK for Android, Emscripten for Web, and the relevant
-  system compiler/linker for desktop platforms.
-- Official Godot export templates when exporting a game.
-
-The plugin uses the user's local Rust toolchain. It does not bundle or silently
-replace Rust, Xcode, Android SDK/NDK, Emscripten, or system compilers.
-
 ## Quick start
 
 ### 1. Install the plugin
 
-Download the single plugin ZIP from
+Download the plugin ZIP from
 [Releases](https://github.com/godothub/godot-rust/releases) and extract it into
 the Godot project root. The resulting path must be:
 
@@ -70,7 +55,8 @@ select a separate download for each editor operating system.
 
 ### 2. Configure the Cargo project
 
-If the project has no `Cargo.toml`, the plugin asks before running:
+If the project has no `Cargo.toml`, the plugin automatically runs the following
+command without displaying a dialog or requiring any user action:
 
 ```sh
 cargo init --lib --vcs none --name godothub_project .

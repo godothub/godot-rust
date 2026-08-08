@@ -8,7 +8,6 @@ signal automatic_check_finished(revision: int, success: bool)
 const ADDON_ROOT := "res://addons/godot-rust"
 const NATIVE_EXTENSION_PATH := "res://godot_rs_project.gdextension"
 const SAFE_MODE_PATH := "res://.godot/rust/safe-mode"
-const INIT_COMMAND := "cargo init --lib --vcs none --name godothub_project ."
 const MAX_SCRIPT_CLASS_REFRESH_FILES := 10_000
 const SCRIPT_CLASS_REFRESH_TIMEOUT_MSEC := 10_000
 const BuildProcess := preload("res://addons/godot-rust/build_process.gd")
@@ -25,7 +24,6 @@ const SourceMonitor := preload("res://addons/godot-rust/source_monitor.gd")
 const EditorUi := preload("res://addons/godot-rust/editor_ui.gd")
 
 var _active_action := ""
-var _initialize_dialog: ConfirmationDialog
 var _configure_dialog: ConfirmationDialog
 var _workspace_dialog: ConfirmationDialog
 var _workspace_selector: OptionButton
@@ -110,23 +108,6 @@ func _enter_tree() -> void:
 	_dependency_dialog.preview_requested.connect(_preview_dependency_change)
 	_dependency_dialog.apply_requested.connect(_apply_dependency_change)
 	get_editor_interface().get_base_control().add_child(_dependency_dialog)
-	_initialize_dialog = ConfirmationDialog.new()
-	_initialize_dialog.title = EditorUi.text(
-		"Initialize Rust for this Godot project?"
-	)
-	_initialize_dialog.dialog_text = (
-		EditorUi.text(
-			"godot-rust did not find a Cargo.toml.\n\n"
-			+ "It can initialize a standard Cargo library in the project root "
-			+ "with:\n%s\n\nIt will then add the godot_rs dependency, Script "
-			+ "Mode metadata, dynamic-library targets, and generated script "
-			+ "entry files. Existing Cargo files and src/lib.rs are never "
-			+ "overwritten."
-		)
-	) % INIT_COMMAND
-	_initialize_dialog.ok_button_text = EditorUi.text("Initialize")
-	_initialize_dialog.confirmed.connect(_initialize_project)
-	get_editor_interface().get_base_control().add_child(_initialize_dialog)
 	_configure_dialog = ConfirmationDialog.new()
 	_configure_dialog.title = EditorUi.text(
 		"Configure this Cargo package for godot-rust?"
@@ -232,8 +213,6 @@ func _exit_tree() -> void:
 		_diagnostics_panel.queue_free()
 	if is_instance_valid(_dependency_dialog):
 		_dependency_dialog.queue_free()
-	if is_instance_valid(_initialize_dialog):
-		_initialize_dialog.queue_free()
 	if is_instance_valid(_configure_dialog):
 		_configure_dialog.queue_free()
 	if is_instance_valid(_workspace_dialog):
@@ -621,14 +600,23 @@ func _build_response_succeeded(response: Dictionary) -> bool:
 
 
 func _initialize_project() -> void:
-	_run_request(
+	if not _run_request(
 		"Cargo initialization",
 		{
 			"command": "initialize",
 			"id": 4,
 			"root": _project_root(),
 		}
-	)
+	):
+		_finish_initialization_failure()
+
+
+func _finish_initialization_failure() -> void:
+	_workflow_ready = true
+	_cargo_project_available = false
+	_auto_check_enabled = false
+	_source_monitor.set_auto_check_enabled(false)
+	workflow_configured.emit(false)
 
 
 func _configure_project() -> void:
@@ -877,6 +865,8 @@ func _request_cancelled(action: String, reason: String) -> void:
 		_finish_automatic_check(false)
 	elif action == "Automatic Rust build":
 		_running_idle_build_revision = -1
+	elif action == "Cargo initialization":
+		_finish_initialization_failure()
 	_set_workflow_status("%s was cancelled: %s" % [action, reason])
 	call_deferred("_continue_automatic_work")
 
@@ -1280,6 +1270,8 @@ func _request_finished(
 			_finish_automatic_check(false)
 		elif action == "Automatic Rust build":
 			_running_idle_build_revision = -1
+		elif action == "Cargo initialization":
+			_finish_initialization_failure()
 		elif action == "Native reload rollback":
 			_pending_native_reload = {}
 		call_deferred("_continue_automatic_work")
@@ -1299,6 +1291,8 @@ func _request_finished(
 			_finish_automatic_check(false)
 		elif action == "Automatic Rust build":
 			_running_idle_build_revision = -1
+		elif action == "Cargo initialization":
+			_finish_initialization_failure()
 		elif action == "Native reload rollback":
 			_pending_native_reload = {}
 		call_deferred("_continue_automatic_work")
@@ -1402,15 +1396,15 @@ func _handle_probe(result: Dictionary) -> void:
 	var kind: Dictionary = result.get("kind", {})
 	match kind.get("kind", ""):
 		"uninitialized":
-			_workflow_ready = true
+			_workflow_ready = false
 			_cargo_project_available = false
 			_auto_check_enabled = false
 			_source_monitor.set_auto_check_enabled(false)
-			_set_workflow_status("This Godot project needs a Cargo package.")
-			workflow_configured.emit(false)
-			_initialize_dialog.popup_centered(
-				EditorUi.scaled_size(Vector2i(620, 300), _editor_scale)
+			_set_workflow_status(
+				"Initializing the Cargo package for Rust scripts."
 			)
+			workflow_configured.emit(false)
+			call_deferred("_initialize_project")
 		"package":
 			print("godot-rust: using Cargo package %s." % kind.get("name", ""))
 			_load_cargo_metadata()

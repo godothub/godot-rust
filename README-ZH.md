@@ -16,9 +16,6 @@ Cargo 项目，`.rs` 文件是真正的 Script 资源，编辑器插件负责协
 
 - **Godot 优先的工作流**——通过 Godot 自带的脚本窗口创建和挂载 `.rs` 文件；
   在编辑器内完成 Cargo 配置、检查、构建、诊断、依赖管理、运行和导出。
-- **贴近 Godot 的脚本概念**——生命周期回调、Inspector 属性、隐藏属性、信号、
-  RPC、节点引用、全局类、自定义 Resource、脚本继承和父方法调用均有类型化
-  Rust 写法。
 - **完整生成的 Godot API**——根据 Godot 4.4–4.7 官方 API 生成类、Builtin、
   Utility、单例、常量、信号和虚方法。覆盖门槛要求每个官方条目都必须生成或
   明确归类。
@@ -31,22 +28,11 @@ Cargo 项目，`.rs` 文件是真正的 Script 资源，编辑器插件负责协
 - **单一跨平台插件**——一个插件 ZIP 同时包含桌面编辑器 Host，以及桌面、
   Android、iOS 和 Web 导出所需的运行组件。
 
-## 环境要求
-
-- Godot 4.4、4.5、4.6 或 4.7；Patch 版本不会改变所选 API。
-- Rust 1.85 或更高版本及 Cargo；推荐使用 `rustup` 管理导出目标。
-- 对应目标通常要求的平台工具链：Apple 平台需要 Xcode，Android 需要 Android
-  SDK/NDK，Web 需要 Emscripten，桌面平台需要对应的系统编译器和链接器。
-- 导出游戏时需要安装 Godot 官方导出模板。
-
-插件使用用户本地的 Rust 工具链，不会内置或静默替换 Rust、Xcode、Android
-SDK/NDK、Emscripten 或系统编译器。
-
 ## 快速开始
 
 ### 1. 安装插件
 
-从 [Releases](https://github.com/godothub/godot-rust/releases) 下载唯一的插件
+从 [Releases](https://github.com/godothub/godot-rust/releases) 下载插件
 ZIP，并解压到 Godot 项目根目录。最终路径必须是：
 
 ```text
@@ -59,11 +45,11 @@ res://addons/godot-rust/plugin.cfg
 项目 > 项目设置 > 插件
 ```
 
-ZIP 已包含各编辑器平台所需的二进制文件，用户不需要根据操作系统下载不同插件。
+ZIP 已包含各编辑器平台所需的二进制文件，用户无需根据操作系统下载不同插件。
 
 ### 2. 配置 Cargo 项目
 
-项目不存在 `Cargo.toml` 时，插件会先征求确认，然后执行：
+项目不存在 `Cargo.toml` 时，插件会直接自动执行以下命令，无需弹窗确认或手工操作：
 
 ```sh
 cargo init --lib --vcs none --name godothub_project .

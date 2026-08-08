@@ -96,21 +96,6 @@ const ZH_CN := {
 	"Registry alias, Git URL, or dependency path": "注册表别名、Git URL 或依赖路径",
 	"Optional Cargo registry alias": "可选的 Cargo 注册表别名",
 	"Cargo package used for Rust Check, Build, Run, and Export.": "用于 Rust 检查、构建、运行和导出的 Cargo 包。",
-	"Initialize Rust for this Godot project?": "为此 Godot 项目初始化 Rust？",
-	"Initialize": "初始化",
-	(
-		"godot-rust did not find a Cargo.toml.\n\n"
-		+ "It can initialize a standard Cargo library in the project root "
-		+ "with:\n%s\n\nIt will then add the godot_rs dependency, Script "
-		+ "Mode metadata, dynamic-library targets, and generated script "
-		+ "entry files. Existing Cargo files and src/lib.rs are never "
-		+ "overwritten."
-	): (
-		"godot-rust 没有找到 Cargo.toml。\n\n"
-		+ "可以在项目根目录用以下命令初始化标准 Cargo 库：\n%s\n\n"
-		+ "随后会添加 godot_rs 依赖、Script Mode 元数据、动态库目标和生成的"
-		+ "脚本入口文件。现有 Cargo 文件和 src/lib.rs 绝不会被覆盖。"
-	),
 	"Configure this Cargo package for godot-rust?": "为此 Cargo 包配置 godot-rust？",
 	"Configure": "配置",
 	(

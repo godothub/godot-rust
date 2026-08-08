@@ -825,7 +825,7 @@ build-before-play = true
 
 发布包用户只需把 `addons/godot-rust` 复制到自己的项目根目录，然后在
 `Project Settings > Plugins` 中启用 `godot-rust`。如果项目还没有
-`Cargo.toml`，插件会显示确认框，并执行：
+`Cargo.toml`，插件会自动执行以下命令，无需弹窗确认或手工操作：
 
 ```sh
 cargo init --lib --vcs none --name godothub_project .

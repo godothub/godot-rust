@@ -1,5 +1,7 @@
 # godot-rust
 
+[简体中文](README-ZH.md) | [English](README.md)
+
 `godot-rust` 是一套以 Godot 为中心的 Rust 语言支持方案，目标是让开发者像使用
 Godot 原生脚本语言一样编写、挂载、调试和导出 Rust 脚本，同时保留 Rust 的性能、
 类型安全与 Cargo 生态。

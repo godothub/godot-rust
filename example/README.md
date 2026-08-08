@@ -124,9 +124,88 @@ impl Player {
 C ABI 传递。高频逻辑应保留在 Rust 的类型化字段和方法中，只在 Godot 边界
 转换数据。
 
+`godot_rs::prelude::*` 是面向脚本的一行便捷导入，也可以改用普通 Rust 的显式
+导入。结构体上的 `#[script]` 声明脚本类型；Godot 需要调用的方法所在 impl 再写
+一次 `#[script]`，让稳定版 Rust 能在编译期收集这个独立 impl。纯 Rust 辅助方法
+可以放在不带标记的普通 impl 中。
+
 同一个类型可以按职责拆成多个 `#[script] impl Player`。生命周期、普通方法、
 RPC 和由信号面板创建的回调会自动合并；方法名、稳定 ID 或生命周期槽重复时，
 构建会明确失败，不会按源码顺序悄悄覆盖。
+
+## Rust 语义优先，Godot 元数据按需标记
+
+字段和成员默认保持为 Rust 内部实现。只有需要进入 Godot 反射边界时才添加对应
+标记，因此日常逻辑不会被迫写重复样板：
+
+```rust
+#[godot_enum]
+enum MovementMode {
+    Idle = 0,
+    #[default]
+    Walk = 1,
+    Sprint = 2,
+}
+
+#[godot_flags]
+enum Ability {
+    Jump = 1 << 0,
+    Dash = 1 << 1,
+}
+
+#[script(base = Node)]
+pub struct Player {
+    stamina_cache: f64, // 仅 Rust 可见
+
+    #[property(default = 100, get = health, set = set_health)]
+    health: i64, // Godot 可读写，但不显示在 Inspector
+
+    #[property(default = 1, read_only)]
+    level: i64,
+
+    #[export(default = MovementMode::Walk)]
+    movement: MovementMode,
+
+    #[export(default = Ability::Jump | Ability::Dash)]
+    abilities: Ability,
+}
+
+#[script]
+impl Player {
+    pub const MAX_HEALTH: i64 = 100; // 自动成为 Godot 脚本常量
+    const CACHE_SLOTS: usize = 8;    // 仅 Rust 可见
+
+    fn health(&self) -> i64 { self.health }
+
+    fn set_health(&mut self, value: i64) {
+        self.health = value.clamp(0, Self::MAX_HEALTH);
+    }
+
+    #[func(name = "heal")]
+    fn restore_health(&mut self, amount: i64) {
+        self.set_health(self.health + amount);
+    }
+
+    #[rpc(name = "sync_health", authority, reliable)]
+    fn apply_network_health(&mut self, value: i64) {
+        self.set_health(value);
+    }
+}
+```
+
+- `#[property]` 是 Godot 属性，但没有 `EDITOR` Usage，因此不会占用 Inspector。
+- `#[export]` 是显示在 Inspector 的属性；两者使用相同的类型检查、默认值、状态
+  迁移和 getter/setter 通道。
+- `read_only` 会同时写入 Godot 属性元数据并在 ABI 层拒绝赋值。
+- `#[func(name = "...")]` 和 `#[rpc(name = "...", ...)]` 只改变 Godot 中的名称，
+  Rust 内仍使用原方法名，重构工具可以正常工作。
+- `pub const` 使用已加载构建产物中的真实值；Host 不解析源码猜测常量。
+- 自定义枚举和位标志保留未知整数值，因此读取未来版本或旧存档中的值不会产生
+  非法 Rust 枚举。两种类型在 Script 与 Extension 项目中使用同一套定义。
+
+日志统一使用 `godot_debug!`、`godot_print!`、`godot_warn!` 和 `godot_error!`。
+Script 项目通过 Host 进入 Godot Debugger；Extension 项目直接调用 Godot Utility，
+初始化上下文之外则回退到标准错误输出，日志不会无声丢失。
 
 ## 全局类、自定义 Resource 与脚本继承
 

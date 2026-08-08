@@ -14,6 +14,7 @@ use crate::interface::EngineInterface;
 use crate::module_loader::{ModuleField, ModuleMethod, ModuleScript};
 use crate::string_name::OwnedStringName;
 use crate::value::LocalGodotString;
+use crate::variant_codec::{OwnedVariant as EncodedVariant, VariantCodec};
 
 const RPC_MODE_ANY_PEER: i64 = 1;
 const RPC_MODE_AUTHORITY: i64 = 2;
@@ -38,7 +39,6 @@ struct MetadataCodec {
     string_name_to_variant: GDExtensionVariantFromTypeConstructorFunc,
     bool_to_variant: GDExtensionVariantFromTypeConstructorFunc,
     int_to_variant: GDExtensionVariantFromTypeConstructorFunc,
-    float_to_variant: GDExtensionVariantFromTypeConstructorFunc,
     color_to_variant: GDExtensionVariantFromTypeConstructorFunc,
 }
 
@@ -90,9 +90,6 @@ impl MetadataCodec {
         // SAFETY: See above.
         let int_to_variant =
             unsafe { get_from(GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_INT) };
-        // SAFETY: Float has an official from-type Variant constructor.
-        let float_to_variant =
-            unsafe { get_from(GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_FLOAT) };
         // SAFETY: Color has an official from-type Variant constructor.
         let color_to_variant =
             unsafe { get_from(GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_COLOR) };
@@ -108,7 +105,6 @@ impl MetadataCodec {
         string_name_to_variant?;
         bool_to_variant?;
         int_to_variant?;
-        float_to_variant?;
         color_to_variant?;
         interface.dictionary_operator_index?;
         interface.variant_destroy?;
@@ -127,7 +123,6 @@ impl MetadataCodec {
             string_name_to_variant,
             bool_to_variant,
             int_to_variant,
-            float_to_variant,
             color_to_variant,
         })
     }
@@ -207,6 +202,33 @@ impl OwnedDictionary {
         }
         // SAFETY: The indexed slot and source are initialized Variants. The
         // old slot is destroyed before Godot copy-constructs its replacement.
+        unsafe {
+            destroy(slot);
+            copy(slot, value.as_ptr());
+        }
+        true
+    }
+
+    fn insert_encoded_variant(&mut self, key: &str, value: &EncodedVariant) -> bool {
+        let Some(index) = self.codec.interface.dictionary_operator_index else {
+            return false;
+        };
+        let (Some(destroy), Some(copy)) = (
+            self.codec.interface.variant_destroy,
+            self.codec.interface.variant_new_copy,
+        ) else {
+            return false;
+        };
+        let Some(key) = OwnedVariant::string_name(self.codec, key) else {
+            return false;
+        };
+        // SAFETY: Dictionary, key and compiled constant are initialized
+        // official Variants. The indexed slot is replaced by a Godot copy.
+        let slot = unsafe { index(self.as_mut_ptr(), key.as_ptr()) };
+        if slot.is_null() {
+            return false;
+        }
+        // SAFETY: Both pointers remain live throughout the copy operation.
         unsafe {
             destroy(slot);
             copy(slot, value.as_ptr());
@@ -450,31 +472,6 @@ impl OwnedVariant {
         )
     }
 
-    fn bool(codec: MetadataCodec, value: bool) -> Option<Self> {
-        let value = u8::from(value);
-        Self::from_raw(
-            codec.interface,
-            codec.bool_to_variant,
-            (&value as *const u8).cast(),
-        )
-    }
-
-    fn int(codec: MetadataCodec, value: i64) -> Option<Self> {
-        Self::from_raw(
-            codec.interface,
-            codec.int_to_variant,
-            (&value as *const i64).cast(),
-        )
-    }
-
-    fn float(codec: MetadataCodec, value: f64) -> Option<Self> {
-        Self::from_raw(
-            codec.interface,
-            codec.float_to_variant,
-            (&value as *const f64).cast(),
-        )
-    }
-
     fn color(codec: MetadataCodec, value: [f32; 4]) -> Option<Self> {
         Self::from_raw(
             codec.interface,
@@ -703,6 +700,12 @@ pub(crate) fn write_script_members(
             names.insert(method.name().to_owned());
         }
     }
+    for index in 0..script.constant_count() {
+        let Some(constant) = script.constant(index) else {
+            return false;
+        };
+        names.insert(constant.name().to_owned());
+    }
     for name in names {
         if !members.push_string_name(&name) {
             return false;
@@ -711,34 +714,35 @@ pub(crate) fn write_script_members(
     members.write_array(output)
 }
 
-pub(crate) fn write_script_constants(
+pub(crate) fn write_compiled_script_constants(
     interface: EngineInterface,
     output: GDExtensionTypePtr,
-    constants: &[crate::rust_source::SourceConstant],
+    script: &ModuleScript,
 ) -> bool {
-    let Some(codec) = MetadataCodec::new(interface) else {
+    let (Some(metadata_codec), Some(variant_codec)) =
+        (MetadataCodec::new(interface), VariantCodec::new(interface))
+    else {
         return false;
     };
-    let Some(mut result) = OwnedDictionary::new(codec) else {
+    let Some(mut result) = OwnedDictionary::new(metadata_codec) else {
         return false;
     };
-    for constant in constants {
-        let value = match &constant.value {
-            crate::rust_source::SourceConstantValue::Bool(value) => {
-                OwnedVariant::bool(codec, *value)
-            }
-            crate::rust_source::SourceConstantValue::I64(value) => OwnedVariant::int(codec, *value),
-            crate::rust_source::SourceConstantValue::F64(value) => {
-                OwnedVariant::float(codec, *value)
-            }
-            crate::rust_source::SourceConstantValue::String(value) => {
-                OwnedVariant::string(codec, value)
-            }
-        };
-        let Some(value) = value else {
+    for index in 0..script.constant_count() {
+        let Some(constant) = script.constant(index) else {
             return false;
         };
-        if !result.insert_variant(&constant.name, &value) {
+        let Ok(value) = script.read_constant(&constant) else {
+            return false;
+        };
+        let Ok(variant) = EncodedVariant::from_abi_with_context(
+            &variant_codec,
+            value.abi(),
+            None,
+            Some(value.engine_call_context()),
+        ) else {
+            return false;
+        };
+        if !result.insert_encoded_variant(constant.name(), &variant) {
             return false;
         }
     }
@@ -800,9 +804,10 @@ pub(crate) fn write_script_documentation(
                 return false;
             }
         }
-        let method_description = crate::rust_source::find_identifier_line(source, method.name())
-            .map(|line| crate::rust_source::documentation_before_line(source, line))
-            .unwrap_or_default();
+        let method_description =
+            crate::rust_source::find_reflected_method_line(source, method.name())
+                .map(|line| crate::rust_source::documentation_before_line(source, line))
+                .unwrap_or_default();
         let qualifiers = if method.receiver() == AbiReceiverKind::Static {
             "static"
         } else {

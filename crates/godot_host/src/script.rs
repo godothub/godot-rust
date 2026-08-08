@@ -791,24 +791,27 @@ unsafe extern "C" fn get_member_line(
             }
         }
     }
-    let Ok(source) = script.source.read() else {
-        return;
-    };
     if name.is_none() {
-        for constant in crate::rust_source::script_constants(&source, compiled.name()) {
-            let Some(candidate) = OwnedStringName::new(script.interface, &constant.name) else {
+        for index in 0..compiled.constant_count() {
+            let Some(constant) = compiled.constant(index) else {
+                continue;
+            };
+            let Some(candidate) = OwnedStringName::new(script.interface, constant.name()) else {
                 continue;
             };
             if candidate.equals(requested) {
-                write_i64(result, i64::try_from(constant.line).unwrap_or(-1));
-                return;
+                name = Some(constant.name().to_owned());
+                break;
             }
         }
     }
+    let Ok(source) = script.source.read() else {
+        return;
+    };
     let Some(name) = name else {
         return;
     };
-    let Some(line) = crate::rust_source::find_identifier_line(&source, &name)
+    let Some(line) = crate::rust_source::find_reflected_method_line(&source, &name)
         .and_then(|line| i64::try_from(line).ok())
     else {
         return;
@@ -824,7 +827,7 @@ unsafe extern "C" fn get_constants(
     let Some(script) = script(instance) else {
         return;
     };
-    let (Some(compiled), Ok(source)) = (compiled_script(script), script.source.read()) else {
+    let Some(compiled) = compiled_script(script) else {
         write_default_builtin(
             script.interface,
             result,
@@ -832,8 +835,7 @@ unsafe extern "C" fn get_constants(
         );
         return;
     };
-    let constants = crate::rust_source::script_constants(&source, compiled.name());
-    if !godot_metadata::write_script_constants(script.interface, result, &constants) {
+    if !godot_metadata::write_compiled_script_constants(script.interface, result, &compiled) {
         write_default_builtin(
             script.interface,
             result,

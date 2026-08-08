@@ -45,10 +45,10 @@ pub const ABI_VALUE_OWNED_DYNAMIC_GROUP: u32 = 1 << 3;
 pub const ABI_VALUE_OWNED_CALLABLE: u32 = 1 << 4;
 
 /// Current incompatible ABI generation.
-pub const ABI_MAJOR: u16 = 2;
+pub const ABI_MAJOR: u16 = 3;
 
 /// Current backward-compatible ABI revision.
-pub const ABI_MINOR: u16 = 35;
+pub const ABI_MINOR: u16 = 36;
 
 /// Header at the beginning of every versioned ABI table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1221,7 +1221,12 @@ pub enum AbiFieldKind {
     Export = 1,
     Node = 2,
     Signal = 3,
+    /// A Godot-visible property hidden from the Inspector.
+    Property = 4,
 }
+
+/// The property is readable from Godot but rejects assignment.
+pub const ABI_FIELD_FLAG_READ_ONLY: u8 = 1 << 0;
 
 /// Field descriptor reserved slots contain a normalized Godot property schema.
 pub const ABI_FIELD_EXTENSION_PROPERTY_SCHEMA: u32 = 1 << 0;
@@ -1430,9 +1435,13 @@ pub const ABI_PROPERTY_USAGE_EDITOR: u32 = 1 << 2;
 pub const ABI_PROPERTY_USAGE_GROUP: u32 = 1 << 6;
 pub const ABI_PROPERTY_USAGE_SCRIPT_VARIABLE: u32 = 1 << 12;
 pub const ABI_PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT: u32 = 1 << 22;
+pub const ABI_PROPERTY_USAGE_READ_ONLY: u32 = 1 << 28;
 pub const ABI_PROPERTY_USAGE_DEFAULT: u32 = ABI_PROPERTY_USAGE_STORAGE | ABI_PROPERTY_USAGE_EDITOR;
 pub const ABI_PROPERTY_USAGE_SCRIPT_DEFAULT: u32 =
     ABI_PROPERTY_USAGE_DEFAULT | ABI_PROPERTY_USAGE_SCRIPT_VARIABLE;
+/// A stored Script property that is not shown in the Inspector.
+pub const ABI_PROPERTY_USAGE_SCRIPT_STORAGE: u32 =
+    ABI_PROPERTY_USAGE_STORAGE | ABI_PROPERTY_USAGE_SCRIPT_VARIABLE;
 
 /// State policy used while changing module generations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1477,6 +1486,8 @@ pub enum AbiMethodKind {
     Lifecycle = 0,
     Func = 1,
     Rpc = 2,
+    /// A compiled associated constant exposed by the script class.
+    Constant = 3,
 }
 
 /// Well-known lifecycle slot. `None` is used by non-lifecycle methods.

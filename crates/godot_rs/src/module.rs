@@ -293,6 +293,20 @@ fn drop_owned_range(address: usize, length: usize) {
 pub(crate) fn write_log(level: Level, arguments: fmt::Arguments<'_>) {
     let host = HOST_API.load(Ordering::Acquire);
     if host.is_null() {
+        let message = arguments.to_string();
+        if crate::native::runtime::active_interface().is_some() {
+            let value = crate::variant::Variant::from(message.clone());
+            let result = match level {
+                Level::Debug => crate::engine::utility::print_verbose(&value, &[]),
+                Level::Info => crate::engine::utility::print(&value, &[]),
+                Level::Warning => crate::engine::utility::push_warning(&value, &[]),
+                Level::Error => crate::engine::utility::push_error(&value, &[]),
+            };
+            if result.is_ok() {
+                return;
+            }
+        }
+        eprintln!("{message}");
         return;
     }
     // SAFETY: The Host table remains valid until shutdown, which only runs
@@ -305,8 +319,10 @@ pub(crate) fn write_log(level: Level, arguments: fmt::Arguments<'_>) {
     let mut message = StackMessage::new();
     let _ = message.write_fmt(arguments);
     let level = match level {
+        Level::Debug => AbiLogLevel::Debug,
         Level::Info => AbiLogLevel::Info,
         Level::Warning => AbiLogLevel::Warning,
+        Level::Error => AbiLogLevel::Error,
     };
     // SAFETY: Both byte slices remain live for this synchronous Host call.
     unsafe {

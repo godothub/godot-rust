@@ -5,30 +5,31 @@ use core::ptr;
 use godot_api::abi::{
     ABI_FIELD_EXTENSION_GODOT_INTEGER_SCHEMA, ABI_FIELD_EXTENSION_NODE_SCHEMA,
     ABI_FIELD_EXTENSION_PROPERTY_SCHEMA, ABI_FIELD_EXTENSION_RELOAD_SCHEMA,
-    ABI_FIELD_EXTENSION_SIGNAL_SCHEMA, ABI_METHOD_EXTENSION_ARGUMENT_CLASSES,
-    ABI_METHOD_EXTENSION_RETURN_CLASS, ABI_METHOD_EXTENSION_SCHEMA_V1, ABI_METHOD_SCHEMA_VARARG,
-    ABI_MINOR, ABI_MODULE_EXTENSION_GODOT_API, ABI_MODULE_EXTENSION_OWNED_VALUES,
-    ABI_MODULE_EXTENSION_TASKS, ABI_PROPERTY_HINT_COLOR_NO_ALPHA, ABI_PROPERTY_HINT_ENUM,
-    ABI_PROPERTY_HINT_FILE, ABI_PROPERTY_HINT_FLAGS, ABI_PROPERTY_HINT_MULTILINE_TEXT,
-    ABI_PROPERTY_HINT_NODE_TYPE, ABI_PROPERTY_HINT_NONE, ABI_PROPERTY_HINT_RANGE,
-    ABI_PROPERTY_HINT_RESOURCE_TYPE, ABI_PROPERTY_HINT_TYPE_STRING,
-    ABI_PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT, ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
-    ABI_SCRIPT_EXTENSION_BASE_SCRIPT, ABI_SCRIPT_EXTENSION_FIELD_ACCESS,
-    ABI_SCRIPT_EXTENSION_GLOBAL_CLASS, ABI_SCRIPT_EXTENSION_RESOURCE_UID, AbiByteSlice,
-    AbiByteSliceSlice, AbiCallResult, AbiCallScriptMethodFn, AbiCancelTasksFn, AbiDropValueFn,
-    AbiFieldDescriptorV1, AbiFieldKind, AbiFixedMathDefaultV1, AbiGetScriptDescriptorFn,
-    AbiGetScriptFieldFn, AbiGodotIntegerDefaultFn, AbiGodotIntegerOptionV1, AbiLifecycleSlot,
-    AbiLifecycleTableV1, AbiLogLevel, AbiMethodArgumentSlice, AbiMethodDefaultFn,
-    AbiMethodDescriptorV1, AbiMethodExtensionsV1, AbiMethodKind, AbiPollTasksFn, AbiPropertyType,
-    AbiReceiverKind, AbiReloadPolicy, AbiRpcConfigV1, AbiScriptDescriptorV1, AbiSetScriptFieldFn,
-    AbiSignalArgumentDescriptorV1, AbiStatus, AbiValueType, AbiValueTypeSlice, AbiValueV1,
-    HOST_API_SLOT_CALL_GODOT_METHOD, HOST_API_SLOT_CALL_SUPER_METHOD, HOST_API_SLOT_CANCEL_SIGNAL,
-    HOST_API_SLOT_CURRENT_OWNER, HOST_API_SLOT_DROP_VALUE, HOST_API_SLOT_EMIT_SIGNAL,
-    HOST_API_SLOT_POLL_SIGNAL, HOST_API_SLOT_RETAIN_CALLABLE_VALUE,
-    HOST_API_SLOT_RETAIN_DYNAMIC_VALUE, HOST_API_SLOT_WATCH_SIGNAL, HostApiV1,
-    MODULE_API_SLOT_CANCEL_TASKS, MODULE_API_SLOT_DROP_VALUE, MODULE_API_SLOT_GODOT_API_MAJOR,
-    MODULE_API_SLOT_GODOT_API_MINOR, MODULE_API_SLOT_POLL_TASKS, ModuleApiV1,
-    decode_node_field_class, decode_resource_uid_words,
+    ABI_FIELD_EXTENSION_SIGNAL_SCHEMA, ABI_FIELD_FLAG_READ_ONLY,
+    ABI_METHOD_EXTENSION_ARGUMENT_CLASSES, ABI_METHOD_EXTENSION_RETURN_CLASS,
+    ABI_METHOD_EXTENSION_SCHEMA_V1, ABI_METHOD_SCHEMA_VARARG, ABI_MINOR,
+    ABI_MODULE_EXTENSION_GODOT_API, ABI_MODULE_EXTENSION_OWNED_VALUES, ABI_MODULE_EXTENSION_TASKS,
+    ABI_PROPERTY_HINT_COLOR_NO_ALPHA, ABI_PROPERTY_HINT_ENUM, ABI_PROPERTY_HINT_FILE,
+    ABI_PROPERTY_HINT_FLAGS, ABI_PROPERTY_HINT_MULTILINE_TEXT, ABI_PROPERTY_HINT_NODE_TYPE,
+    ABI_PROPERTY_HINT_NONE, ABI_PROPERTY_HINT_RANGE, ABI_PROPERTY_HINT_RESOURCE_TYPE,
+    ABI_PROPERTY_HINT_TYPE_STRING, ABI_PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT,
+    ABI_PROPERTY_USAGE_READ_ONLY, ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
+    ABI_PROPERTY_USAGE_SCRIPT_STORAGE, ABI_SCRIPT_EXTENSION_BASE_SCRIPT,
+    ABI_SCRIPT_EXTENSION_FIELD_ACCESS, ABI_SCRIPT_EXTENSION_GLOBAL_CLASS,
+    ABI_SCRIPT_EXTENSION_RESOURCE_UID, AbiByteSlice, AbiByteSliceSlice, AbiCallResult,
+    AbiCallScriptMethodFn, AbiCancelTasksFn, AbiDropValueFn, AbiFieldDescriptorV1, AbiFieldKind,
+    AbiFixedMathDefaultV1, AbiGetScriptDescriptorFn, AbiGetScriptFieldFn, AbiGodotIntegerDefaultFn,
+    AbiGodotIntegerOptionV1, AbiLifecycleSlot, AbiLifecycleTableV1, AbiLogLevel,
+    AbiMethodArgumentSlice, AbiMethodDefaultFn, AbiMethodDescriptorV1, AbiMethodExtensionsV1,
+    AbiMethodKind, AbiPollTasksFn, AbiPropertyType, AbiReceiverKind, AbiReloadPolicy,
+    AbiRpcConfigV1, AbiScriptDescriptorV1, AbiSetScriptFieldFn, AbiSignalArgumentDescriptorV1,
+    AbiStatus, AbiValueType, AbiValueTypeSlice, AbiValueV1, HOST_API_SLOT_CALL_GODOT_METHOD,
+    HOST_API_SLOT_CALL_SUPER_METHOD, HOST_API_SLOT_CANCEL_SIGNAL, HOST_API_SLOT_CURRENT_OWNER,
+    HOST_API_SLOT_DROP_VALUE, HOST_API_SLOT_EMIT_SIGNAL, HOST_API_SLOT_POLL_SIGNAL,
+    HOST_API_SLOT_RETAIN_CALLABLE_VALUE, HOST_API_SLOT_RETAIN_DYNAMIC_VALUE,
+    HOST_API_SLOT_WATCH_SIGNAL, HostApiV1, MODULE_API_SLOT_CANCEL_TASKS,
+    MODULE_API_SLOT_DROP_VALUE, MODULE_API_SLOT_GODOT_API_MAJOR, MODULE_API_SLOT_GODOT_API_MINOR,
+    MODULE_API_SLOT_POLL_TASKS, ModuleApiV1, decode_node_field_class, decode_resource_uid_words,
 };
 use libloading::Library;
 use std::cell::Cell;
@@ -1020,6 +1021,10 @@ impl ModuleScript {
         self.inherited_methods().len()
     }
 
+    pub(crate) fn constant_count(&self) -> usize {
+        self.inherited_constants().len()
+    }
+
     pub(crate) fn field_count(&self) -> usize {
         self.hierarchy()
             .iter()
@@ -1083,6 +1088,49 @@ impl ModuleScript {
         self.inherited_methods().get(index).cloned()
     }
 
+    pub(crate) fn constant(&self, index: usize) -> Option<ModuleMethod> {
+        self.inherited_constants().get(index).cloned()
+    }
+
+    pub(crate) fn read_constant(
+        &self,
+        constant: &ModuleMethod,
+    ) -> Result<ModuleValue, ModuleCallError> {
+        let descriptor = constant.descriptor();
+        if descriptor.kind != AbiMethodKind::Constant
+            || descriptor.receiver != AbiReceiverKind::Static
+            || descriptor.argument_count != 0
+        {
+            return Err(ModuleCallError {
+                status: AbiStatus::InvalidArgument,
+                message: "descriptor is not a script constant".into(),
+            });
+        }
+        let callback = constant
+            .script
+            .descriptor()
+            .call_method
+            .ok_or_else(|| ModuleCallError {
+                status: AbiStatus::Unsupported,
+                message: "project module has no constant callback".into(),
+            })?;
+        let mut output = AbiValueV1::NIL;
+        let _scope = CallbackScriptScope::enter(constant.script.resource_uid());
+        // SAFETY: The descriptor and callback belong to the same retained
+        // module generation. Constants are static and accept no arguments, so
+        // a null state and argument pointer are intentional ABI inputs.
+        let result =
+            unsafe { callback(ptr::null_mut(), constant.id(), ptr::null(), 0, &mut output) };
+        let owner = constant.script.generation.value_owner();
+        if let Err(error) = call_result(result) {
+            // Adopt any well-formed owned value written before failure so a
+            // malformed project callback cannot leak across repeated reads.
+            let _ = owner.output(constant.return_type(), output);
+            return Err(error);
+        }
+        owner.output(constant.return_type(), output)
+    }
+
     pub(crate) fn create_state(&self) -> Result<ModuleState, ModuleCallError> {
         let mut states = Vec::new();
         for script in self.hierarchy() {
@@ -1120,7 +1168,7 @@ impl ModuleScript {
         let mut names = HashSet::new();
         for script in self.hierarchy() {
             for (index, method) in script.descriptor().methods.iter().enumerate() {
-                if names.insert(method.name.clone()) {
+                if method.kind != AbiMethodKind::Constant && names.insert(method.name.clone()) {
                     methods.push(ModuleMethod {
                         script: script.clone(),
                         index,
@@ -1129,6 +1177,22 @@ impl ModuleScript {
             }
         }
         methods
+    }
+
+    fn inherited_constants(&self) -> Vec<ModuleMethod> {
+        let mut constants = Vec::new();
+        let mut names = HashSet::new();
+        for script in self.hierarchy() {
+            for (index, method) in script.descriptor().methods.iter().enumerate() {
+                if method.kind == AbiMethodKind::Constant && names.insert(method.name.clone()) {
+                    constants.push(ModuleMethod {
+                        script: script.clone(),
+                        index,
+                    });
+                }
+            }
+        }
+        constants
     }
 
     fn descriptor(&self) -> &LoadedScript {
@@ -2229,10 +2293,12 @@ fn copy_script(
                 format!("field {field_index} has an incompatible descriptor layout"),
             ));
         }
-        if field.reserved_flags != [0; 3] {
+        if field.reserved_flags[0] & !ABI_FIELD_FLAG_READ_ONLY != 0
+            || field.reserved_flags[1..] != [0; 2]
+        {
             return Err(invalid(
                 index,
-                format!("field {field_index} reserved flags must be zero"),
+                format!("field {field_index} reserved flags contain unsupported bits"),
             ));
         }
         if field.has_default > 1 {
@@ -2245,6 +2311,7 @@ fn copy_script(
         let rust_type = copy_text(index, "field.rust_type", field.rust_type)?;
         let options = copy_text(index, "field.options", field.options)?;
         let default_value = copy_text(index, "field.default_value", field.default_value)?;
+        let read_only = field.reserved_flags[0] & ABI_FIELD_FLAG_READ_ONLY != 0;
         if name.is_empty() || !field_names.insert(name.clone()) {
             return Err(invalid(index, format!("duplicate or empty field `{name}`")));
         }
@@ -2263,7 +2330,7 @@ fn copy_script(
         let property = if field.reserved_extension_flags & ABI_FIELD_EXTENSION_GODOT_INTEGER_SCHEMA
             != 0
         {
-            if field.kind != AbiFieldKind::Export {
+            if !matches!(field.kind, AbiFieldKind::Export | AbiFieldKind::Property) {
                 return Err(invalid(
                     index,
                     format!("field `{name}` has an invalid Godot integer schema extension"),
@@ -2274,9 +2341,11 @@ fn copy_script(
                 &name,
                 &options,
                 field.reserved,
+                field.kind,
+                read_only,
             )?)
         } else if field.reserved_extension_flags & ABI_FIELD_EXTENSION_PROPERTY_SCHEMA != 0 {
-            if field.kind != AbiFieldKind::Export {
+            if !matches!(field.kind, AbiFieldKind::Export | AbiFieldKind::Property) {
                 return Err(invalid(
                     index,
                     format!("field `{name}` has an invalid property schema extension"),
@@ -2290,9 +2359,15 @@ fn copy_script(
                 .map_err(|_| invalid(index, format!("field `{name}` hint is out of range")))?;
             let usage = u32::try_from(field.reserved[2])
                 .map_err(|_| invalid(index, format!("field `{name}` usage is out of range")))?;
+            if read_only != (usage & ABI_PROPERTY_USAGE_READ_ONLY != 0) {
+                return Err(invalid(
+                    index,
+                    format!("property field `{name}` has inconsistent read-only metadata"),
+                ));
+            }
             let (group, hint_string, typed_array_element) =
                 parse_property_options(index, &name, &options)?;
-            validate_property_schema(index, &name, type_, hint, usage)?;
+            validate_property_schema(index, &name, field.kind, type_, hint, usage)?;
             if typed_array_element.is_some()
                 && (type_ != AbiPropertyType::ARRAY || hint != ABI_PROPERTY_HINT_TYPE_STRING)
             {
@@ -2366,14 +2441,20 @@ fn copy_script(
                 default_value: typed_default,
             })
         } else {
-            if field.kind == AbiFieldKind::Export {
+            if matches!(field.kind, AbiFieldKind::Export | AbiFieldKind::Property) {
                 return Err(invalid(
                     index,
-                    format!("export field `{name}` has no normalized property schema"),
+                    format!("property field `{name}` has no normalized property schema"),
                 ));
             }
             None
         };
+        if read_only && property.is_none() {
+            return Err(invalid(
+                index,
+                format!("non-property field `{name}` is marked read-only"),
+            ));
+        }
         let reload_value_type =
             if field.reserved_extension_flags & ABI_FIELD_EXTENSION_RELOAD_SCHEMA != 0 {
                 let type_ = AbiValueType(u32::try_from(field.reserved[0]).map_err(|_| {
@@ -3173,6 +3254,22 @@ fn validate_lifecycle_schema(
                     ));
                 }
             }
+            AbiMethodKind::Constant => {
+                if method.lifecycle != AbiLifecycleSlot::None
+                    || method.receiver != AbiReceiverKind::Static
+                    || method.argument_count != 0
+                    || !method.argument_types.is_empty()
+                    || !method.arguments.is_empty()
+                    || !method.default_arguments.is_empty()
+                    || method.vararg
+                    || method.rpc.is_some()
+                {
+                    return Err(invalid(
+                        script,
+                        format!("constant `{}` has inconsistent metadata", method.name),
+                    ));
+                }
+            }
         }
     }
     let actual = [
@@ -3222,6 +3319,8 @@ fn copy_godot_integer_property(
     field: &str,
     group: &str,
     reserved: [usize; 4],
+    kind: AbiFieldKind,
+    read_only: bool,
 ) -> Result<LoadedPropertySchema, ModuleLoadError> {
     if reserved[0] > 1
         || reserved[1] == 0
@@ -3292,7 +3391,15 @@ fn copy_godot_integer_property(
         },
         hint_string,
         typed_array_element: None,
-        usage: ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
+        usage: (if kind == AbiFieldKind::Property {
+            ABI_PROPERTY_USAGE_SCRIPT_STORAGE
+        } else {
+            ABI_PROPERTY_USAGE_SCRIPT_DEFAULT
+        }) | if read_only {
+            ABI_PROPERTY_USAGE_READ_ONLY
+        } else {
+            0
+        },
         group: (!group.is_empty()).then(|| group.to_owned()),
         default_value: Some(HostValue::Scalar(default_value)),
     })
@@ -3470,6 +3577,7 @@ fn parse_property_options(
 fn validate_property_schema(
     script: u32,
     field: &str,
+    kind: AbiFieldKind,
     type_: AbiPropertyType,
     hint: u32,
     usage: u32,
@@ -3502,12 +3610,14 @@ fn validate_property_schema(
             format!("export field `{field}` has an incompatible property hint"),
         ));
     }
-    let expected_usage = if hint == ABI_PROPERTY_HINT_NODE_TYPE {
+    let expected_usage = if kind == AbiFieldKind::Property {
+        ABI_PROPERTY_USAGE_SCRIPT_STORAGE
+    } else if hint == ABI_PROPERTY_HINT_NODE_TYPE {
         ABI_PROPERTY_USAGE_SCRIPT_DEFAULT | ABI_PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT
     } else {
         ABI_PROPERTY_USAGE_SCRIPT_DEFAULT
     };
-    if usage != expected_usage {
+    if usage != expected_usage && usage != (expected_usage | ABI_PROPERTY_USAGE_READ_ONLY) {
         return Err(invalid(
             script,
             format!("export field `{field}` has unsupported property usage flags"),
@@ -4457,6 +4567,7 @@ mod tests {
             validate_property_schema(
                 0,
                 "speed",
+                AbiFieldKind::Export,
                 AbiPropertyType::FLOAT,
                 ABI_PROPERTY_HINT_FLAGS,
                 ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
@@ -4480,6 +4591,7 @@ mod tests {
             validate_property_schema(
                 0,
                 "accent_color",
+                AbiFieldKind::Export,
                 AbiPropertyType::COLOR,
                 ABI_PROPERTY_HINT_COLOR_NO_ALPHA,
                 ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
@@ -4489,7 +4601,32 @@ mod tests {
         assert!(
             validate_property_schema(
                 0,
+                "health",
+                AbiFieldKind::Property,
+                AbiPropertyType::INT,
+                ABI_PROPERTY_HINT_NONE,
+                ABI_PROPERTY_USAGE_SCRIPT_STORAGE | ABI_PROPERTY_USAGE_READ_ONLY,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_property_schema(
+                0,
+                "health",
+                AbiFieldKind::Property,
+                AbiPropertyType::INT,
+                ABI_PROPERTY_HINT_NONE,
+                ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
+            )
+            .expect_err("hidden properties must not be exposed in the Inspector")
+            .to_string()
+            .contains("usage")
+        );
+        assert!(
+            validate_property_schema(
+                0,
                 "speed",
+                AbiFieldKind::Export,
                 AbiPropertyType::FLOAT,
                 ABI_PROPERTY_HINT_COLOR_NO_ALPHA,
                 ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
@@ -4539,6 +4676,8 @@ mod tests {
                 enum_options.len(),
                 godot_integer_default as *const () as usize,
             ],
+            AbiFieldKind::Export,
+            false,
         )
         .expect("valid generated enum schema");
         assert_eq!(schema.type_, AbiPropertyType::INT);
@@ -4575,6 +4714,8 @@ mod tests {
                 flag_options.len(),
                 godot_integer_default as *const () as usize,
             ],
+            AbiFieldKind::Export,
+            false,
         )
         .expect("valid generated bitfield schema");
         assert_eq!(schema.value_type, AbiValueType::U64);

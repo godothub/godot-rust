@@ -1,6 +1,12 @@
 use godot_rs::prelude::*;
 use std::time::Duration;
 
+#[godot_enum]
+enum GreetingStyle {
+    Friendly = 0,
+    Formal = 1,
+}
+
 /// Demonstrates a Godot node script with Inspector fields and typed signals.
 #[script(
     base = Node,
@@ -13,6 +19,12 @@ pub struct Hello {
 
     #[export(default = "Hello from Rust", multiline)]
     greeting: String,
+
+    #[export(default = GreetingStyle::Friendly, group = "Greeting")]
+    greeting_style: GreetingStyle,
+
+    #[property(default = 0, read_only)]
+    greetings_sent: i64,
 
     #[export(default = Vector2::new(128.0, 64.0), group = "Movement")]
     spawn_point: Vector2,
@@ -44,6 +56,8 @@ pub struct Hello {
 
 #[script]
 impl Hello {
+    pub const MAX_GREETING_COUNT: i64 = 10;
+
     fn _ready(&mut self) -> EngineResult<()> {
         self.call_super::<(), _>("_ready", ())?;
         let owner_id = self.base().get_instance_id()?;
@@ -95,9 +109,14 @@ impl Hello {
         left + right
     }
 
-    #[func]
+    #[func(name = "greet_player")]
     fn greet(&mut self, name: String) -> String {
-        let message = format!("{}, {name}!", self.greeting);
+        self.greetings_sent += 1;
+        let message = if self.greeting_style == GreetingStyle::Formal {
+            format!("{}，{name}。", self.greeting)
+        } else {
+            format!("{}, {name}!", self.greeting)
+        };
         self.greeted.emit((message.clone(),));
         message
     }

@@ -203,6 +203,58 @@ pub(crate) fn find_identifier_line(source: &str, requested_name: &str) -> Option
     None
 }
 
+/// Finds the Rust declaration behind a possibly renamed `#[func]` or `#[rpc]`.
+pub(crate) fn find_reflected_method_line(source: &str, godot_name: &str) -> Option<usize> {
+    if let Ok(file) = syn::parse_file(source) {
+        for item in file.items {
+            let syn::Item::Impl(item) = item else {
+                continue;
+            };
+            for item in item.items {
+                let syn::ImplItem::Fn(method) = item else {
+                    continue;
+                };
+                let mut reflected_name = method.sig.ident.to_string();
+                for attribute in &method.attrs {
+                    if !attribute.path().is_ident("func") && !attribute.path().is_ident("rpc") {
+                        continue;
+                    }
+                    let syn::Meta::List(list) = &attribute.meta else {
+                        continue;
+                    };
+                    let Ok(entries) =
+                        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                            .parse2(list.tokens.clone())
+                    else {
+                        continue;
+                    };
+                    if let Some(name) = entries.iter().find_map(|entry| {
+                        let syn::Meta::NameValue(value) = entry else {
+                            return None;
+                        };
+                        if !value.path.is_ident("name") {
+                            return None;
+                        }
+                        let syn::Expr::Lit(value) = &value.value else {
+                            return None;
+                        };
+                        let syn::Lit::Str(value) = &value.lit else {
+                            return None;
+                        };
+                        Some(value.value())
+                    }) {
+                        reflected_name = name;
+                    }
+                }
+                if reflected_name.strip_prefix("r#").unwrap_or(&reflected_name) == godot_name {
+                    return Some(method.sig.ident.span().start().line.saturating_sub(1));
+                }
+            }
+        }
+    }
+    find_identifier_line(source, godot_name)
+}
+
 /// Extracts a contiguous Rust doc-comment block immediately above a line.
 pub(crate) fn documentation_before_line(source: &str, line: usize) -> String {
     let lines = source.lines().collect::<Vec<_>>();
@@ -221,66 +273,20 @@ pub(crate) fn documentation_before_line(source: &str, line: usize) -> String {
         if trimmed.is_empty() && docs.is_empty() {
             continue;
         }
+        if docs.is_empty() && (trimmed.starts_with("#[") || trimmed.ends_with(']')) {
+            while !trimmed_attribute_start(lines[cursor].trim()) && cursor > 0 {
+                cursor -= 1;
+            }
+            continue;
+        }
         break;
     }
     docs.reverse();
     docs.join("\n")
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SourceConstantValue {
-    Bool(bool),
-    I64(i64),
-    F64(f64),
-    String(String),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SourceConstant {
-    pub(crate) name: String,
-    pub(crate) value: SourceConstantValue,
-    pub(crate) line: usize,
-}
-
-/// Reads literal associated constants from the Rust script implementation.
-///
-/// Constants with computed values remain ordinary Rust constants; only values
-/// with an exact Godot scalar representation are exposed through `Script`.
-pub(crate) fn script_constants(source: &str, script_type: &str) -> Vec<SourceConstant> {
-    let Ok(file) = syn::parse_file(source) else {
-        return Vec::new();
-    };
-    let mut constants = Vec::new();
-    for item in file.items {
-        let syn::Item::Impl(item) = item else {
-            continue;
-        };
-        let syn::Type::Path(self_type) = item.self_ty.as_ref() else {
-            continue;
-        };
-        if self_type
-            .path
-            .segments
-            .last()
-            .is_none_or(|segment| segment.ident != script_type)
-        {
-            continue;
-        }
-        for item in item.items {
-            let syn::ImplItem::Const(constant) = item else {
-                continue;
-            };
-            let Some(value) = literal_constant_value(&constant.expr) else {
-                continue;
-            };
-            constants.push(SourceConstant {
-                name: constant.ident.to_string(),
-                value,
-                line: constant.ident.span().start().line.saturating_sub(1),
-            });
-        }
-    }
-    constants
+fn trimmed_attribute_start(value: &str) -> bool {
+    value.starts_with("#[")
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -547,28 +553,6 @@ fn is_godot_identifier(value: &str) -> bool {
     let mut bytes = value.bytes();
     matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-fn literal_constant_value(expression: &syn::Expr) -> Option<SourceConstantValue> {
-    match expression {
-        syn::Expr::Lit(value) => match &value.lit {
-            syn::Lit::Bool(value) => Some(SourceConstantValue::Bool(value.value)),
-            syn::Lit::Int(value) => value.base10_parse().ok().map(SourceConstantValue::I64),
-            syn::Lit::Float(value) => value.base10_parse().ok().map(SourceConstantValue::F64),
-            syn::Lit::Str(value) => Some(SourceConstantValue::String(value.value())),
-            _ => None,
-        },
-        syn::Expr::Unary(value) if matches!(value.op, syn::UnOp::Neg(_)) => {
-            match literal_constant_value(&value.expr)? {
-                SourceConstantValue::I64(value) => {
-                    value.checked_neg().map(SourceConstantValue::I64)
-                }
-                SourceConstantValue::F64(value) => Some(SourceConstantValue::F64(-value)),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
 }
 
 fn is_identifier(value: &str) -> bool {
@@ -1062,29 +1046,25 @@ impl Player {
     }
 
     #[test]
-    fn script_constants_include_only_exact_literal_scalars() {
+    fn reflected_method_lookup_follows_func_and_rpc_names() {
         let source = r#"
 impl Player {
-    const ENABLED: bool = true;
-    const LIVES: i64 = 3;
-    const OFFSET: i64 = -2;
-    const SPEED: f64 = 4.5;
-    const TITLE: &str = "Rust";
-    const COMPUTED: i64 = 1 + 2;
-}
-impl Enemy {
-    const LIVES: i64 = 99;
+    /// Applies damage.
+    #[func(name = "apply_damage")]
+    fn take_damage(&mut self) {}
+
+    #[rpc(name = "sync_player", reliable)]
+    fn sync_state(&mut self) {}
 }
 "#;
-        let constants = script_constants(source, "Player");
-        assert_eq!(constants.len(), 5);
-        assert_eq!(constants[0].name, "ENABLED");
-        assert_eq!(constants[1].value, SourceConstantValue::I64(3));
-        assert_eq!(constants[2].value, SourceConstantValue::I64(-2));
-        assert_eq!(constants[3].value, SourceConstantValue::F64(4.5));
+        assert_eq!(find_reflected_method_line(source, "apply_damage"), Some(4));
+        assert_eq!(find_reflected_method_line(source, "sync_player"), Some(7));
         assert_eq!(
-            constants[4].value,
-            SourceConstantValue::String("Rust".to_owned())
+            documentation_before_line(
+                source,
+                find_reflected_method_line(source, "apply_damage").expect("renamed method"),
+            ),
+            "Applies damage."
         );
     }
 

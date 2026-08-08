@@ -19,7 +19,7 @@ pub mod string_name;
 pub mod task;
 pub mod variant;
 
-pub use godot_macro::script;
+pub use godot_macro::{godot_enum, godot_flags, script};
 #[doc(hidden)]
 pub use inventory;
 
@@ -50,7 +50,6 @@ pub mod prelude {
         PackedVector3Array, PackedVector4Array,
     };
     pub use crate::rid::Rid;
-    pub use crate::script;
     pub use crate::script::ScriptSuper;
     pub use crate::signal::Signal;
     pub use crate::string_name::StringName;
@@ -59,5 +58,6 @@ pub mod prelude {
         next_frame, sleep, spawn, spawn_blocking, timeout,
     };
     pub use crate::variant::{Array, Dictionary, Variant, VariantKind};
-    pub use crate::{godot_print, godot_warn};
+    pub use crate::{godot_debug, godot_error, godot_print, godot_warn};
+    pub use crate::{godot_enum, godot_flags, script};
 }

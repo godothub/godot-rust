@@ -4,8 +4,9 @@ use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, ImplItemFn, Item, ItemImpl,
-    ItemStruct, LitStr, Meta, Pat, Path, PathArguments, ReturnType, Token, Type,
+    Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, ImplItemConst, ImplItemFn,
+    Item, ItemEnum, ItemImpl, ItemStruct, LitStr, Meta, Pat, Path, PathArguments, ReturnType,
+    Token, Type, Visibility,
 };
 
 /// Declares an attachable Rust Script or its Godot-facing impl block.
@@ -22,6 +23,322 @@ pub fn script(arguments: TokenStream, input: TokenStream) -> TokenStream {
         )),
     };
     expanded.unwrap_or_else(Error::into_compile_error).into()
+}
+
+/// Declares a forward-compatible, integer-backed Godot enum.
+#[proc_macro_attribute]
+pub fn godot_enum(arguments: TokenStream, input: TokenStream) -> TokenStream {
+    expand_custom_integer(arguments, input, false)
+}
+
+/// Declares forward-compatible, integer-backed Godot flags.
+#[proc_macro_attribute]
+pub fn godot_flags(arguments: TokenStream, input: TokenStream) -> TokenStream {
+    expand_custom_integer(arguments, input, true)
+}
+
+fn expand_custom_integer(arguments: TokenStream, input: TokenStream, flags: bool) -> TokenStream {
+    let arguments = TokenStream2::from(arguments);
+    if !arguments.is_empty() {
+        return Error::new_spanned(arguments, "this attribute does not take arguments")
+            .into_compile_error()
+            .into();
+    }
+    let item = syn::parse_macro_input!(input as ItemEnum);
+    custom_integer_tokens(item, flags)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
+
+fn custom_integer_tokens(item: ItemEnum, flags: bool) -> syn::Result<TokenStream2> {
+    if !item.generics.params.is_empty() {
+        return Err(Error::new_spanned(
+            item.generics,
+            "Godot enums and flags cannot have generic parameters",
+        ));
+    }
+    if item.variants.is_empty() {
+        return Err(Error::new_spanned(
+            item.ident,
+            "a Godot enum or flag type requires at least one named value",
+        ));
+    }
+    let mut type_documentation = Vec::new();
+    let mut type_conditions = Vec::new();
+    for attribute in item.attrs {
+        if attribute.path().is_ident("doc") {
+            type_documentation.push(attribute);
+        } else if attribute.path().is_ident("cfg") {
+            type_conditions.push(attribute);
+        } else if attribute.path().is_ident("repr") {
+            // The generated public type always uses the ABI-safe transparent
+            // representation selected by this macro.
+        } else {
+            return Err(Error::new_spanned(
+                attribute,
+                "only documentation and `cfg` attributes are supported here; the macro supplies the required derives and representation",
+            ));
+        }
+    }
+
+    let mut values = Vec::with_capacity(item.variants.len());
+    let mut explicit_default = None;
+    for (index, variant) in item.variants.into_iter().enumerate() {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(Error::new_spanned(
+                variant.fields,
+                "Godot enum and flag values cannot contain fields",
+            ));
+        }
+        let Some((_, expression)) = variant.discriminant else {
+            return Err(Error::new_spanned(
+                variant.ident,
+                "assign an explicit integer value to every Godot enum or flag entry",
+            ));
+        };
+        let mut documentation = Vec::new();
+        let mut conditions = Vec::new();
+        let mut is_default = false;
+        for attribute in variant.attrs {
+            if attribute.path().is_ident("default") {
+                if flags {
+                    return Err(Error::new_spanned(
+                        attribute,
+                        "Godot flag types default to the empty set; choose a field default with `#[export(default = ...)]`",
+                    ));
+                }
+                if is_default {
+                    return Err(Error::new_spanned(
+                        attribute,
+                        "duplicate `default` attribute",
+                    ));
+                }
+                is_default = true;
+            } else if attribute.path().is_ident("doc") {
+                documentation.push(attribute);
+            } else if attribute.path().is_ident("cfg") {
+                conditions.push(attribute);
+            } else {
+                return Err(Error::new_spanned(
+                    attribute,
+                    "Godot enum values only support documentation, `cfg`, and `default` attributes",
+                ));
+            }
+        }
+        if is_default && explicit_default.replace(index).is_some() {
+            return Err(Error::new_spanned(
+                &variant.ident,
+                "only one Godot enum value can be the default",
+            ));
+        }
+        let option_name = LitStr::new(
+            &screaming_snake_case(&variant.ident.to_string()),
+            variant.ident.span(),
+        );
+        values.push((
+            variant.ident,
+            expression,
+            documentation,
+            conditions,
+            option_name,
+        ));
+    }
+
+    let visibility = item.vis;
+    let name = item.ident;
+    let raw_type = if flags { quote!(u64) } else { quote!(i64) };
+    let signed = !flags;
+    let default_index = explicit_default.unwrap_or(0);
+    let default_expression = &values[default_index].1;
+    let default_raw = if flags {
+        quote!(0_u64)
+    } else {
+        quote!((#default_expression) as u64)
+    };
+    let constants = values
+        .iter()
+        .map(|(ident, expression, documentation, conditions, _)| {
+            quote! {
+                #(#documentation)*
+                #(#conditions)*
+                #[allow(non_upper_case_globals)]
+                pub const #ident: Self = Self((#expression) as #raw_type);
+            }
+        });
+    let property_options = values
+        .iter()
+        .map(|(_, expression, _, conditions, option_name)| {
+            quote! {
+                #(#conditions)*
+                ::godot_rs::abi::AbiGodotIntegerOptionV1 {
+                    name: ::godot_rs::abi::AbiByteSlice::from_static(#option_name),
+                    raw: (#expression) as u64,
+                }
+            }
+        });
+    let value_api = if flags {
+        quote! {
+            #[must_use]
+            pub const fn from_bits_retain(bits: u64) -> Self { Self(bits) }
+
+            #[must_use]
+            pub const fn bits(self) -> u64 { self.0 }
+
+            #[must_use]
+            pub const fn empty() -> Self { Self(0) }
+
+            #[must_use]
+            pub const fn contains(self, other: Self) -> bool {
+                self.0 & other.0 == other.0
+            }
+
+            #[must_use]
+            pub const fn is_empty(self) -> bool { self.0 == 0 }
+        }
+    } else {
+        quote! {
+            #[must_use]
+            pub const fn from_ord(value: i64) -> Self { Self(value) }
+
+            #[must_use]
+            pub const fn ord(self) -> i64 { self.0 }
+        }
+    };
+    let conversions = if flags {
+        quote! {
+            #(#type_conditions)*
+            impl ::core::convert::From<u64> for #name {
+                fn from(value: u64) -> Self { Self::from_bits_retain(value) }
+            }
+
+            #(#type_conditions)*
+            impl ::core::convert::From<#name> for u64 {
+                fn from(value: #name) -> Self { value.bits() }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::BitOr for #name {
+                type Output = Self;
+                fn bitor(self, other: Self) -> Self { Self(self.0 | other.0) }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::BitOrAssign for #name {
+                fn bitor_assign(&mut self, other: Self) { self.0 |= other.0; }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::BitAnd for #name {
+                type Output = Self;
+                fn bitand(self, other: Self) -> Self { Self(self.0 & other.0) }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::BitAndAssign for #name {
+                fn bitand_assign(&mut self, other: Self) { self.0 &= other.0; }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::BitXor for #name {
+                type Output = Self;
+                fn bitxor(self, other: Self) -> Self { Self(self.0 ^ other.0) }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::BitXorAssign for #name {
+                fn bitxor_assign(&mut self, other: Self) { self.0 ^= other.0; }
+            }
+
+            #(#type_conditions)*
+            impl ::core::ops::Not for #name {
+                type Output = Self;
+                fn not(self) -> Self { Self(!self.0) }
+            }
+        }
+    } else {
+        quote! {
+            #(#type_conditions)*
+            impl ::core::convert::From<i64> for #name {
+                fn from(value: i64) -> Self { Self::from_ord(value) }
+            }
+
+            #(#type_conditions)*
+            impl ::core::convert::From<#name> for i64 {
+                fn from(value: #name) -> Self { value.ord() }
+            }
+        }
+    };
+    let default_value = if flags {
+        quote!(Self(0))
+    } else {
+        quote!(Self((#default_expression) as i64))
+    };
+    let raw = if flags {
+        quote!(self.0)
+    } else {
+        quote!(self.0 as u64)
+    };
+    let from_raw = if flags {
+        quote!(Self(raw))
+    } else {
+        quote!(Self(raw as i64))
+    };
+
+    Ok(quote! {
+        #(#type_documentation)*
+        #(#type_conditions)*
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[repr(transparent)]
+        #visibility struct #name(#raw_type);
+
+        #(#type_conditions)*
+        impl #name {
+            #(#constants)*
+            #value_api
+        }
+
+        #conversions
+
+        #(#type_conditions)*
+        impl ::core::default::Default for #name {
+            fn default() -> Self { #default_value }
+        }
+
+        #(#type_conditions)*
+        impl ::godot_rs::engine::GodotIntegerValue for #name {
+            const SIGNED: bool = #signed;
+            const PROPERTY_OPTIONS: &'static [::godot_rs::abi::AbiGodotIntegerOptionV1] = &[
+                #(#property_options),*
+            ];
+            const PROPERTY_DEFAULT_RAW: u64 = #default_raw;
+
+            fn __raw(self) -> u64 { #raw }
+            fn __from_raw(raw: u64) -> Self { #from_raw }
+        }
+
+        #(#type_conditions)*
+        impl ::godot_rs::engine::CustomGodotIntegerValue for #name {}
+    })
+}
+
+fn screaming_snake_case(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut previous_lower_or_digit = false;
+    for character in value.chars() {
+        if character.is_ascii_uppercase() && previous_lower_or_digit {
+            result.push('_');
+        }
+        if character == '-' || character == ' ' {
+            if !result.ends_with('_') {
+                result.push('_');
+            }
+            previous_lower_or_digit = false;
+        } else {
+            result.push(character.to_ascii_uppercase());
+            previous_lower_or_digit = character.is_ascii_lowercase() || character.is_ascii_digit();
+        }
+    }
+    result
 }
 
 #[derive(Default)]
@@ -208,6 +525,7 @@ fn is_canonical_resource_path(value: &str) -> bool {
 enum FieldKind {
     Plain,
     Export,
+    Property,
     Node,
     Signal,
 }
@@ -224,6 +542,9 @@ struct FieldMetadata {
     property_object_class: Option<Type>,
     property_node_usage: bool,
     property_group: Option<String>,
+    property_getter: Option<syn::Ident>,
+    property_setter: Option<syn::Ident>,
+    property_read_only: bool,
     node_path: Option<String>,
     node_class: Option<String>,
     node_optional: bool,
@@ -244,6 +565,9 @@ impl Default for FieldMetadata {
             property_object_class: None,
             property_node_usage: false,
             property_group: None,
+            property_getter: None,
+            property_setter: None,
+            property_read_only: false,
             node_path: None,
             node_class: None,
             node_optional: false,
@@ -401,27 +725,39 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                 descriptors.push(field_descriptor(name, &field.ty, &metadata)?);
                 if metadata.property_type.is_some() || metadata.reload == ReloadPolicy::Persist {
                     let field_type = &field.ty;
-                    let field_value = quote!(::core::clone::Clone::clone(&self.#name));
+                    let field_value = metadata.property_getter.as_ref().map_or_else(
+                        || quote!(::core::clone::Clone::clone(&self.#name)),
+                        |getter| quote!(self.#getter()),
+                    );
                     field_getters.push(quote! {
-                        #index => ::godot_rs::script::IntoMethodResult::write_result(
-                            #field_value,
-                            output,
-                        ),
-                    });
-                    field_setters.push(quote! {
                         #index => {
-                            let Some(decoded) =
-                                <#field_type as ::godot_rs::script::FromAbiValue>::from_abi(value)
-                            else {
-                                return ::godot_rs::abi::AbiCallResult::failure(
-                                    ::godot_rs::abi::AbiStatus::InvalidArgument,
-                                    "Host value does not match the generated Rust field type",
-                                );
-                            };
-                            self.#name = decoded;
-                            ::godot_rs::abi::AbiCallResult::OK
-                        }
+                            let field_value: #field_type = #field_value;
+                            ::godot_rs::script::IntoMethodResult::write_result(
+                                field_value,
+                                output,
+                            )
+                        },
                     });
+                    if !metadata.property_read_only {
+                        let assignment = metadata.property_setter.as_ref().map_or_else(
+                            || quote!(self.#name = decoded;),
+                            |setter| quote!(self.#setter(decoded);),
+                        );
+                        field_setters.push(quote! {
+                            #index => {
+                                let Some(decoded) =
+                                    <#field_type as ::godot_rs::script::FromAbiValue>::from_abi(value)
+                                else {
+                                    return ::godot_rs::abi::AbiCallResult::failure(
+                                        ::godot_rs::abi::AbiStatus::InvalidArgument,
+                                        "Host value does not match the generated Rust field type",
+                                    );
+                                };
+                                #assignment
+                                ::godot_rs::abi::AbiCallResult::OK
+                            }
+                        });
+                    }
                 } else if metadata.kind == FieldKind::Node {
                     let field_type = &field.ty;
                     field_setters.push(quote! {
@@ -560,8 +896,13 @@ fn take_field_metadata(
     let mut metadata = FieldMetadata::default();
     let mut retained = Vec::with_capacity(attributes.len());
     for attribute in core::mem::take(attributes) {
-        if attribute.path().is_ident("export") {
-            set_field_kind(&mut metadata, FieldKind::Export, &attribute)?;
+        if attribute.path().is_ident("export") || attribute.path().is_ident("property") {
+            let kind = if attribute.path().is_ident("export") {
+                FieldKind::Export
+            } else {
+                FieldKind::Property
+            };
+            set_field_kind(&mut metadata, kind, &attribute)?;
             let entries = parse_meta_arguments(&attribute)?;
             let property_type = export_property_type(field_type, &attribute)?;
             metadata.property_type = Some(property_type);
@@ -569,6 +910,10 @@ fn take_field_metadata(
             metadata.property_hint = schema.hint;
             metadata.property_hint_string = schema.hint_string;
             metadata.property_group = schema.group;
+            let accessors = parse_property_accessors(&entries)?;
+            metadata.property_getter = accessors.getter;
+            metadata.property_setter = accessors.setter;
+            metadata.property_read_only = accessors.read_only;
             if property_type == PropertyType::Array {
                 let array = exported_array_metadata(field_type, &attribute)?;
                 if let Some(array) = array {
@@ -591,20 +936,10 @@ fn take_field_metadata(
                 };
                 metadata.property_hint_string = object.class_name;
                 metadata.property_object_class = Some(object.class_type);
-                metadata.property_node_usage = property_type == PropertyType::NodeRef;
+                metadata.property_node_usage =
+                    kind == FieldKind::Export && property_type == PropertyType::NodeRef;
             }
             merge_default(&mut metadata, find_default(&entries), &attribute)?;
-            if property_type == PropertyType::GodotInteger
-                && metadata
-                    .default
-                    .as_ref()
-                    .is_some_and(|value| !matches!(value, Expr::Path(_)))
-            {
-                return Err(Error::new_spanned(
-                    &attribute,
-                    "a generated Godot enum or bitfield default must be one generated associated constant",
-                ));
-            }
             if matches!(
                 property_type,
                 PropertyType::String | PropertyType::StringName | PropertyType::NodePath
@@ -685,7 +1020,7 @@ fn set_field_kind(
     if metadata.kind != FieldKind::Plain {
         return Err(Error::new_spanned(
             attribute,
-            "a field can only be one of `export`, `node`, or `signal`",
+            "a field can only be one of `property`, `export`, `node`, or `signal`",
         ));
     }
     metadata.kind = kind;
@@ -724,6 +1059,68 @@ struct ExportPropertySchema {
     hint: u32,
     hint_string: String,
     group: Option<String>,
+}
+
+#[derive(Default)]
+struct PropertyAccessors {
+    getter: Option<syn::Ident>,
+    setter: Option<syn::Ident>,
+    read_only: bool,
+}
+
+fn parse_property_accessors(
+    entries: &Punctuated<Meta, Token![,]>,
+) -> syn::Result<PropertyAccessors> {
+    let mut result = PropertyAccessors::default();
+    for entry in entries {
+        match entry {
+            Meta::NameValue(value) if value.path.is_ident("get") => {
+                result.getter = Some(property_accessor_name(value, result.getter.is_some())?);
+            }
+            Meta::NameValue(value) if value.path.is_ident("set") => {
+                if result.read_only {
+                    return Err(Error::new_spanned(
+                        value,
+                        "a read-only property cannot declare a setter",
+                    ));
+                }
+                result.setter = Some(property_accessor_name(value, result.setter.is_some())?);
+            }
+            Meta::Path(path) if path.is_ident("read_only") => {
+                if result.read_only {
+                    return Err(Error::new_spanned(path, "duplicate `read_only` option"));
+                }
+                if result.setter.is_some() {
+                    return Err(Error::new_spanned(
+                        path,
+                        "a property with a setter cannot be read-only",
+                    ));
+                }
+                result.read_only = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+fn property_accessor_name(value: &syn::MetaNameValue, duplicate: bool) -> syn::Result<syn::Ident> {
+    if duplicate {
+        return Err(Error::new_spanned(value, "duplicate property accessor"));
+    }
+    let Expr::Path(path) = &value.value else {
+        return Err(Error::new_spanned(
+            &value.value,
+            "a property accessor must be a Rust method name",
+        ));
+    };
+    if path.qself.is_some() || path.path.segments.len() != 1 {
+        return Err(Error::new_spanned(
+            path,
+            "a property accessor must be one Rust method name",
+        ));
+    }
+    Ok(path.path.segments[0].ident.clone())
 }
 
 fn export_property_type(field_type: &Type, source: &Attribute) -> syn::Result<PropertyType> {
@@ -966,6 +1363,8 @@ fn parse_export_schema(
     for entry in entries {
         match entry {
             Meta::NameValue(value) if value.path.is_ident("default") => {}
+            Meta::NameValue(value) if value.path.is_ident("get") || value.path.is_ident("set") => {}
+            Meta::Path(path) if path.is_ident("read_only") => {}
             Meta::NameValue(value) if value.path.is_ident("group") => {
                 if group.is_some() {
                     return Err(Error::new_spanned(value, "duplicate export group"));
@@ -1037,7 +1436,7 @@ fn parse_export_schema(
             unsupported => {
                 return Err(Error::new_spanned(
                     unsupported,
-                    "unsupported export option; use `default`, `group`, `range`, `flags`, `file`, `multiline`, or `no_alpha`",
+                    "unsupported property option; use `default`, `get`, `set`, `read_only`, `group`, `range`, `flags`, `file`, `multiline`, or `no_alpha`",
                 ));
             }
         }
@@ -1441,6 +1840,7 @@ fn field_descriptor(
     let kind = match metadata.kind {
         FieldKind::Plain => quote!(::godot_rs::script::FieldKind::Plain),
         FieldKind::Export => quote!(::godot_rs::script::FieldKind::Export),
+        FieldKind::Property => quote!(::godot_rs::script::FieldKind::Property),
         FieldKind::Node => quote!(::godot_rs::script::FieldKind::Node),
         FieldKind::Signal => quote!(::godot_rs::script::FieldKind::Signal),
     };
@@ -2011,13 +2411,20 @@ fn field_descriptor(
             metadata.typed_array_element.as_deref(),
         );
         let encoded = LitStr::new(&encoded, Span::call_site());
-        let usage = if metadata.property_node_usage {
+        let base_usage = if metadata.kind == FieldKind::Property {
+            quote!(::godot_rs::abi::ABI_PROPERTY_USAGE_SCRIPT_STORAGE)
+        } else if metadata.property_node_usage {
             quote!(
                 ::godot_rs::abi::ABI_PROPERTY_USAGE_SCRIPT_DEFAULT
                     | ::godot_rs::abi::ABI_PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT
             )
         } else {
             quote!(::godot_rs::abi::ABI_PROPERTY_USAGE_SCRIPT_DEFAULT)
+        };
+        let usage = if metadata.property_read_only {
+            quote!(#base_usage | ::godot_rs::abi::ABI_PROPERTY_USAGE_READ_ONLY)
+        } else {
+            base_usage
         };
         quote! {
             ::core::option::Option::Some(::godot_rs::script::PropertyDescriptor {
@@ -2172,19 +2579,32 @@ fn expand_impl(arguments: TokenStream2, mut item: ItemImpl) -> syn::Result<Token
     let mut invocations = Vec::new();
 
     for impl_item in &mut item.items {
-        let ImplItem::Fn(method) = impl_item else {
-            continue;
-        };
-        if let Some(expansion) =
-            method_descriptor(&self_type, &type_name, method, virtual_trait.as_ref())?
-        {
-            descriptors.push(expansion.descriptor);
-            if let Some(wrapper) = expansion.wrapper {
-                wrappers.push(wrapper);
+        match impl_item {
+            ImplItem::Fn(method) => {
+                if let Some(expansion) =
+                    method_descriptor(&self_type, &type_name, method, virtual_trait.as_ref())?
+                {
+                    descriptors.push(expansion.descriptor);
+                    if let Some(wrapper) = expansion.wrapper {
+                        wrappers.push(wrapper);
+                    }
+                    if let Some(invocation) = expansion.invocation {
+                        invocations.push(invocation);
+                    }
+                }
             }
-            if let Some(invocation) = expansion.invocation {
-                invocations.push(invocation);
+            ImplItem::Const(constant)
+                if virtual_trait.is_none() && matches!(constant.vis, Visibility::Public(_)) =>
+            {
+                let expansion = constant_descriptor(&self_type, constant)?;
+                descriptors.push(expansion.descriptor);
+                invocations.push(
+                    expansion
+                        .invocation
+                        .expect("constant descriptors always have an invocation"),
+                );
             }
+            _ => {}
         }
     }
 
@@ -2203,21 +2623,98 @@ fn expand_impl(arguments: TokenStream2, mut item: ItemImpl) -> syn::Result<Token
                     arguments: *const ::godot_rs::abi::AbiValueV1,
                     argument_count: u32,
                     output: *mut ::godot_rs::abi::AbiValueV1,
-                | {
-                    // SAFETY: The Host pairs each method block with state for
-                    // the same script type and keeps it alive for the call.
-                    let script_state = unsafe { &mut *state.cast::<#self_type>() };
-                    match method_id {
+                | match method_id {
                         #(#invocations)*
                         _ => ::godot_rs::abi::AbiCallResult::failure(
                             ::godot_rs::abi::AbiStatus::Unsupported,
                             "reflected method ID is not present in this script block",
                         ),
-                    }
-                },
+                    },
             }
         }
     })
+}
+
+fn constant_descriptor(self_type: &Type, constant: &ImplItemConst) -> syn::Result<MethodExpansion> {
+    if !constant.generics.params.is_empty() {
+        return Err(Error::new_spanned(
+            &constant.generics,
+            "Godot-visible constants cannot have generic parameters",
+        ));
+    }
+    let name = &constant.ident;
+    let rust_name = name.to_string();
+    let godot_name = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
+    if !is_godot_class_identifier(godot_name) {
+        return Err(Error::new_spanned(
+            name,
+            "a Godot-visible constant must use a valid Godot identifier",
+        ));
+    }
+    let exported_name = LitStr::new(godot_name, name.span());
+    let id = fnv1a(godot_name.as_bytes());
+    let signature = token_string(constant);
+    let (return_type, result) = if is_str_reference(&constant.ty) {
+        (
+            quote!(::godot_rs::abi::AbiValueType::STRING),
+            quote!((<#self_type>::#name).to_owned()),
+        )
+    } else {
+        (abi_value_type(&constant.ty)?, quote!(<#self_type>::#name))
+    };
+    let descriptor = quote! {
+        ::godot_rs::script::MethodDescriptor {
+            id: #id,
+            name: #exported_name,
+            rust_signature: #signature,
+            kind: ::godot_rs::script::MethodKind::Constant,
+            receiver: ::godot_rs::script::ReceiverKind::Static,
+            argument_count: 0,
+            argument_types: &[],
+            arguments: &[],
+            abi_arguments: &[],
+            abi_argument_classes: &[],
+            default_arguments: &[],
+            vararg: false,
+            abi_extensions: ::godot_rs::script::method_extensions(
+                &[],
+                ::core::option::Option::None,
+                &[],
+                false,
+            ),
+            return_type: #return_type,
+            return_class: ::core::option::Option::None,
+            options: "",
+            rpc: ::core::option::Option::None,
+            callback: ::godot_rs::script::MethodCallback::None,
+        }
+    };
+    let invocation = quote! {
+        #id => {
+            if argument_count != 0 {
+                return ::godot_rs::abi::AbiCallResult::failure(
+                    ::godot_rs::abi::AbiStatus::InvalidArgument,
+                    "script constants do not accept arguments",
+                );
+            }
+            ::godot_rs::script::encode_method_result(#result, output)
+        }
+    };
+    Ok(MethodExpansion {
+        descriptor,
+        wrapper: None,
+        invocation: Some(invocation),
+    })
+}
+
+fn is_str_reference(type_: &Type) -> bool {
+    let Type::Reference(reference) = type_ else {
+        return false;
+    };
+    matches!(
+        reference.elem.as_ref(),
+        Type::Path(path) if path.path.is_ident("str")
+    )
 }
 
 struct MethodExpansion {
@@ -2246,14 +2743,11 @@ fn method_descriptor(
             "generated Godot virtual methods are registered automatically",
         ));
     }
-    if let Some(attribute) = &func {
-        if !matches!(attribute.meta, Meta::Path(_)) {
-            return Err(Error::new_spanned(
-                attribute,
-                "`#[func]` does not take arguments",
-            ));
-        }
-    }
+    let func_name = func
+        .as_ref()
+        .map(parse_func_arguments)
+        .transpose()?
+        .flatten();
     let rpc_config = rpc.as_ref().map(parse_rpc_arguments).transpose()?;
 
     let lifecycle = virtual_trait
@@ -2370,9 +2864,17 @@ fn method_descriptor(
 
     let method_name = &method.sig.ident;
     let method_name_ident = method_name.to_string();
-    let method_name_string = method_name_ident
+    let rust_method_name = method_name_ident
         .strip_prefix("r#")
         .unwrap_or(&method_name_ident);
+    let method_name_string = func_name
+        .as_deref()
+        .or_else(|| {
+            rpc_config
+                .as_ref()
+                .and_then(|config| config.name.as_deref())
+        })
+        .unwrap_or(rust_method_name);
     let method_id = fnv1a(method_name_string.as_bytes());
     let exported_method_name = LitStr::new(method_name_string, method_name.span());
     let signature = token_string(&method.sig);
@@ -2383,7 +2885,7 @@ fn method_descriptor(
         Receiver::Mutable => quote!(::godot_rs::script::ReceiverKind::Mutable),
         Receiver::Static => quote!(::godot_rs::script::ReceiverKind::Static),
     };
-    let rpc_tokens = rpc_config.map_or_else(
+    let rpc_tokens = rpc_config.as_ref().map_or_else(
         || quote!(::core::option::Option::None),
         ParsedRpcConfig::tokens,
     );
@@ -2647,6 +3149,31 @@ fn reflected_method_invocation(
         }
         (None, Receiver::Static) => quote!(<#self_type>::#method_name(#call_arguments)),
     };
+    let state_binding = match receiver {
+        Receiver::Shared => quote! {
+            if state.is_null() {
+                return ::godot_rs::abi::AbiCallResult::failure(
+                    ::godot_rs::abi::AbiStatus::InvalidArgument,
+                    "instance method received a null script state",
+                );
+            }
+            // SAFETY: The Host pairs this method block with live state for the
+            // same script type and holds a shared borrow for this invocation.
+            let script_state = unsafe { &*state.cast::<#self_type>() };
+        },
+        Receiver::Mutable => quote! {
+            if state.is_null() {
+                return ::godot_rs::abi::AbiCallResult::failure(
+                    ::godot_rs::abi::AbiStatus::InvalidArgument,
+                    "instance method received a null script state",
+                );
+            }
+            // SAFETY: The Host pairs this method block with live state for the
+            // same script type and holds an exclusive borrow for this invocation.
+            let script_state = unsafe { &mut *state.cast::<#self_type>() };
+        },
+        Receiver::Static => quote! {},
+    };
     let argument_count = u32::try_from(argument_types.len()).expect("method count was bounded");
     let count_check = if is_vararg {
         quote!(argument_count < #argument_count)
@@ -2681,6 +3208,7 @@ fn reflected_method_invocation(
                     "reflected method argument count does not match its descriptor",
                 );
             }
+            #state_binding
             #(#decoders)*
             #vararg_decoder
             let result = #call;
@@ -2697,6 +3225,12 @@ fn abi_value_type(value: &Type) -> syn::Result<TokenStream2> {
         Some("i8" | "i16" | "i32" | "i64") => quote!(::godot_rs::abi::AbiValueType::I64),
         Some("u8" | "u16" | "u32" | "u64" | "char") => {
             quote!(::godot_rs::abi::AbiValueType::U64)
+        }
+        Some("isize" | "usize" | "i128" | "u128") => {
+            return Err(Error::new_spanned(
+                value,
+                "Godot integers have a fixed 64-bit boundary; use `i64` or `u64`",
+            ));
         }
         Some("f32" | "f64") => quote!(::godot_rs::abi::AbiValueType::F64),
         Some("String") => quote!(::godot_rs::abi::AbiValueType::STRING),
@@ -2999,12 +3533,13 @@ fn take_method_attribute(
     Ok(found)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ParsedRpcConfig {
     any_peer: bool,
     call_local: bool,
     transfer: ParsedRpcTransfer,
     channel: u32,
+    name: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -3015,7 +3550,7 @@ enum ParsedRpcTransfer {
 }
 
 impl ParsedRpcConfig {
-    fn tokens(self) -> TokenStream2 {
+    fn tokens(&self) -> TokenStream2 {
         let mode = if self.any_peer {
             quote!(::godot_rs::script::RpcMode::AnyPeer)
         } else {
@@ -3053,6 +3588,7 @@ fn parse_rpc_arguments(attribute: &Attribute) -> syn::Result<ParsedRpcConfig> {
     let mut call_local = false;
     let mut transfer = None::<&'static str>;
     let mut channel = None;
+    let mut name = None;
     for entry in entries {
         match entry {
             Meta::Path(path) if path.is_ident("authority") => authority = true,
@@ -3091,10 +3627,13 @@ fn parse_rpc_arguments(attribute: &Attribute) -> syn::Result<ParsedRpcConfig> {
                     Error::new_spanned(integer, "RPC channel must fit an unsigned 32-bit integer")
                 })?);
             }
+            Meta::NameValue(value) if value.path.is_ident("name") => {
+                set_reflected_name(&mut name, value, "RPC")?;
+            }
             unsupported => {
                 return Err(Error::new_spanned(
                     unsupported,
-                    "unsupported RPC option; use `authority`, `any_peer`, `call_local`, `call_remote`, a transfer mode, or `channel = integer`",
+                    "unsupported RPC option; use `name`, `authority`, `any_peer`, `call_local`, `call_remote`, a transfer mode, or `channel = integer`",
                 ));
             }
         }
@@ -3122,7 +3661,64 @@ fn parse_rpc_arguments(attribute: &Attribute) -> syn::Result<ParsedRpcConfig> {
         call_local,
         transfer,
         channel: channel.unwrap_or(0),
+        name,
     })
+}
+
+fn parse_func_arguments(attribute: &Attribute) -> syn::Result<Option<String>> {
+    if matches!(attribute.meta, Meta::Path(_)) {
+        return Ok(None);
+    }
+    let entries = parse_meta_arguments(attribute)?;
+    let mut name = None;
+    for entry in entries {
+        match entry {
+            Meta::NameValue(value) if value.path.is_ident("name") => {
+                set_reflected_name(&mut name, value, "function")?;
+            }
+            unsupported => {
+                return Err(Error::new_spanned(
+                    unsupported,
+                    "the only supported function option is `name = \"godot_name\"`",
+                ));
+            }
+        }
+    }
+    Ok(name)
+}
+
+fn set_reflected_name(
+    current: &mut Option<String>,
+    value: syn::MetaNameValue,
+    kind: &str,
+) -> syn::Result<()> {
+    if current.is_some() {
+        return Err(Error::new_spanned(
+            value,
+            format!("declare the {kind} name only once"),
+        ));
+    }
+    let Expr::Lit(expression) = &value.value else {
+        return Err(Error::new_spanned(
+            &value.value,
+            format!("{kind} name must be a string literal"),
+        ));
+    };
+    let syn::Lit::Str(name) = &expression.lit else {
+        return Err(Error::new_spanned(
+            &expression.lit,
+            format!("{kind} name must be a string literal"),
+        ));
+    };
+    let name = name.value();
+    if !is_godot_class_identifier(&name) {
+        return Err(Error::new_spanned(
+            expression,
+            format!("{kind} name must be a valid Godot identifier"),
+        ));
+    }
+    *current = Some(name);
+    Ok(())
 }
 
 fn set_rpc_transfer(
@@ -3489,5 +4085,11 @@ mod tests {
     fn method_ids_are_stable_and_distinct() {
         assert_eq!(fnv1a(b"_ready"), 723_962_071_783_188_397);
         assert_ne!(fnv1a(b"_ready"), fnv1a(b"_process"));
+    }
+
+    #[test]
+    fn custom_integer_names_use_godot_style_options() {
+        assert_eq!(screaming_snake_case("VeryFast"), "VERY_FAST");
+        assert_eq!(screaming_snake_case("Idle2D"), "IDLE2_D");
     }
 }

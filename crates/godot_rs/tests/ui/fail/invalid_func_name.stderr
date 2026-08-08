@@ -1,0 +1,5 @@
+error: function name must be a valid Godot identifier
+ --> tests/ui/fail/invalid_func_name.rs:8:19
+  |
+8 |     #[func(name = "not-a-godot-name")]
+  |                   ^^^^^^^^^^^^^^^^^^

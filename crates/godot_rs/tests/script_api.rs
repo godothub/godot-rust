@@ -4,6 +4,21 @@ use godot_rs::script::{
     ScriptFieldAccess, registered_methods,
 };
 
+#[godot_enum]
+enum MovementMode {
+    Idle = 0,
+    #[default]
+    Walk = 1,
+    Sprint = 2,
+}
+
+#[godot_flags]
+enum Ability {
+    Jump = 1 << 0,
+    Dash = 1 << 1,
+    Swim = 1 << 2,
+}
+
 #[script(base = CharacterBody2D, class_name = PlayerController, tool)]
 struct Player {
     #[export(
@@ -101,10 +116,35 @@ struct Player {
 
     #[signal(args(point, position, color))]
     motion_changed: Signal<(Vector2, Vector3, Color)>,
+
+    #[property(default = 100, get = get_health, set = set_health)]
+    health: i32,
+
+    #[property(default = 1, read_only)]
+    level: i32,
+
+    #[export(default = MovementMode::Walk)]
+    movement_mode: MovementMode,
+
+    #[export(default = Ability::Jump | Ability::Dash)]
+    abilities: Ability,
 }
 
 #[script]
 impl Player {
+    pub const MAX_HEALTH: i64 = 50 * 2;
+    pub const DISPLAY_NAME: &'static str = "Rust Player";
+    pub const ENABLED_BY_DEFAULT: bool = true;
+    const INTERNAL_BUFFER_SIZE: usize = 64;
+
+    fn get_health(&self) -> i32 {
+        self.health
+    }
+
+    fn set_health(&mut self, value: i32) {
+        self.health = value.clamp(0, Self::MAX_HEALTH as i32);
+    }
+
     fn _ready(&mut self) -> ScriptResult<()> {
         self.ready = true;
         Ok(())
@@ -120,7 +160,7 @@ impl Player {
 
     fn _exit_tree(&mut self) {}
 
-    #[func]
+    #[func(name = "apply_damage")]
     fn take_damage(&mut self, amount: i32) {
         self.transient_counter -= amount;
     }
@@ -156,7 +196,7 @@ impl Player {
         color * tint
     }
 
-    #[rpc(authority, call_local, reliable, channel = 0)]
+    #[rpc(name = "sync_player", authority, call_local, reliable, channel = 0)]
     fn sync_state(&mut self, value: i32) {
         self.transient_counter = value;
     }
@@ -235,7 +275,7 @@ fn struct_macro_generates_defaults_and_field_metadata() {
     assert_eq!(descriptor.base_script, None);
     assert_eq!(descriptor.base, "CharacterBody2D");
     assert!(descriptor.tool);
-    assert_eq!(descriptor.fields.len(), 28);
+    assert_eq!(descriptor.fields.len(), 32);
     assert_eq!(player.speed, 240.0);
     assert!(!player.sprite.is_resolved());
     assert!(player.camera.is_none());
@@ -609,6 +649,47 @@ fn struct_macro_generates_defaults_and_field_metadata() {
         godot_rs::abi::AbiValueType::COLOR
     );
 
+    let health = descriptor
+        .fields
+        .iter()
+        .find(|field| field.name == "health")
+        .expect("Godot property field");
+    assert_eq!(health.kind, FieldKind::Property);
+    let health_property = health.property.expect("property schema");
+    assert_eq!(
+        health_property.usage,
+        godot_rs::abi::ABI_PROPERTY_USAGE_SCRIPT_STORAGE
+    );
+    assert_eq!(player.health, 100);
+    let level = descriptor
+        .fields
+        .iter()
+        .find(|field| field.name == "level")
+        .and_then(|field| field.property)
+        .expect("read-only property schema");
+    assert_ne!(level.usage & godot_rs::abi::ABI_PROPERTY_USAGE_READ_ONLY, 0);
+    assert_eq!(player.movement_mode, MovementMode::Walk);
+    assert!(player.abilities.contains(Ability::Jump));
+    assert!(player.abilities.contains(Ability::Dash));
+    assert!(!player.abilities.contains(Ability::Swim));
+    let movement = descriptor
+        .fields
+        .iter()
+        .find(|field| field.name == "movement_mode")
+        .and_then(|field| field.property)
+        .expect("custom enum property");
+    assert_eq!(movement.hint, godot_rs::abi::ABI_PROPERTY_HINT_ENUM);
+    let movement_options = movement.integer_options.expect("enum options");
+    assert_eq!(abi_text(movement_options[1].name), "WALK");
+    let abilities = descriptor
+        .fields
+        .iter()
+        .find(|field| field.name == "abilities")
+        .and_then(|field| field.property)
+        .expect("custom flag property");
+    assert_eq!(abilities.hint, godot_rs::abi::ABI_PROPERTY_HINT_FLAGS);
+    assert_eq!(Ability::from_bits_retain(1 << 12).bits(), 1 << 12);
+
     player.health_changed.emit((100, 90));
     player.message_sent.emit((String::from("构建完成"),));
     player.motion_changed.emit((
@@ -664,8 +745,14 @@ fn script_base_proxy_uses_generated_godot_methods() {
 #[test]
 fn impl_macro_collects_only_godot_facing_methods() {
     let methods = registered_methods::<Player>();
-    assert_eq!(methods.len(), 16);
+    assert_eq!(methods.len(), 19);
     assert!(!methods.iter().any(|method| method.name == "internal_only"));
+    assert!(
+        !methods
+            .iter()
+            .any(|method| method.name == "INTERNAL_BUFFER_SIZE")
+    );
+    assert_eq!(Player::INTERNAL_BUFFER_SIZE, 64);
     assert!(
         methods
             .windows(2)
@@ -682,7 +769,7 @@ fn impl_macro_collects_only_godot_facing_methods() {
 
     let rpc = methods
         .iter()
-        .find(|method| method.name == "sync_state")
+        .find(|method| method.name == "sync_player")
         .expect("RPC descriptor");
     assert_eq!(rpc.kind, MethodKind::Rpc);
     assert!(rpc.options.contains("authority"));
@@ -690,7 +777,7 @@ fn impl_macro_collects_only_godot_facing_methods() {
 
     let take_damage = methods
         .iter()
-        .find(|method| method.name == "take_damage")
+        .find(|method| method.name == "apply_damage")
         .expect("function descriptor");
     assert_eq!(
         take_damage.argument_types,
@@ -825,6 +912,60 @@ fn impl_macro_collects_only_godot_facing_methods() {
         godot_rs::script::RpcTransferMode::Reliable
     );
     assert_eq!(rpc.channel, 0);
+}
+
+#[test]
+fn public_associated_constants_use_compiled_values() {
+    let methods = registered_methods::<Player>();
+    let health = methods
+        .iter()
+        .find(|method| method.name == "MAX_HEALTH")
+        .expect("compiled integer constant");
+    assert_eq!(health.kind, MethodKind::Constant);
+    assert_eq!(health.receiver, godot_rs::script::ReceiverKind::Static);
+    assert_eq!(health.return_type, godot_rs::abi::AbiValueType::I64);
+
+    let mut output = godot_rs::abi::AbiValueV1::NIL;
+    // SAFETY: Static constants deliberately use null state and arguments.
+    let result = unsafe {
+        godot_rs::script::abi_call_method::<Player>(
+            core::ptr::null_mut(),
+            health.id,
+            core::ptr::null(),
+            0,
+            &mut output,
+        )
+    };
+    assert_eq!(result.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(output, godot_rs::abi::AbiValueV1::from_i64(100));
+
+    let title = methods
+        .iter()
+        .find(|method| method.name == "DISPLAY_NAME")
+        .expect("compiled string constant");
+    // SAFETY: Static constants deliberately use null state and arguments.
+    let result = unsafe {
+        godot_rs::script::abi_call_method::<Player>(
+            core::ptr::null_mut(),
+            title.id,
+            core::ptr::null(),
+            0,
+            &mut output,
+        )
+    };
+    assert_eq!(result.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(output.type_, godot_rs::abi::AbiValueType::STRING);
+    // SAFETY: The compiled module owns this UTF-8 buffer until the release below.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            output.payload[0] as usize as *const u8,
+            output.payload[1] as usize,
+        )
+    };
+    assert_eq!(core::str::from_utf8(bytes), Ok("Rust Player"));
+    // SAFETY: This is the sole release of the returned constant value.
+    let dropped = unsafe { godot_rs::module::drop_owned_value(output) };
+    assert_eq!(dropped, godot_rs::abi::AbiStatus::Ok);
 }
 
 #[test]
@@ -986,6 +1127,22 @@ fn exported_fields_dispatch_by_validated_index() {
     };
     assert_eq!(set.status, godot_rs::abi::AbiStatus::Ok);
     assert_eq!(player.status_text, "编译成功");
+
+    // SAFETY: Index twenty-eight is the generated custom-accessor property.
+    let set = unsafe { player.__godot_rs_set_field(28, godot_rs::abi::AbiValueV1::from_i64(250)) };
+    assert_eq!(set.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(player.health, 100);
+    // SAFETY: The property getter writes one validated integer value.
+    let get = unsafe { player.__godot_rs_get_field(28, &mut output) };
+    assert_eq!(get.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(output, godot_rs::abi::AbiValueV1::from_i64(100));
+
+    // SAFETY: Index twenty-nine is read-only and rejects assignment before
+    // touching its Rust field.
+    let rejected =
+        unsafe { player.__godot_rs_set_field(29, godot_rs::abi::AbiValueV1::from_i64(2)) };
+    assert_eq!(rejected.status, godot_rs::abi::AbiStatus::Unsupported);
+    assert_eq!(player.level, 1);
 }
 
 #[test]
@@ -1178,8 +1335,8 @@ fn generated_module_exports_c_abi_descriptors_and_state() {
         Some(95)
     );
     assert_eq!(abi_text(script.base), "CharacterBody2D");
-    assert_eq!(script.field_count, 28);
-    assert_eq!(script.method_count, 16);
+    assert_eq!(script.field_count, 32);
+    assert_eq!(script.method_count, 19);
 
     let mut field = MaybeUninit::uninit();
     // SAFETY: Index zero and output slot are valid for this descriptor.
@@ -1362,7 +1519,7 @@ fn generated_module_exports_c_abi_descriptors_and_state() {
     let ready = unsafe { script.lifecycle.ready.expect("ready slot")(state) };
     assert_eq!(ready.status, AbiStatus::Ok);
 
-    let take_damage = find_abi_method(&script, "take_damage");
+    let take_damage = find_abi_method(&script, "apply_damage");
     assert_eq!(
         take_damage.struct_size,
         godot_rs::abi::AbiMethodDescriptorV1::MINIMUM_SIZE
@@ -1459,7 +1616,7 @@ fn generated_module_exports_c_abi_descriptors_and_state() {
     assert_eq!(called.status, AbiStatus::Ok);
     assert_eq!(output.color(), Some([0.4, 0.125, 0.25, 0.75]));
 
-    let sync_state = find_abi_method(&script, "sync_state");
+    let sync_state = find_abi_method(&script, "sync_player");
     assert_eq!(sync_state.rpc.present, 1);
     assert_eq!(sync_state.rpc.call_local, 1);
     assert_eq!(sync_state.rpc.mode, godot_rs::abi::AbiRpcMode::AUTHORITY);

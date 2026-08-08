@@ -45,6 +45,8 @@ const MAX_UTF8_VALUE_BYTES: usize = 64 * 1024 * 1024;
 pub enum FieldKind {
     Plain,
     Export,
+    /// A Godot-visible property hidden from the Inspector.
+    Property,
     Node,
     Signal,
 }
@@ -411,6 +413,8 @@ pub enum MethodKind {
     Lifecycle(LifecycleSlot),
     Func,
     Rpc,
+    /// A public Rust associated constant exposed to Godot.
+    Constant,
 }
 
 /// Receiver kind used for re-entry and borrow enforcement.
@@ -660,6 +664,15 @@ fn method_registry_is_valid<T: ScriptMethods>() -> bool {
         }
         if (method.vararg || !method.default_arguments.is_empty())
             && matches!(method.kind, MethodKind::Lifecycle(_))
+        {
+            return false;
+        }
+        if method.kind == MethodKind::Constant
+            && (method.receiver != ReceiverKind::Static
+                || method.argument_count != 0
+                || method.vararg
+                || !method.default_arguments.is_empty()
+                || method.rpc.is_some())
         {
             return false;
         }
@@ -1978,13 +1991,20 @@ pub unsafe extern "C" fn abi_get_field<T: ScriptClass>(
         kind: match field.kind {
             FieldKind::Plain => AbiFieldKind::Plain,
             FieldKind::Export => AbiFieldKind::Export,
+            FieldKind::Property => AbiFieldKind::Property,
             FieldKind::Node => AbiFieldKind::Node,
             FieldKind::Signal => AbiFieldKind::Signal,
         },
         options: AbiByteSlice::from_static(abi_options),
         default_value: AbiByteSlice::from_static(default_value),
         has_default: u8::from(field.default.is_some()),
-        reserved_flags: [0; 3],
+        reserved_flags: [
+            u8::from(field.property.is_some_and(|property| {
+                property.usage & godot_api::abi::ABI_PROPERTY_USAGE_READ_ONLY != 0
+            })),
+            0,
+            0,
+        ],
         reload: match field.reload {
             ReloadPolicy::Default => AbiReloadPolicy::Default,
             ReloadPolicy::Persist => AbiReloadPolicy::Persist,
@@ -2025,6 +2045,7 @@ pub unsafe extern "C" fn abi_get_method<T: ScriptMethods>(
         ),
         MethodKind::Func => (AbiMethodKind::Func, AbiLifecycleSlot::None),
         MethodKind::Rpc => (AbiMethodKind::Rpc, AbiLifecycleSlot::None),
+        MethodKind::Constant => (AbiMethodKind::Constant, AbiLifecycleSlot::None),
     };
     let descriptor = AbiMethodDescriptorV1 {
         struct_size: AbiMethodDescriptorV1::MINIMUM_SIZE,
@@ -2117,10 +2138,10 @@ pub unsafe extern "C" fn abi_call_method<T: ScriptMethods>(
     argument_count: u32,
     output: *mut AbiValueV1,
 ) -> AbiCallResult {
-    if state.is_null() || output.is_null() {
+    if output.is_null() {
         return AbiCallResult::failure(
             AbiStatus::InvalidArgument,
-            "reflected method received a null state or output pointer",
+            "reflected method received a null output pointer",
         );
     }
     catch_abi_panic(|| {
@@ -2132,6 +2153,17 @@ pub unsafe extern "C" fn abi_call_method<T: ScriptMethods>(
                 "reflected method ID is not present in this script",
             );
         };
+        let method = block
+            .methods
+            .iter()
+            .find(|method| method.id == method_id)
+            .expect("the selected method block contains the requested ID");
+        if state.is_null() && method.receiver != ReceiverKind::Static {
+            return AbiCallResult::failure(
+                AbiStatus::InvalidArgument,
+                "instance method received a null script state",
+            );
+        }
         (block.invoke)(state, method_id, arguments, argument_count, output)
     })
 }

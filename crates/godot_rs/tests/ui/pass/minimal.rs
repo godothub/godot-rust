@@ -1,5 +1,18 @@
 use godot_rs::prelude::*;
 
+#[godot_enum]
+enum UiMode {
+    Visible = 0,
+    #[cfg(any())]
+    Hidden = 1,
+}
+
+#[cfg(any())]
+#[godot_flags]
+enum DisabledFlags {
+    Example = 1,
+}
+
 #[script(base = Node2D)]
 struct Player;
 

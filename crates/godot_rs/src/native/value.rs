@@ -233,6 +233,38 @@ pub(crate) trait GodotValueAbi: GodotValue {
     unsafe fn write_ptr(self, interface: &Interface, destination: sys::GDExtensionTypePtr);
 }
 
+impl<T: crate::engine::CustomGodotIntegerValue> private::Sealed for T {}
+
+impl<T: crate::engine::CustomGodotIntegerValue> GodotValue for T {
+    const __VARIANT_TYPE: Option<sys::GDExtensionVariantType> =
+        Some(sys::GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_INT);
+}
+
+impl<T: crate::engine::CustomGodotIntegerValue> GodotValueAbi for T {
+    const VARIANT_TYPE: Option<sys::GDExtensionVariantType> =
+        Some(sys::GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_INT);
+
+    unsafe fn from_variant(interface: &Interface, value: sys::GDExtensionConstVariantPtr) -> Self {
+        // SAFETY: ClassDB validated the dynamic argument as a Godot integer.
+        unsafe { integer_from_variant(interface, value) }
+    }
+
+    unsafe fn write_variant(self, interface: &Interface, destination: sys::GDExtensionVariantPtr) {
+        // SAFETY: ClassDB allocated an integer Variant return slot.
+        unsafe { integer_write_variant(self, interface, destination) }
+    }
+
+    unsafe fn from_ptr(_interface: &Interface, value: sys::GDExtensionConstTypePtr) -> Self {
+        // SAFETY: Ptrcall metadata guarantees one integer input slot.
+        unsafe { integer_from_ptr(value) }
+    }
+
+    unsafe fn write_ptr(self, _interface: &Interface, destination: sys::GDExtensionTypePtr) {
+        // SAFETY: Ptrcall metadata guarantees one integer output slot.
+        unsafe { integer_write_ptr(self, destination) }
+    }
+}
+
 fn dynamic_value_from_variant<T>(
     interface: &Interface,
     value: sys::GDExtensionConstVariantPtr,

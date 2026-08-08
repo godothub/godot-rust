@@ -381,6 +381,10 @@ pub trait GodotIntegerValue: Copy {
     fn __from_raw(raw: u64) -> Self;
 }
 
+/// Marker implemented by the SDK's custom Godot enum and flag macros.
+#[doc(hidden)]
+pub trait CustomGodotIntegerValue: GodotIntegerValue + 'static {}
+
 impl<T: GodotIntegerValue> EngineArgument for T {
     fn __into_engine_argument(self) -> AbiValueV1 {
         if T::SIGNED {

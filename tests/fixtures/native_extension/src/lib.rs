@@ -3,6 +3,7 @@ use godot_rs::engine::{
     global::{PropertyHint, PropertyUsageFlags},
     native_virtual, utility,
 };
+use godot_rs::godot_enum;
 use godot_rs::native::{
     Base, ClassRegistrar, ExtensionLibrary, GODOT_API, InitializationContext, InitializationLevel,
     NativeClass, NativeError, NativeProperty, NativePropertyOptions, NativePropertyValidation,
@@ -15,6 +16,12 @@ use godot_rs::prelude::{
 };
 
 const NATIVE_GENERATION: &str = "before";
+
+#[godot_enum]
+enum NativeMovementMode {
+    Idle = 0,
+    Walk = 1,
+}
 
 struct NativeSmoke;
 
@@ -312,6 +319,10 @@ impl GodotRsNativeSmoke {
     ) -> godot_rs::engine::global::Error {
         value
     }
+
+    fn custom_enum_round_trip(&self, value: NativeMovementMode) -> NativeMovementMode {
+        value
+    }
 }
 
 impl NativeClass for GodotRsNativeSmoke {
@@ -457,6 +468,11 @@ impl NativeClass for GodotRsNativeSmoke {
                 "native_enum_round_trip",
                 ["value"],
                 Self::native_enum_round_trip,
+            )?
+            .method_with_arguments(
+                "custom_enum_round_trip",
+                ["value"],
+                Self::custom_enum_round_trip,
             )?
             .rpc_method_with_arguments(
                 "network_add",

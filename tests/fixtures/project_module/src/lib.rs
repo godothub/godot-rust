@@ -1,5 +1,8 @@
 use godot_rs::prelude::*;
 
+mod code_api;
+use code_api::{CodeApi, Health, Tuning, Watcher};
+
 struct EngineSmokeState {
     disabled: bool,
     enabled: bool,
@@ -421,7 +424,8 @@ impl HostSmoke {
     #[func]
     fn emit_extended_math(&self, region: Rect2, orientation: Quaternion, vector: Vector4) {
         self.extended_math_changed
-            .emit((region, orientation, vector));
+            .emit((region, orientation, vector))
+            .expect("fixture signal emission");
     }
 
     #[func]
@@ -447,7 +451,9 @@ impl HostSmoke {
 
     #[func]
     fn emit_transform(&self, transform: Transform3D) {
-        self.transform_changed.emit((transform,));
+        self.transform_changed
+            .emit((transform,))
+            .expect("fixture signal emission");
     }
 
     #[func]
@@ -731,7 +737,9 @@ impl HostSmoke {
 
     #[func]
     fn emit_packed_values(&self, labels: PackedStringArray, points: PackedVector3Array) {
-        self.packed_values_changed.emit((labels, points));
+        self.packed_values_changed
+            .emit((labels, points))
+            .expect("fixture signal emission");
     }
 
     #[rpc(authority, reliable)]
@@ -743,7 +751,9 @@ impl HostSmoke {
     fn update_counter(&mut self, value: i64) {
         let old_value = self.counter;
         self.counter = value;
-        self.counter_changed.emit((old_value, value));
+        self.counter_changed
+            .emit((old_value, value))
+            .expect("fixture signal emission");
     }
 
     #[func]
@@ -754,7 +764,9 @@ impl HostSmoke {
     #[func]
     fn update_message(&mut self, value: String) {
         self.message = value.clone();
-        self.message_changed.emit((value,));
+        self.message_changed
+            .emit((value,))
+            .expect("fixture signal emission");
     }
 
     #[func]
@@ -765,7 +777,9 @@ impl HostSmoke {
     #[func]
     fn update_display_name(&mut self, value: StringName) {
         self.display_name = value.clone();
-        self.name_changed.emit((value,));
+        self.name_changed
+            .emit((value,))
+            .expect("fixture signal emission");
     }
 
     #[func]
@@ -778,19 +792,25 @@ impl HostSmoke {
         self.velocity = velocity;
         self.target_position = target_position;
         self.tint = tint;
-        self.motion_changed.emit((velocity, target_position, tint));
+        self.motion_changed
+            .emit((velocity, target_position, tint))
+            .expect("fixture signal emission");
     }
 
     #[func]
     fn update_integer_motion(&mut self, grid_cell: Vector2i, voxel_cell: Vector3i) {
         self.grid_cell = grid_cell;
         self.voxel_cell = voxel_cell;
-        self.integer_motion_changed.emit((grid_cell, voxel_cell));
+        self.integer_motion_changed
+            .emit((grid_cell, voxel_cell))
+            .expect("fixture signal emission");
     }
 
     #[func]
     fn emit_rid(&self, resource: Rid) {
-        self.rid_changed.emit((resource,));
+        self.rid_changed
+            .emit((resource,))
+            .expect("fixture signal emission");
     }
 }
 
@@ -826,4 +846,8 @@ impl Drop for HostSmoke {
 
 godot_rs::script_module! {
     HostSmoke => ("res://sample.rs", "uid://b1"),
+    Health => ("res://code_api/health.rs", "uid://b2"),
+    Watcher => ("res://code_api/watcher.rs", "uid://b3"),
+    Tuning => ("res://code_api/tuning.rs", "uid://b4"),
+    CodeApi => ("res://code_api/coordinator.rs", "uid://b5"),
 }

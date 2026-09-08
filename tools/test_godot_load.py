@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from stage_host import CANONICAL_ADDON, build_host, library_name
+from stage_host import CANONICAL_ADDON, build_host, cargo_target_directory, library_name
 from stage_macos_host import stage_macos_host
 from stage_project_module import build_project_module, validate_project_module
 from plugin_platform import platform_directory
@@ -96,6 +96,15 @@ REQUIRED_MODULE_MARKERS = (
     TEMPLATE_MARKER,
     DETACH_FINISHED_MARKER,
     DETACH_DROPPED_MARKER,
+    "GODOT_RUST_CODE_API_NODES",
+    "GODOT_RUST_CODE_API_RESOURCE",
+    "GODOT_RUST_CODE_API_RESOURCE_SIGNAL",
+    "GODOT_RUST_CODE_API_CALLABLE",
+    "GODOT_RUST_CODE_API_ERROR_CONTEXT",
+    "GODOT_RUST_CODE_API_SIGNALS",
+    "GODOT_RUST_CODE_API_DEFAULTS",
+    "GODOT_RUST_CODE_API_REPLACED_SCRIPT",
+    "GODOT_RUST_CODE_API_OK",
 )
 
 
@@ -214,10 +223,10 @@ def run_load_test(
         from stage_project_module import library_name as project_library_name
 
         host_library = (
-            ROOT / "target" / "debug" / library_name(sys.platform)
+            cargo_target_directory() / "debug" / library_name(sys.platform)
         )
         project_module = (
-            ROOT / "target" / "debug" / project_library_name(sys.platform)
+            cargo_target_directory() / "debug" / project_library_name(sys.platform)
         )
         if not host_library.is_file():
             raise FileNotFoundError(
@@ -263,28 +272,32 @@ def run_load_test(
         if completed.returncode != 0:
             return completed.returncode, output
 
-        smoke_command = [
-            godot,
-            "--headless",
-            "--path",
-            str(project),
-            "--script",
-            "res://host_smoke.gd",
-        ]
-        if valgrind:
-            smoke_command = valgrind_command(smoke_command)
-        smoke = subprocess.run(
-            smoke_command,
-            cwd=ROOT,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=180 if valgrind else 60,
-        )
-        smoke_output = smoke.stdout + smoke.stderr
-        if smoke.returncode != 0:
-            return smoke.returncode, output + smoke_output
+        smoke_output = ""
+        for script in ("host_smoke.gd", "code_api_smoke.gd"):
+            smoke_command = [
+                godot,
+                "--headless",
+                "--path",
+                str(project),
+                "--script",
+                f"res://{script}",
+            ]
+            if script == "code_api_smoke.gd":
+                smoke_command.extend(["--quit-after", "600"])
+            if valgrind:
+                smoke_command = valgrind_command(smoke_command)
+            smoke = subprocess.run(
+                smoke_command,
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180 if valgrind else 60,
+            )
+            smoke_output += smoke.stdout + smoke.stderr
+            if smoke.returncode != 0:
+                return smoke.returncode, output + smoke_output
 
         fault_command = [
             godot,

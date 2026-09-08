@@ -102,8 +102,15 @@ func _ready() -> void:
 	if not counter.generated_dynamic_api_round_trip():
 		_fail("generated Variant, container, keyed, or vararg API failed in Native mode")
 		return
+	var typed_signal_values: Array = []
+	counter.connect(&"offset_described", func(label: String, offset: Vector2):
+		typed_signal_values.append([label, offset])
+	)
 	if not counter.generated_callable_signal_round_trip():
 		_fail("generated Callable or Signal ownership failed in Native mode")
+		return
+	if typed_signal_values != [["typed signal", Vector2(3, 7)]]:
+		_fail("typed Native signal emission lost String or Vector2 arguments")
 		return
 	if not counter.native_owned_values(
 		[1, "two"],

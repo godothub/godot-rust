@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import shutil
 import subprocess
@@ -31,6 +32,12 @@ def library_name(platform: str) -> str:
     return "libgodot_host.so"
 
 
+def cargo_target_directory() -> Path:
+    """Resolve Cargo's output directory using the same cwd as fixture builds."""
+    configured = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    return configured if configured.is_absolute() else ROOT / configured
+
+
 def build_host(release: bool) -> Path:
     """Build and return the exact Host library produced by Cargo."""
     command = ["cargo", "build", "--locked", "-p", "godot_host"]
@@ -41,7 +48,7 @@ def build_host(release: bool) -> Path:
 
     subprocess.run(command, cwd=ROOT, check=True)
     filename = library_name(sys.platform)
-    source = ROOT / "target" / profile / filename
+    source = cargo_target_directory() / profile / filename
     if not source.is_file():
         raise FileNotFoundError(f"Cargo did not produce expected Host: {source}")
     return source

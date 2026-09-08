@@ -174,7 +174,18 @@ impl GodotRsNativeSmoke {
                     builtin_ids.as_ref(),
                 );
             }
-            Ok::<_, godot_rs::error::EngineError>(valid)
+            let weak = graph.object_ref();
+            let method = Callable::from_godot_ref_method(&graph, "get_point_count");
+            let retained_method = builtin::callable::construct_1(&method)?;
+            drop(method);
+            drop(graph);
+            let called = builtin::callable::call(&retained_method, &[])?;
+            let retained =
+                weak.get_point_count()? == 1 && matches!(called.kind(), VariantKind::Int(1));
+            drop(retained_method);
+            Ok::<_, godot_rs::error::EngineError>(
+                valid && retained && weak.get_point_count().is_err(),
+            )
         };
         match result() {
             Ok(value) => value,
@@ -257,6 +268,11 @@ impl GodotRsNativeSmoke {
             let bound_result = builtin::callable::call(&bound, &[])?;
 
             let signal = builtin::signal::construct_2(object, "offset_described")?;
+            let typed = Signal::<fn(label: String, offset: Vector2)>::__from_object(
+                object,
+                "offset_described",
+            );
+            typed.emit("typed signal".to_owned(), Vector2::new(3.0, 7.0))?;
             let signal_name = builtin::signal::get_name(&signal)?;
             let signal_object_id = builtin::signal::get_object_id(&signal)?;
 

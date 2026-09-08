@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from stage_host import cargo_target_directory
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "godot_host_smoke_module"
@@ -34,7 +36,7 @@ def build_project_module(release: bool) -> Path:
         profile = "release"
     subprocess.run(command, cwd=ROOT, check=True)
 
-    module = ROOT / "target" / profile / library_name(sys.platform)
+    module = cargo_target_directory() / profile / library_name(sys.platform)
     if not module.is_file():
         raise FileNotFoundError(
             f"Cargo did not produce expected project module: {module}"

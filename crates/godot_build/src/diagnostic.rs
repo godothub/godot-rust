@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticLevel {
@@ -187,11 +189,21 @@ fn parse_replacement(
 ) -> Option<DiagnosticReplacement> {
     let file_name = span.get("file_name")?.as_str()?;
     let path = resolve_source_path(project_root, file_name)?;
+    if std::fs::metadata(&path).ok()?.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
     let source = std::fs::read(&path).ok()?;
+    let source_text = std::str::from_utf8(&source).ok()?;
     let byte_start = span.get("byte_start")?.as_u64()?;
     let byte_end = span.get("byte_end")?.as_u64()?;
     let range = usize::try_from(byte_start).ok()?..usize::try_from(byte_end).ok()?;
     if range.start > range.end || range.end > source.len() {
+        return None;
+    }
+    // Cargo may finish after the user saves another edit. Its diagnostic still
+    // refers to rustc's source text, so a hash of the current file alone is not
+    // sufficient to authorize the old byte offsets.
+    if !span_matches_source(span, source_text, range) {
         return None;
     }
     Some(DiagnosticReplacement {
@@ -201,6 +213,59 @@ fn parse_replacement(
         replacement: span.get("suggested_replacement")?.as_str()?.to_owned(),
         expected_sha256: format!("{:x}", Sha256::digest(&source)),
     })
+}
+
+fn span_matches_source(
+    span: &serde_json::Value,
+    source: &str,
+    range: std::ops::Range<usize>,
+) -> bool {
+    let matches = || -> Option<bool> {
+        let line_start = usize::try_from(span.get("line_start")?.as_u64()?).ok()?;
+        let line_end = usize::try_from(span.get("line_end")?.as_u64()?).ok()?;
+        let column_start = usize::try_from(span.get("column_start")?.as_u64()?).ok()?;
+        let column_end = usize::try_from(span.get("column_end")?.as_u64()?).ok()?;
+        let expected_lines = span.get("text")?.as_array()?;
+        let line_count = line_end.checked_sub(line_start)?.checked_add(1)?;
+        if line_start == 0 || line_count != expected_lines.len() {
+            return Some(false);
+        }
+        let mut byte_offset = 0;
+        let mut checked_lines = 0;
+        for (index, raw_line) in source.split('\n').enumerate() {
+            let line_number = index + 1;
+            if line_number > line_end {
+                break;
+            }
+            if line_number >= line_start {
+                let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+                if expected_lines.get(checked_lines)?.get("text")?.as_str()? != line {
+                    return Some(false);
+                }
+                if line_number == line_start
+                    && byte_offset + column_byte_offset(line, column_start)? != range.start
+                {
+                    return Some(false);
+                }
+                if line_number == line_end
+                    && byte_offset + column_byte_offset(line, column_end)? != range.end
+                {
+                    return Some(false);
+                }
+                checked_lines += 1;
+            }
+            byte_offset += raw_line.len() + 1;
+        }
+        Some(checked_lines == line_count)
+    };
+    matches() == Some(true)
+}
+
+fn column_byte_offset(line: &str, column: usize) -> Option<usize> {
+    line.char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(line.len()))
+        .nth(column.checked_sub(1)?)
 }
 
 fn resolve_source_path(project_root: &Path, file_name: &str) -> Option<PathBuf> {
@@ -287,6 +352,11 @@ mod tests {
                         "column_end": 10,
                         "is_primary": true,
                         "label": null,
+                        "text": [{
+                            "text": "let count = 1;",
+                            "highlight_start": 5,
+                            "highlight_end": 10
+                        }],
                         "suggested_replacement": "_count",
                         "suggestion_applicability": "MachineApplicable"
                     }]
@@ -301,6 +371,36 @@ mod tests {
             suggestion.replacements[0].expected_sha256,
             format!("{:x}", Sha256::digest(source))
         );
+        std::fs::write(directory.join("player.rs"), b"let total = 1;\n")
+            .expect("source changed while Cargo was running");
+        assert!(
+            parse_compiler_message(&value, &directory)
+                .expect("stale diagnostic remains navigable")
+                .suggestions
+                .is_empty()
+        );
+        std::fs::write(directory.join("player.rs"), b"\nlet count = 1;\n")
+            .expect("source moved while Cargo was running");
+        assert!(
+            parse_compiler_message(&value, &directory)
+                .expect("moved diagnostic remains navigable")
+                .suggestions
+                .is_empty()
+        );
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn source_span_validation_preserves_unicode_columns_and_crlf_byte_offsets() {
+        let span = serde_json::json!({
+            "line_start": 2,
+            "line_end": 2,
+            "column_start": 9,
+            "column_end": 11,
+            "text": [{ "text": "    let 名称 = 1;" }]
+        });
+        let source = "fn main() {\r\n    let 名称 = 1;\r\n}\r\n";
+        assert!(span_matches_source(&span, source, 21..27));
+        assert!(!span_matches_source(&span, source, 20..26));
     }
 }

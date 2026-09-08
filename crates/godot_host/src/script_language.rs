@@ -298,8 +298,12 @@ unsafe extern "C" fn make_template(
     if result.is_null() {
         return;
     }
-    // SAFETY: Object results use one pointer-sized slot.
-    unsafe { result.cast::<*mut c_void>().write(ptr::null_mut()) };
+    let Some(set_object) = language.interface.ref_set_object else {
+        return;
+    };
+    // SAFETY: `_make_template` returns Ref<Script>. Godot provides an
+    // initialized Ref slot, whose previous pointee must be released normally.
+    unsafe { set_object(result.cast(), ptr::null_mut()) };
     if arguments.is_null() {
         return;
     }
@@ -330,8 +334,10 @@ unsafe extern "C" fn make_template(
         }
         return;
     }
-    // SAFETY: Object results use one pointer-sized slot.
-    unsafe { result.cast::<*mut c_void>().write(script) };
+    // SAFETY: Assigning through Godot's Ref API initializes the first native
+    // reference of this freshly constructed Script and transfers its lifetime
+    // to the Ref result. A raw pointer write would skip RefCounted::init_ref.
+    unsafe { set_object(result.cast(), script) };
 }
 
 unsafe extern "C" fn get_recognized_extensions(

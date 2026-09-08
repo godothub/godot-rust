@@ -76,6 +76,10 @@ jobs:
           cargo run --locked -p godot_codegen -- \
             verify-bundles \
             godot-api.toml crates/godot_api/generated
+      - name: Verify packaged SDK crates
+        run: |
+          cargo fetch --locked
+          python3 tools/verify_sdk_packages.py --toolchain "${RUST_RELEASE_TOOLCHAIN}"
 
   build-linux:
     name: Build ${{ matrix.platform }}

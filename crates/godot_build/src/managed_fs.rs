@@ -57,22 +57,22 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8], purpose: &str) -> Resul
     let parent = path
         .parent()
         .ok_or_else(|| format!("{purpose} has no parent: {}", path.display()))?;
-    match std::fs::symlink_metadata(path) {
+    let permissions = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(format!(
                 "refusing to replace {purpose} that is not a regular file: {}",
                 path.display()
             ));
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => {
             return Err(format!(
                 "could not inspect {purpose} `{}`: {error}",
                 path.display()
             ));
         }
-    }
+    };
     let id = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".godothub-write-{}-{id}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
@@ -85,7 +85,14 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8], purpose: &str) -> Resul
                 temporary.display()
             )
         })?;
-    if let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) {
+    let written = (|| {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()
+    })();
+    if let Err(error) = written {
         let _ = std::fs::remove_file(&temporary);
         return Err(format!(
             "could not flush temporary {purpose} `{}`: {error}",
@@ -181,5 +188,30 @@ mod tests {
             header
         ));
         assert!(!has_managed_header(b" // @generated\n", header));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replacement_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = super::create_temporary_directory(
+            &std::env::temp_dir(),
+            "godot-rust-managed-permissions",
+        )
+        .expect("temporary directory");
+        let path = directory.join("private.rs");
+        std::fs::write(&path, b"original").expect("private file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("private permissions");
+        super::atomic_write(&path, b"updated", "private Rust source").expect("atomic replacement");
+        let contents = std::fs::read(&path).expect("updated contents");
+        let mode = std::fs::metadata(&path)
+            .expect("updated metadata")
+            .permissions()
+            .mode();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(contents, b"updated");
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_HEX_REQUEST_BYTES: usize = MAX_REQUEST_BYTES * 2;
 
 #[derive(Clone, Debug, Deserialize)]

@@ -34,6 +34,7 @@ struct PlannedFile {
     display_path: String,
     original: Vec<u8>,
     replacement: Vec<u8>,
+    undo: Vec<DiagnosticFixEdit>,
 }
 
 pub fn apply_diagnostic_fix(
@@ -72,6 +73,22 @@ pub fn apply_diagnostic_fix(
     for (path, edits) in grouped {
         files.push(plan_file(&project_root, path, edits)?);
     }
+    let undo = DiagnosticFixPlan {
+        edits: files
+            .iter()
+            .flat_map(|file| file.undo.iter().cloned())
+            .collect(),
+    };
+    let undo_request = serde_json::to_vec(&serde_json::json!({
+        "command": "apply_suggestion",
+        "id": u64::MAX,
+        "root": &project_root,
+        "plan": &undo,
+    }))
+    .map_err(|error| format!("could not prepare Rust quick-fix undo: {error}"))?;
+    if undo_request.len() > crate::protocol::MAX_REQUEST_BYTES {
+        return Err("Rust quick fix would exceed the undo request size limit".to_owned());
+    }
     for (applied, file) in files.iter().enumerate() {
         if let Err(error) = atomic_write(&file.path, &file.replacement, "Rust quick-fix source") {
             let rollback = rollback_files(&files[..applied]);
@@ -85,19 +102,6 @@ pub fn apply_diagnostic_fix(
     }
 
     let changed_files = files.iter().map(|file| file.display_path.clone()).collect();
-    let undo = DiagnosticFixPlan {
-        edits: files
-            .iter()
-            .map(|file| DiagnosticFixEdit {
-                file_name: file.display_path.clone(),
-                byte_start: 0,
-                byte_end: file.replacement.len() as u64,
-                replacement: String::from_utf8(file.original.clone())
-                    .expect("validated Rust source remains UTF-8"),
-                expected_sha256: sha256(&file.replacement),
-            })
-            .collect(),
-    };
     Ok(DiagnosticFixReport {
         changed_files,
         undo,
@@ -159,7 +163,6 @@ fn plan_file(
         .ok_or_else(|| {
             format!("Rust quick-fix replacements exceed the {MAX_REPLACEMENT_BYTES} byte limit")
         })?;
-    let _ = replacement_bytes;
     edits.sort_by_key(|edit| (edit.byte_start, edit.byte_end));
     let mut previous: Option<(usize, usize)> = None;
     for edit in &edits {
@@ -187,22 +190,61 @@ fn plan_file(
         }
         previous = Some((start, end));
     }
-    let mut replacement = original.clone();
-    for edit in edits.iter().rev() {
-        let start = edit.byte_start as usize;
-        let end = edit.byte_end as usize;
-        replacement.splice(start..end, edit.replacement.bytes());
-    }
     let display_path = path
         .strip_prefix(project_root)
         .expect("resolved quick-fix source stays in project")
         .to_string_lossy()
         .replace('\\', "/");
+    let removed_bytes: u64 = edits
+        .iter()
+        .map(|edit| edit.byte_end - edit.byte_start)
+        .sum();
+    let result_bytes = original.len() as u64 - removed_bytes + replacement_bytes as u64;
+    if result_bytes > MAX_SOURCE_BYTES || removed_bytes > MAX_REPLACEMENT_BYTES as u64 {
+        return Err(
+            "Rust quick fix would exceed the source or undo replacement size limit".to_owned(),
+        );
+    }
+    let mut replacement = Vec::with_capacity(result_bytes as usize);
+    let mut undo: Vec<DiagnosticFixEdit> = Vec::with_capacity(edits.len());
+    let mut cursor = 0;
+    for edit in &edits {
+        let start = edit.byte_start as usize;
+        let end = edit.byte_end as usize;
+        replacement.extend_from_slice(&original[cursor..start]);
+        let undo_start = replacement.len() as u64;
+        replacement.extend_from_slice(edit.replacement.as_bytes());
+        let undo_end = replacement.len() as u64;
+        // Adjacent deletions become insertions at the same offset. Merge them
+        // so the inverse plan remains ordered and non-overlapping.
+        if let Some(previous) = undo
+            .last_mut()
+            .filter(|previous| previous.byte_end == undo_start)
+        {
+            previous.byte_end = undo_end;
+            previous.replacement.push_str(&source[start..end]);
+        } else {
+            undo.push(DiagnosticFixEdit {
+                file_name: display_path.clone(),
+                byte_start: undo_start,
+                byte_end: undo_end,
+                replacement: source[start..end].to_owned(),
+                expected_sha256: String::new(),
+            });
+        }
+        cursor = end;
+    }
+    replacement.extend_from_slice(&original[cursor..]);
+    let replacement_hash = sha256(&replacement);
+    for edit in &mut undo {
+        edit.expected_sha256.clone_from(&replacement_hash);
+    }
     Ok(PlannedFile {
         path,
         display_path,
         original,
         replacement,
+        undo,
     })
 }
 
@@ -310,6 +352,96 @@ mod tests {
         );
         apply_diagnostic_fix(&project.0, report.undo).expect("undo");
         assert_eq!(std::fs::read(&path).expect("restored source"), source);
+    }
+
+    #[test]
+    fn a_small_edit_in_a_large_source_has_a_small_undo_plan() {
+        let project = TempProject::new();
+        let path = project.0.join("player.rs");
+        let source = format!("// {}\nlet a = 1;\n", "x".repeat(MAX_REPLACEMENT_BYTES + 1));
+        std::fs::write(&path, &source).expect("large source");
+        let offset = source.find("a =").expect("variable") as u64;
+        let report = apply_diagnostic_fix(
+            &project.0,
+            DiagnosticFixPlan {
+                edits: vec![DiagnosticFixEdit {
+                    file_name: "player.rs".to_owned(),
+                    byte_start: offset,
+                    byte_end: offset + 1,
+                    replacement: "player_count".to_owned(),
+                    expected_sha256: sha256(source.as_bytes()),
+                }],
+            },
+        )
+        .expect("small edit in a large source");
+        assert!(serde_json::to_vec(&report.undo).expect("undo JSON").len() < 1024);
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("changed source")
+                .ends_with("let player_count = 1;\n")
+        );
+        apply_diagnostic_fix(&project.0, report.undo).expect("compact undo");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("restored source"),
+            source
+        );
+    }
+
+    #[test]
+    fn adjacent_deletions_and_length_changes_can_be_undone_and_redone() {
+        let project = TempProject::new();
+        let path = project.0.join("player.rs");
+        let source = b"abcdefgh\n";
+        std::fs::write(&path, source).expect("source");
+        let expected_sha256 = sha256(source);
+        let edits = [(1, 2, ""), (2, 3, ""), (4, 5, "XYZ"), (6, 6, "!")]
+            .into_iter()
+            .map(|(byte_start, byte_end, replacement)| DiagnosticFixEdit {
+                file_name: "player.rs".to_owned(),
+                byte_start,
+                byte_end,
+                replacement: replacement.to_owned(),
+                expected_sha256: expected_sha256.clone(),
+            })
+            .collect();
+        let report =
+            apply_diagnostic_fix(&project.0, DiagnosticFixPlan { edits }).expect("multiple edits");
+        let changed = std::fs::read(&path).expect("changed source");
+        assert_eq!(changed, b"adXYZf!gh\n");
+        assert_eq!(report.undo.edits.len(), 3);
+        let undone = apply_diagnostic_fix(&project.0, report.undo).expect("undo edits");
+        assert_eq!(std::fs::read(&path).expect("restored source"), source);
+        apply_diagnostic_fix(&project.0, undone.undo).expect("redo edits");
+        assert_eq!(std::fs::read(&path).expect("redone source"), changed);
+    }
+
+    #[test]
+    fn an_undo_that_exceeds_the_protocol_limit_is_rejected_before_writing() {
+        let project = TempProject::new();
+        let path = project.0.join("player.rs");
+        let source = "x".repeat(crate::protocol::MAX_REQUEST_BYTES);
+        std::fs::write(&path, &source).expect("large source");
+        let result = apply_diagnostic_fix(
+            &project.0,
+            DiagnosticFixPlan {
+                edits: vec![DiagnosticFixEdit {
+                    file_name: "player.rs".to_owned(),
+                    byte_start: 0,
+                    byte_end: source.len() as u64,
+                    replacement: String::new(),
+                    expected_sha256: sha256(source.as_bytes()),
+                }],
+            },
+        );
+        assert!(
+            result
+                .expect_err("oversized undo")
+                .contains("undo request size")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("unchanged source"),
+            source
+        );
     }
 
     #[test]

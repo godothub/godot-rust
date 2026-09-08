@@ -135,8 +135,9 @@ func _ready() -> void:
 		_support_button,
 		"Support Bundle",
 		(
-			"Create a redacted ZIP with tool versions and bounded diagnostics. "
-			+ "Project source, environment variables, and absolute paths are excluded."
+			"Create a ZIP with tool versions and diagnostic summaries. "
+			+ "Project and home directory paths are redacted; "
+			+ "diagnostic messages are included."
 		)
 	)
 	_support_button.shortcut = EditorUi.button_shortcut(KEY_S)
@@ -206,17 +207,19 @@ func set_running(action: String) -> void:
 	_cancel_button.disabled = false
 
 
-func set_status(message: String) -> void:
+func set_status(message: String, running := false) -> void:
 	_status_label.text = _bounded_text(message)
-	_set_actions_enabled(true)
+	_set_actions_enabled(not running)
+	_cancel_button.disabled = not running
 
 
-func set_failure(action: String, message: String) -> void:
+func set_failure(action: String, message: String, running := false) -> void:
 	_status_label.text = EditorUi.text("%s failed: %s") % [
 		EditorUi.text(action),
 		_bounded_text(message),
 	]
-	_set_actions_enabled(true)
+	_set_actions_enabled(not running)
+	_cancel_button.disabled = not running
 
 
 func set_undo_plan(plan: Dictionary) -> void:
@@ -272,9 +275,8 @@ func clear_diagnostics(update_status := true) -> void:
 	_selected_suggestion = {}
 	_support_diagnostics.clear()
 	_fix_button.disabled = true
-	if update_status:
+	if update_status and _actions_enabled:
 		_status_label.text = EditorUi.text("Rust diagnostics cleared.")
-		_set_actions_enabled(true)
 
 
 func _add_diagnostic(root: TreeItem, diagnostic: Dictionary) -> void:

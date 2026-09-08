@@ -924,13 +924,20 @@ func _run_request(action: String, request: Dictionary) -> bool:
 
 func _show_workflow_failure(action: String, message: String) -> void:
 	if is_instance_valid(_diagnostics_panel):
-		_diagnostics_panel.set_failure(action, message)
+		_diagnostics_panel.set_failure(
+			action,
+			message,
+			is_instance_valid(_build_process) and _build_process.is_running()
+		)
 		make_bottom_panel_item_visible(_diagnostics_panel)
 
 
 func _set_workflow_status(message: String) -> void:
 	if is_instance_valid(_diagnostics_panel):
-		_diagnostics_panel.set_status(message)
+		_diagnostics_panel.set_status(
+			message,
+			is_instance_valid(_build_process) and _build_process.is_running()
+		)
 
 
 func _open_diagnostic(file_name: String, line: int, column: int) -> void:
@@ -980,7 +987,7 @@ func _apply_diagnostic_suggestion(suggestion: Dictionary) -> void:
 			"plan": {"edits": replacements},
 		}
 	):
-		_diagnostics_panel.set_status(
+		_set_workflow_status(
 			"Rust quick fix is still available; finish the active operation first."
 		)
 
@@ -998,7 +1005,7 @@ func _undo_diagnostic_suggestion(plan: Dictionary) -> void:
 		}
 	):
 		_diagnostics_panel.set_undo_plan(plan)
-		_diagnostics_panel.set_status(
+		_set_workflow_status(
 			"Undo is still available; finish the active operation first."
 		)
 
@@ -1312,6 +1319,7 @@ func _request_finished(
 		return
 	var result: Dictionary = response.get("result", {})
 	print("godot-rust: %s completed." % action)
+	_set_workflow_status(EditorUi.text("%s succeeded") % EditorUi.text(action))
 	if action == "project probe":
 		_handle_probe(result)
 	elif action == "Cargo metadata":
@@ -1393,8 +1401,6 @@ func _request_finished(
 		call_deferred("_load_dependencies")
 	elif action == "Rust support bundle":
 		_write_support_bundle(result)
-	elif action == "Native reload commit":
-		pass
 	elif action == "Native reload rollback":
 		call_deferred("_restore_native_extension")
 	elif action == "Rust toolchain repair":

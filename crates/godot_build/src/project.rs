@@ -155,6 +155,14 @@ pub fn initialize_project(
     root: impl AsRef<Path>,
     cargo: Option<impl AsRef<OsStr>>,
 ) -> Result<InitOutcome, String> {
+    initialize_project_with(root, cargo, crate::process::run_command)
+}
+
+fn initialize_project_with(
+    root: impl AsRef<Path>,
+    cargo: Option<impl AsRef<OsStr>>,
+    run: impl FnOnce(&mut Command, &str) -> Result<std::process::Output, String>,
+) -> Result<InitOutcome, String> {
     let probe = probe_project(root)?;
     if probe.kind != ProjectKind::Uninitialized {
         return Err(format!(
@@ -168,12 +176,13 @@ pub fn initialize_project(
         .unwrap_or_else(|| OsString::from("cargo"));
     let src_existed = probe.root.join("src").exists();
     let arguments = init_arguments();
-    let output = crate::process::run_command(
+    let output = run(
         Command::new(&cargo)
             .args(&arguments)
             .current_dir(&probe.root),
         &format!("`{}` init", cargo.to_string_lossy()),
-    )?;
+    )
+    .inspect_err(|_| rollback_cargo_init(&probe.root, src_existed))?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
@@ -185,7 +194,8 @@ pub fn initialize_project(
             stderr.trim()
         ));
     }
-    let initialized = probe_project(&probe.root)?;
+    let initialized = probe_project(&probe.root)
+        .inspect_err(|_| rollback_cargo_init(&probe.root, src_existed))?;
     if !matches!(
         initialized.kind,
         ProjectKind::Package {
@@ -368,6 +378,64 @@ mod tests {
         assert!(project.0.join(".cargo/config.toml").is_file());
         assert_eq!(outcome.setup.package_name, DEFAULT_PACKAGE_NAME);
         assert!(!project.0.join(".git").exists());
+    }
+
+    #[test]
+    fn an_interrupted_initializer_removes_partial_files_and_preserves_existing_sources() {
+        for src_existed in [false, true] {
+            let project = TempProject::new();
+            if src_existed {
+                std::fs::create_dir(project.0.join("src")).expect("existing source directory");
+                std::fs::write(project.0.join("src/helper.rs"), b"user source")
+                    .expect("existing source");
+            }
+            let error = initialize_project_with(&project.0, None::<&str>, |command, _| {
+                let root = command.get_current_dir().expect("Cargo working directory");
+                std::fs::create_dir_all(root.join("src")).expect("Cargo source directory");
+                for path in ["Cargo.toml", "Cargo.lock", "src/lib.rs"] {
+                    std::fs::write(root.join(path), b"partial Cargo output").expect("partial file");
+                }
+                Err("cargo init was cancelled".to_owned())
+            })
+            .expect_err("interrupted initializer");
+            assert!(error.contains("cancelled"));
+            for path in ["Cargo.toml", "Cargo.lock", "src/lib.rs"] {
+                assert!(!project.0.join(path).exists(), "partial {path} remains");
+            }
+            assert_eq!(project.0.join("src").exists(), src_existed);
+            if src_existed {
+                assert_eq!(
+                    std::fs::read(project.0.join("src/helper.rs")).expect("preserved source"),
+                    b"user source"
+                );
+            }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn an_invalid_initialized_manifest_is_rolled_back() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+
+        let project = TempProject::new();
+        let error = initialize_project_with(&project.0, None::<&str>, |command, _| {
+            let root = command.get_current_dir().expect("Cargo working directory");
+            std::fs::create_dir(root.join("src")).expect("Cargo source directory");
+            std::fs::write(root.join("Cargo.toml"), b"[invalid TOML").expect("broken manifest");
+            std::fs::write(root.join("src/lib.rs"), b"// generated").expect("generated source");
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+        })
+        .expect_err("invalid manifest");
+        assert!(error.contains("Cargo.toml is invalid"), "{error}");
+        assert!(!project.0.join("Cargo.toml").exists());
+        assert!(!project.0.join("src").exists());
     }
 
     #[test]

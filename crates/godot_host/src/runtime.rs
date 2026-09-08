@@ -5,6 +5,7 @@ use godot_api::{
     GDExtensionConstTypePtr, GDExtensionMethodBindPtr, GDExtensionObjectPtr, GDExtensionTypePtr,
 };
 
+use crate::engine_call::value::NativeGodotRef;
 use crate::interface::EngineInterface;
 use crate::last_known_good;
 use crate::module_loader::{self, ModuleGeneration, ModuleLoadError};
@@ -373,7 +374,14 @@ fn call_format_loader_method(
     loader: GDExtensionObjectPtr,
     add: bool,
 ) {
-    let loader_argument = loader;
+    // Godot 4.7 accepts a borrowed RequiredParam<T> here, whereas older
+    // versions construct a Ref<T> from the ptrcall argument. Initialize and
+    // retain our own Ref so a newly constructed loader/saver's initial
+    // reference is consumed on every version, and removal cannot free the
+    // object until the call has returned.
+    let loader_reference = NativeGodotRef::from_object(interface, loader)
+        .expect("required Godot Ref interface was loaded");
+    let loader_argument = loader_reference.object();
     let at_front = u8::from(add);
     let arguments: [GDExtensionConstTypePtr; 2] = [
         (&loader_argument as *const GDExtensionObjectPtr).cast(),
@@ -382,8 +390,9 @@ fn call_format_loader_method(
     let Some(ptrcall) = interface.object_method_bind_ptrcall else {
         return;
     };
-    // SAFETY: Both methods accept the encoded Ref<ResourceFormatLoader>; add
-    // consumes the additional bool while remove reads only the first element.
+    // SAFETY: Ref<T> and RequiredParam<T> arguments both use a pointer to an
+    // object pointer. The local Ref owns the argument throughout the call;
+    // add reads the additional bool while remove reads only the first element.
     unsafe {
         ptrcall(method, singleton, arguments.as_ptr(), ptr::null_mut());
     }

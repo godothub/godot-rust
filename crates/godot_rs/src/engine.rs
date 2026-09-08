@@ -49,10 +49,12 @@ pub trait Inherits<Base: GodotClass>: GodotClass {}
 
 impl<T: GodotClass> Inherits<T> for T {}
 
-/// Generation-checked reference to a Godot object.
+/// Copyable, non-owning reference to a Godot object.
 ///
 /// Zero is reserved for an unresolved reference. The Host validates the
-/// object identity and module generation whenever the handle is used.
+/// object identity whenever the handle is used. Keeping this reference does
+/// not prevent the object from being freed; use [`GodotRef`] to retain an
+/// engine-owned `RefCounted` object.
 #[repr(transparent)]
 pub struct ObjectRef<T: GodotClass> {
     raw: u64,

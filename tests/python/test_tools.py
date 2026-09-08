@@ -682,6 +682,12 @@ class StageHostTests(unittest.TestCase):
         platform_workflow = (
             ROOT / ".github" / "workflows" / "platform-export-validation.yml"
         ).read_text(encoding="utf-8")
+        reusable_inputs = platform_workflow.split("  workflow_call:\n", 1)[1].split(
+            "  workflow_dispatch:\n", 1
+        )[0]
+        self.assertIn("      scope:\n", reusable_inputs)
+        self.assertIn("        default: all\n", reusable_inputs)
+        self.assertIn("        type: string\n", reusable_inputs)
         for value in (
             "runs-on: ubuntu-22.04",
             "tools/test_android_runtime.py",

@@ -2,6 +2,12 @@ name: Mobile and Web exports
 
 on:
   workflow_call:
+    inputs:
+      scope:
+        description: Platform group to validate
+        required: false
+        default: all
+        type: string
   workflow_dispatch:
     inputs:
       scope:

@@ -26,6 +26,11 @@ jobs:
     needs: validate
     uses: ./.github/workflows/godot-editor-integration.yml
 
+  api-compatibility-gates:
+    name: Godot API compatibility gates
+    needs: validate
+    uses: ./.github/workflows/godot-api-compatibility.yml
+
   platform-export-gates:
     name: Mobile and Web export gates
     needs: validate
@@ -404,6 +409,7 @@ jobs:
     name: Assemble release package
     needs:
       - functional-gates
+      - api-compatibility-gates
       - platform-export-gates
       - stability-gates
       - validate

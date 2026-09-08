@@ -338,6 +338,11 @@ class StageHostTests(unittest.TestCase):
         workflow = (
             ROOT / ".github" / "workflows" / "godot-api-compatibility.yml"
         ).read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", workflow)
+        self.assertIn(
+            "group: godot-api-compatibility-${{ github.workflow }}-${{ github.ref }}",
+            workflow,
+        )
         self.assertIn("$2 == archive", workflow)
         self.assertIn("sha512sum --check -", workflow)
         self.assertNotIn('sed "s# ${GODOT_ARCHIVE}$#', workflow)
@@ -347,6 +352,20 @@ class StageHostTests(unittest.TestCase):
             "crates/godot_api/metadata/godot-",
             workflow,
         )
+        release_workflow = (
+            ROOT / ".github" / "workflows" / "publish-release.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "api-compatibility-gates:\n"
+            "    name: Godot API compatibility gates\n"
+            "    needs: validate\n"
+            "    uses: ./.github/workflows/godot-api-compatibility.yml",
+            release_workflow,
+        )
+        assembly_dependencies = release_workflow.split(
+            "  assemble-release:\n", 1
+        )[1].split("    runs-on:", 1)[0]
+        self.assertIn("      - api-compatibility-gates\n", assembly_dependencies)
 
     def test_quality_workflow_gates_generated_api_performance(self):
         workflow = (

@@ -226,6 +226,7 @@ struct MethodBinding<'api> {
     id: u64,
     arguments: Vec<ArgumentBinding>,
     return_value: ValueBinding,
+    defaults: Vec<Option<String>>,
 }
 
 struct VirtualMethodBinding<'api> {
@@ -1455,6 +1456,9 @@ pub fn generate_engine_api(
             .or_default()
             .push(method);
         emit_contract(&mut output, method);
+        if method.class.name == "Object" && method.method.name == "emit_signal" {
+            writeln!(output, "pub(crate) fn __godot_rs_emit_signal_spec() -> &'static crate::abi::AbiGodotMethodSpecV1 {{ &__GODOT_RS_METHOD_{:016X} }}", method.id).unwrap();
+        }
     }
     for class in sorted_classes {
         let Some(methods) = by_class.get(class.name.as_str()) else {
@@ -1466,6 +1470,8 @@ pub fn generate_engine_api(
     emit_utility_api(&mut output, api, &public_api.entries);
     emit_builtin_api(&mut output, api, &public_api.entries);
     emit_singletons_and_constructors(&mut output, api, &public_api.entries);
+    emit_method_options(&mut output, &methods);
+    emit_singleton_methods(&mut output, api, &methods);
     emit_engine_signals(&mut output, api, &enums.values)?;
     Ok(output)
 }
@@ -1849,6 +1855,7 @@ fn collect_method_bindings<'api>(
     let mut methods = Vec::new();
     let mut method_ids = HashMap::new();
     let mut rust_method_names = HashMap::<&str, HashSet<String>>::new();
+    let mut options_type_names = HashSet::new();
     let mut report = GenerationReportBuilder::default();
     for class in &sorted_classes {
         let mut class_methods = class.methods.iter().collect::<Vec<_>>();
@@ -1875,6 +1882,25 @@ fn collect_method_bindings<'api>(
                             "Godot class `{}` has duplicate generated Rust method `{rust_name}`",
                             class.name
                         )));
+                    }
+                    if binding.defaults.iter().any(Option::is_some) {
+                        let options_name = options_method_name(&binding);
+                        if class
+                            .methods
+                            .iter()
+                            .any(|method| rust_module_identifier(&method.name) == options_name)
+                        {
+                            return Err(EngineApiGenerationError::new(format!(
+                                "Godot class `{}` reserves generated options method `{options_name}`",
+                                class.name
+                            )));
+                        }
+                        let options_type = options_type_name(&binding);
+                        if !options_type_names.insert(options_type.clone()) {
+                            return Err(EngineApiGenerationError::new(format!(
+                                "duplicate generated options type `{options_type}`"
+                            )));
+                        }
                     }
                     if method.is_static {
                         report.static_methods += 1;
@@ -2222,7 +2248,17 @@ fn emit_inheritance(
     classes: &[&ApiClass],
     class_map: &HashMap<&str, &ApiClass>,
 ) -> Result<(), EngineApiGenerationError> {
+    let mut script_inheritance = String::from(
+        "#[doc(hidden)]\n#[macro_export]\nmacro_rules! godot_rs_inherit_script_base {\n",
+    );
     for class in classes {
+        writeln!(script_inheritance, "    ($script:ty, {}) => {{", class.name).unwrap();
+        writeln!(
+            script_inheritance,
+            "        impl $crate::engine::Inherits<$crate::engine::{}> for $script {{}}",
+            class.name
+        )
+        .unwrap();
         let mut parent = class.inherits.as_deref();
         let mut visited = HashSet::new();
         while let Some(parent_name) = parent {
@@ -2244,9 +2280,13 @@ fn emit_inheritance(
                 class.name
             )
             .unwrap();
+            writeln!(script_inheritance, "        impl $crate::engine::Inherits<$crate::engine::{parent_name}> for $script {{}}").unwrap();
             parent = parent_class.inherits.as_deref();
         }
+        writeln!(script_inheritance, "    }};").unwrap();
     }
+    writeln!(script_inheritance, "}}").unwrap();
+    output.push_str(&script_inheritance);
     writeln!(output).unwrap();
     Ok(())
 }
@@ -3199,7 +3239,7 @@ fn nested_rust_type(type_: &str) -> String {
                 | "f64"
         )
     {
-        type_.to_owned()
+        type_.replace("super::", "crate::engine::")
     } else if type_.contains("::") {
         format!("crate::engine::{type_}")
     } else {
@@ -3309,6 +3349,7 @@ fn emit_trait(output: &mut String, class: &ApiClass, methods: &[&MethodBinding<'
     writeln!(output, "pub trait {trait_name} {{").unwrap();
     for binding in methods {
         emit_trait_signature(output, binding, "    ", true);
+        emit_options_entry(output, binding, "    ", false, true);
     }
     writeln!(output, "}}").unwrap();
     writeln!(
@@ -3332,6 +3373,7 @@ fn emit_trait(output: &mut String, class: &ApiClass, methods: &[&MethodBinding<'
         )
         .unwrap();
         writeln!(output, "    }}").unwrap();
+        emit_options_entry(output, binding, "    ", false, false);
     }
     writeln!(output, "}}").unwrap();
     writeln!(output).unwrap();
@@ -3388,6 +3430,7 @@ fn emit_static_impl(output: &mut String, class: &ApiClass, methods: &[&MethodBin
         )
         .unwrap();
         writeln!(output, "    }}").unwrap();
+        emit_options_entry(output, binding, "    ", true, false);
     }
     writeln!(output, "}}").unwrap();
     writeln!(output).unwrap();
@@ -3477,6 +3520,484 @@ fn emit_trait_signature(
     }
 }
 
+fn options_type_name(binding: &MethodBinding<'_>) -> String {
+    format!(
+        "{}{}",
+        binding.class.name,
+        rust_type_name(&binding.method.name)
+    )
+}
+
+fn options_method_name(binding: &MethodBinding<'_>) -> String {
+    format!(
+        "{}_ex",
+        rust_module_identifier(&binding.method.name).trim_start_matches("r#")
+    )
+}
+
+fn options_argument_type(value: &ValueBinding) -> String {
+    nested_rust_type(&value.rust_type).replacen('&', "&'a ", 1)
+}
+
+fn emit_options_entry(
+    output: &mut String,
+    binding: &MethodBinding<'_>,
+    indent: &str,
+    is_static: bool,
+    declaration: bool,
+) {
+    if !binding.defaults.iter().any(Option::is_some) {
+        return;
+    }
+    let method_name = options_method_name(binding);
+    let type_name = options_type_name(binding);
+    let required_borrows = binding
+        .arguments
+        .iter()
+        .zip(&binding.defaults)
+        .filter(|(argument, default)| {
+            default.is_none() && argument.value.rust_type.starts_with('&')
+        })
+        .count();
+    let explicit_lifetime = if is_static {
+        required_borrows != 1
+    } else {
+        required_borrows != 0
+    };
+    let generics = if explicit_lifetime { "<'a>" } else { "" };
+    let lifetime = if explicit_lifetime { "'a" } else { "'_" };
+    let receiver = if is_static {
+        ""
+    } else if explicit_lifetime {
+        "&'a self"
+    } else {
+        "&self"
+    };
+    let visibility = if is_static { "pub " } else { "" };
+    writeln!(
+        output,
+        "{indent}/// Configures Godot `{}.{}` with its official default arguments. Call `.done()` to execute.",
+        binding.class.name, binding.method.name
+    )
+    .unwrap();
+    if !declaration {
+        writeln!(output, "{indent}#[inline]").unwrap();
+    }
+    write!(
+        output,
+        "{indent}{visibility}fn {method_name}{generics}({receiver}"
+    )
+    .unwrap();
+    let mut needs_comma = !is_static;
+    for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+        if default.is_some() {
+            continue;
+        }
+        if needs_comma {
+            write!(output, ", ").unwrap();
+        }
+        needs_comma = true;
+        write!(
+            output,
+            "{}: {}",
+            argument.rust_name,
+            if explicit_lifetime {
+                options_argument_type(&argument.value)
+            } else {
+                nested_rust_type(&argument.value.rust_type)
+            }
+        )
+        .unwrap();
+    }
+    let receiver_type = if is_static { "" } else { ", Self" };
+    write!(
+        output,
+        ") -> method_options::{type_name}<{lifetime}{receiver_type}>"
+    )
+    .unwrap();
+    if !is_static {
+        write!(output, " where Self: Sized").unwrap();
+    }
+    if declaration {
+        writeln!(output, ";").unwrap();
+        return;
+    }
+    writeln!(output, " {{\n{indent}    method_options::{type_name} {{").unwrap();
+    if !is_static {
+        writeln!(output, "{indent}        __receiver: self,").unwrap();
+    } else {
+        writeln!(
+            output,
+            "{indent}        __lifetime: core::marker::PhantomData,"
+        )
+        .unwrap();
+    }
+    for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+        let name = &argument.rust_name;
+        if default.is_some() {
+            writeln!(output, "{indent}        {name}: None,").unwrap();
+        } else {
+            writeln!(output, "{indent}        {name},").unwrap();
+        }
+    }
+    if binding.method.is_vararg {
+        writeln!(output, "{indent}        varargs: &[],").unwrap();
+    }
+    writeln!(output, "{indent}    }}\n{indent}}}").unwrap();
+}
+
+fn emit_method_options(output: &mut String, methods: &[MethodBinding<'_>]) {
+    writeln!(
+        output,
+        "/// Stack-allocated options for Godot methods with default arguments.\npub mod method_options {{"
+    )
+    .unwrap();
+    for binding in methods {
+        if !binding.defaults.iter().any(Option::is_some) {
+            continue;
+        }
+        let type_name = options_type_name(binding);
+        let is_static = binding.method.is_static;
+        let receiver_type = if is_static { "" } else { ", R: ?Sized" };
+        writeln!(
+            output,
+            "    /// Options for Godot `{}.{}`. Construct with `{}_ex` and execute with `.done()`.\n    #[must_use = \"call .done() to execute the Godot method\"]\n    pub struct {type_name}<'a{receiver_type}> {{",
+            binding.class.name, binding.method.name, binding.method.name
+        )
+        .unwrap();
+        if is_static {
+            writeln!(
+                output,
+                "        pub(super) __lifetime: core::marker::PhantomData<&'a ()>,"
+            )
+            .unwrap();
+        } else {
+            writeln!(output, "        pub(super) __receiver: &'a R,").unwrap();
+        }
+        for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+            let type_ = options_argument_type(&argument.value);
+            let type_ = if default.is_some() {
+                format!("Option<{type_}>")
+            } else {
+                type_
+            };
+            writeln!(
+                output,
+                "        pub(super) {}: {type_},",
+                argument.rust_name
+            )
+            .unwrap();
+        }
+        if binding.method.is_vararg {
+            writeln!(
+                output,
+                "        pub(super) varargs: &'a [crate::variant::Variant],"
+            )
+            .unwrap();
+        }
+        writeln!(output, "    }}").unwrap();
+        let needs_lifetime = binding.method.is_vararg
+            || binding
+                .arguments
+                .iter()
+                .zip(&binding.defaults)
+                .any(|(argument, default)| {
+                    default.is_some() && argument.value.rust_type.starts_with('&')
+                });
+        let lifetime = if needs_lifetime { "'a" } else { "'_" };
+        if is_static {
+            let generics = if needs_lifetime { "<'a>" } else { "" };
+            writeln!(output, "    impl{generics} {type_name}<{lifetime}> {{").unwrap();
+        } else {
+            let generics = if needs_lifetime { "'a, " } else { "" };
+            writeln!(
+                output,
+                "    impl<{generics}R: super::{}Api + ?Sized> {type_name}<{lifetime}, R> {{",
+                binding.class.name
+            )
+            .unwrap();
+        }
+        for ((argument, default), official) in binding
+            .arguments
+            .iter()
+            .zip(&binding.defaults)
+            .zip(&binding.method.arguments)
+        {
+            if default.is_none() {
+                continue;
+            }
+            let name = &argument.rust_name;
+            writeln!(
+                output,
+                "        #[doc = {:?}]\n        #[inline]\n        pub fn {name}(mut self, value: {}) -> Self {{\n            self.{name} = Some(value);\n            self\n        }}",
+                format!("Overrides `{}` (Godot default: `{}`).", official.name, official.default_value.as_deref().unwrap()),
+                options_argument_type(&argument.value)
+            )
+            .unwrap();
+        }
+        if binding.method.is_vararg {
+            writeln!(output, "        /// Adds variable arguments; the default is an empty slice.\n        #[inline]\n        pub fn varargs(mut self, values: &'a [crate::variant::Variant]) -> Self {{\n            self.varargs = values;\n            self\n        }}").unwrap();
+        }
+        writeln!(output, "        /// Executes the method once with the selected arguments.\n        #[inline]\n        pub fn done(self) -> crate::error::EngineResult<{}> {{", nested_rust_type(&binding.return_value.rust_type)).unwrap();
+        for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+            let Some(default) = default else {
+                continue;
+            };
+            let name = &argument.rust_name;
+            if argument.value.rust_type.starts_with('&') && argument.value.rust_type != "&str" {
+                // Keep container defaults on the stack, and construct them only
+                // when the caller did not supply a borrowed value.
+                writeln!(output, "            let {name}_default;\n            let {name} = match self.{name} {{\n                Some(value) => value,\n                None => {{ {name}_default = {default}; &{name}_default }}\n            }};").unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "            let {name} = self.{name}.unwrap_or({default});"
+                )
+                .unwrap();
+            }
+        }
+        let method_name = rust_module_identifier(&binding.method.name);
+        let mut needs_comma = !is_static;
+        if is_static {
+            write!(
+                output,
+                "            crate::engine::{}::{method_name}(",
+                binding.class.name
+            )
+            .unwrap();
+        } else {
+            write!(
+                output,
+                "            super::{}Api::{method_name}(self.__receiver",
+                binding.class.name
+            )
+            .unwrap();
+        }
+        for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+            if needs_comma {
+                write!(output, ", ").unwrap();
+            }
+            needs_comma = true;
+            if default.is_none() {
+                write!(output, "self.").unwrap();
+            }
+            write!(output, "{}", argument.rust_name).unwrap();
+        }
+        if binding.method.is_vararg {
+            if needs_comma {
+                write!(output, ", ").unwrap();
+            }
+            write!(output, "self.varargs").unwrap();
+        }
+        writeln!(output, ")\n        }}\n    }}").unwrap();
+    }
+    writeln!(output, "}}\n").unwrap();
+}
+
+fn emit_singleton_methods(output: &mut String, api: &ExtensionApi, methods: &[MethodBinding<'_>]) {
+    let singletons = api
+        .singletons
+        .iter()
+        .map(|singleton| singleton.r#type.as_str())
+        .collect::<HashSet<_>>();
+    for binding in methods {
+        if binding.method.is_static || !singletons.contains(binding.class.name.as_str()) {
+            continue;
+        }
+        let method_name = rust_module_identifier(&binding.method.name);
+        writeln!(output, "impl super::{} {{", binding.class.name).unwrap();
+        writeln!(output, "    /// Calls Godot singleton `{}.{}` with official defaults.\n    #[inline]\n    pub fn {method_name}(", binding.class.name, binding.method.name).unwrap();
+        for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+            if default.is_none() {
+                writeln!(
+                    output,
+                    "        {}: {},",
+                    argument.rust_name, argument.value.rust_type
+                )
+                .unwrap();
+            }
+        }
+        if binding.method.is_vararg {
+            writeln!(output, "        varargs: &[crate::variant::Variant],").unwrap();
+        }
+        writeln!(
+            output,
+            "    ) -> crate::error::EngineResult<{}> {{",
+            binding.return_value.rust_type
+        )
+        .unwrap();
+        write!(
+            output,
+            "        {}Api::{method_name}(&Self::singleton()?",
+            binding.class.name
+        )
+        .unwrap();
+        for (argument, default) in binding.arguments.iter().zip(&binding.defaults) {
+            write!(output, ", ").unwrap();
+            if let Some(default) = default {
+                if argument.value.rust_type.starts_with('&') && argument.value.rust_type != "&str" {
+                    write!(output, "&").unwrap();
+                }
+                write!(output, "{default}").unwrap();
+            } else {
+                write!(output, "{}", argument.rust_name).unwrap();
+            }
+        }
+        if binding.method.is_vararg {
+            write!(output, ", varargs").unwrap();
+        }
+        writeln!(output, ")\n    }}\n}}\n").unwrap();
+    }
+}
+
+/// Converts the restricted literal/constructor grammar in extension_api.json.
+/// Unknown expressions fail generation instead of silently changing a default.
+fn default_argument_expression(argument: &ApiArgument, value: &ValueBinding) -> Option<String> {
+    let default = argument.default_value.as_deref()?;
+    let rust_type = nested_rust_type(value.rust_type.trim_start_matches('&'));
+    if argument.r#type.starts_with("enum::") {
+        let ordinal = default.parse::<i64>().ok()?;
+        return Some(format!("{rust_type}::from_ord({ordinal}_i64)"));
+    }
+    if argument.r#type.starts_with("bitfield::") {
+        let bits = default.parse::<u64>().ok()?;
+        return Some(format!("{rust_type}::from_bits_retain({bits}_u64)"));
+    }
+    if value.class_name.is_some() {
+        return (default == "null" && value.rust_type.starts_with("Option<"))
+            .then(|| "None".into());
+    }
+    if let Some(element) = argument.r#type.strip_prefix("typedarray::") {
+        return (default == "[]" || default == format!("Array[{element}]([])"))
+            .then(|| format!("<{rust_type}>::new()"));
+    }
+    match argument.r#type.as_str() {
+        "String" | "StringName" | "NodePath" => {
+            let literal = match argument.r#type.as_str() {
+                "StringName" => default.strip_prefix('&').unwrap_or(default),
+                "NodePath" => default.strip_prefix("NodePath(")?.strip_suffix(')')?,
+                _ => default,
+            };
+            let decoded = serde_json::from_str::<String>(literal).ok()?;
+            Some(format!("{decoded:?}"))
+        }
+        "bool" => matches!(default, "true" | "false").then(|| default.into()),
+        "int" => {
+            let number = default.parse::<i128>().ok()?;
+            let valid = match value.rust_type.as_str() {
+                "i8" => i8::try_from(number).is_ok(),
+                "i16" => i16::try_from(number).is_ok(),
+                "i32" => i32::try_from(number).is_ok(),
+                "i64" => i64::try_from(number).is_ok(),
+                "u8" => u8::try_from(number).is_ok(),
+                "u16" => u16::try_from(number).is_ok(),
+                "u32" => u32::try_from(number).is_ok(),
+                "u64" => u64::try_from(number).is_ok(),
+                "char" => {
+                    return char::from_u32(u32::try_from(number).ok()?)
+                        .map(|value| format!("{value:?}"));
+                }
+                _ => false,
+            };
+            valid.then(|| format!("{number}_{rust_type}"))
+        }
+        "float" => float_default(default, &rust_type),
+        "Variant" => match default {
+            "null" => Some("crate::variant::Variant::nil()".into()),
+            _ => default
+                .parse::<i64>()
+                .ok()
+                .map(|value| format!("crate::variant::Variant::from({value}_i64)")),
+        },
+        "Array" if default == "[]" => Some("crate::variant::Array::new()".into()),
+        "Dictionary" if default == "{}" => Some("crate::variant::Dictionary::new()".into()),
+        "RID" if default == "RID()" => Some("crate::rid::Rid::INVALID".into()),
+        "Callable" if default == "Callable()" => Some("crate::callable::Callable::null()".into()),
+        type_ if type_.starts_with("Packed") && default == format!("{type_}()") => {
+            Some(format!("{rust_type}::new()"))
+        }
+        type_ => math_default(type_, default, &rust_type),
+    }
+}
+
+fn float_default(value: &str, rust_type: &str) -> Option<String> {
+    let number = value.parse::<f64>().ok()?;
+    if !number.is_finite() || (rust_type == "f32" && !(number as f32).is_finite()) {
+        return None;
+    }
+    // Parsing first rejects non-literals. Debug output preserves every f64 bit
+    // while also making integer-looking Godot defaults valid Rust floats.
+    Some(format!("{number:?}_{rust_type}"))
+}
+
+fn math_default(type_: &str, default: &str, rust_type: &str) -> Option<String> {
+    let body = default
+        .strip_prefix(type_)?
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
+    let fields = body.split(',').map(str::trim).collect::<Vec<_>>();
+    let integer = matches!(type_, "Vector2i" | "Vector3i" | "Vector4i" | "Rect2i");
+    let numbers = fields
+        .iter()
+        .map(|field| {
+            if integer {
+                field
+                    .parse::<i32>()
+                    .ok()
+                    .map(|number| format!("{number}_i32"))
+            } else {
+                float_default(field, "f32")
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let vector = |size: usize, start: usize| {
+        let suffix = if integer { "i" } else { "" };
+        format!(
+            "crate::math::Vector{size}{suffix}::new({})",
+            numbers[start..start + size].join(", ")
+        )
+    };
+    let expression = match (type_, numbers.len()) {
+        ("Vector2" | "Vector2i", 2)
+        | ("Vector3" | "Vector3i", 3)
+        | ("Vector4" | "Vector4i" | "Quaternion", 4) => {
+            format!("{rust_type}::new({})", numbers.join(", "))
+        }
+        ("Color", 4) => format!("{rust_type}::rgba({})", numbers.join(", ")),
+        ("Rect2" | "Rect2i", 4) => format!("{rust_type}::new({}, {})", vector(2, 0), vector(2, 2)),
+        ("Plane", 4) => format!("{rust_type}::new({}, {})", vector(3, 0), numbers[3]),
+        ("AABB", 6) => format!("{rust_type}::new({}, {})", vector(3, 0), vector(3, 3)),
+        ("Transform2D", 6) => format!(
+            "{rust_type}::new({}, {}, {})",
+            vector(2, 0),
+            vector(2, 2),
+            vector(2, 4)
+        ),
+        ("Basis", 9) => format!(
+            "{rust_type}::new({}, {}, {})",
+            vector(3, 0),
+            vector(3, 3),
+            vector(3, 6)
+        ),
+        ("Transform3D", 12) => format!(
+            "{rust_type}::new(crate::math::Basis::new({}, {}, {}), {})",
+            vector(3, 0),
+            vector(3, 3),
+            vector(3, 6),
+            vector(3, 9)
+        ),
+        ("Projection", 16) => format!(
+            "{rust_type}::new({}, {}, {}, {})",
+            vector(4, 0),
+            vector(4, 4),
+            vector(4, 8),
+            vector(4, 12)
+        ),
+        _ => return None,
+    };
+    Some(expression)
+}
+
 fn bind_method<'api>(
     class: &'api ApiClass,
     method: &'api ApiMethod,
@@ -3530,6 +4051,41 @@ fn bind_method<'api>(
         ));
     };
     let return_value = return_value.expect("supported return was checked above");
+    let mut seen_default = false;
+    let defaults = method
+        .arguments
+        .iter()
+        .zip(&arguments)
+        .map(|(argument, binding)| {
+            let Some(default) = &argument.default_value else {
+                if seen_default {
+                    return Err(EngineApiGenerationError::new(format!(
+                        "Godot `{}.{}` has a required argument after an optional argument",
+                        class.name, method.name
+                    )));
+                }
+                return Ok(None);
+            };
+            seen_default = true;
+            if matches!(
+                binding.rust_name.as_str(),
+                "done" | "__receiver" | "__lifetime"
+            ) {
+                return Err(EngineApiGenerationError::new(format!(
+                    "Godot `{}.{}` uses reserved options argument `{}`",
+                    class.name, method.name, binding.rust_name
+                )));
+            }
+            default_argument_expression(argument, &binding.value)
+                .map(Some)
+                .ok_or_else(|| {
+                    EngineApiGenerationError::new(format!(
+                        "unsupported default `{default}` for Godot `{}.{}({}: {})`",
+                        class.name, method.name, argument.name, argument.r#type
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let id = method_id(class, method, &arguments, &return_value);
     Ok(MethodBindingOutcome::Bound(MethodBinding {
         class,
@@ -3537,6 +4093,7 @@ fn bind_method<'api>(
         id,
         arguments,
         return_value,
+        defaults,
     }))
 }
 
@@ -3947,6 +4504,129 @@ fn rust_argument_identifier(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_literals_preserve_types_and_reject_unrepresentable_values() {
+        let cases = [
+            ("float", Some("float"), "-1", Some("-1.0_f32")),
+            ("float", Some("double"), "0.1", Some("0.1_f64")),
+            ("float", None, "inf", None),
+            ("float", Some("float"), "1e100", None),
+            ("int", Some("uint32"), "4294967295", Some("4294967295_u32")),
+            ("int", Some("int32"), "4294967295", None),
+            ("int", Some("uint32"), "-1", None),
+            ("int", Some("char32"), "65", Some("'A'")),
+            ("int", Some("char32"), "55296", None),
+            ("bool", None, "false", Some("false")),
+            ("bool", None, "0", None),
+            ("String", None, r#""a\n\"b\\c""#, Some(r#""a\n\"b\\c""#)),
+            ("StringName", None, r#"&"Master""#, Some(r#""Master""#)),
+            (
+                "NodePath",
+                None,
+                r#"NodePath("%Player")"#,
+                Some(r#""%Player""#),
+            ),
+            ("String", None, "load(\"res://x\")", None),
+            (
+                "Variant",
+                None,
+                "null",
+                Some("crate::variant::Variant::nil()"),
+            ),
+            (
+                "Variant",
+                None,
+                "0",
+                Some("crate::variant::Variant::from(0_i64)"),
+            ),
+        ];
+        for (type_, meta, default, expected) in cases {
+            let argument = ApiArgument {
+                name: "value".into(),
+                r#type: type_.into(),
+                meta: meta.map(str::to_owned),
+                default_value: Some(default.into()),
+            };
+            let value = bind_argument(&argument, &HashMap::new(), &HashMap::new()).unwrap();
+            assert_eq!(
+                default_argument_expression(&argument, &value).as_deref(),
+                expected,
+                "{type_} {meta:?} = {default}"
+            );
+        }
+    }
+
+    #[test]
+    fn constructor_defaults_validate_shape_and_preserve_components() {
+        assert_eq!(
+            math_default(
+                "Transform2D",
+                "Transform2D(1, 2, 3, 4, 5, 6)",
+                "crate::math::Transform2D"
+            )
+            .unwrap(),
+            "crate::math::Transform2D::new(crate::math::Vector2::new(1.0_f32, 2.0_f32), crate::math::Vector2::new(3.0_f32, 4.0_f32), crate::math::Vector2::new(5.0_f32, 6.0_f32))"
+        );
+        assert_eq!(
+            math_default("Rect2i", "Rect2i(-1, 2, 3, 4)", "crate::math::Rect2i").unwrap(),
+            "crate::math::Rect2i::new(crate::math::Vector2i::new(-1_i32, 2_i32), crate::math::Vector2i::new(3_i32, 4_i32))"
+        );
+        for invalid in [
+            "Vector2(0)",
+            "Vector2(0, 0, 0)",
+            "Vector2(0, inf)",
+            "Vector3(0, 0)",
+            "Vector2::ZERO",
+        ] {
+            assert!(
+                math_default("Vector2", invalid, "crate::math::Vector2").is_none(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_method_defaults_fail_with_the_official_argument_identity() {
+        let mut class: ApiClass = serde_json::from_value(serde_json::json!({
+            "name": "Node",
+            "api_type": "core",
+            "is_instantiable": true,
+            "is_refcounted": false,
+            "methods": [{
+                "name": "configure",
+                "hash": 123,
+                "is_virtual": false,
+                "is_const": false,
+                "is_static": false,
+                "is_vararg": false,
+                "arguments": [{"name": "enabled", "type": "bool", "default_value": "1"}]
+            }]
+        }))
+        .unwrap();
+        let result = bind_method(&class, &class.methods[0], &HashMap::new(), &HashMap::new());
+        let Err(error) = result else {
+            panic!("invalid boolean must reject generation")
+        };
+        assert!(error.to_string().contains("Node.configure(enabled: bool)"));
+
+        class.methods[0].arguments[0].default_value = Some("true".into());
+        class.methods[0].arguments.push(ApiArgument {
+            name: "required".into(),
+            r#type: "bool".into(),
+            meta: None,
+            default_value: None,
+        });
+        let result = bind_method(&class, &class.methods[0], &HashMap::new(), &HashMap::new());
+        let Err(error) = result else {
+            panic!("non-trailing default must reject generation")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("required argument after an optional argument")
+        );
+    }
 
     #[test]
     fn virtual_methods_generate_base_checked_override_traits() {
@@ -4390,6 +5070,10 @@ mod tests {
             "crate::variant::Array<super::GodotRef<super::Resource>>"
         );
         assert_eq!(returned.typed_array_element.as_deref(), Some("Resource"));
+        assert_eq!(
+            nested_rust_type(&returned.rust_type),
+            "crate::variant::Array<crate::engine::GodotRef<crate::engine::Resource>>"
+        );
 
         let binding = MethodBinding {
             class: &resource,
@@ -4406,6 +5090,7 @@ mod tests {
                 return_value: None,
             },
             id: 1,
+            defaults: vec![None],
             arguments: vec![ArgumentBinding {
                 rust_name: "names".into(),
                 value: builtin,

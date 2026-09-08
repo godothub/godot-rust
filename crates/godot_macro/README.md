@@ -12,7 +12,7 @@ macros rather than adding `godot_macro` directly.
 
 The crate implements `#[script]`, `#[godot_enum]`, and `#[godot_flags]`.
 Attributes such as `#[export]`, `#[property]`, `#[node]`, `#[signal]`,
-`#[func]`, `#[rpc]`, `#[default]`, and `#[reload]` are helper syntax consumed
+`#[func]`, `#[rpc]`, `#[init]`, `#[default]`, and `#[reload]` are helper syntax consumed
 by `#[script]`; they are not separate procedural macros.
 
 This crate is licensed under the MIT License.

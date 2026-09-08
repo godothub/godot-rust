@@ -178,6 +178,7 @@ func _init() -> void:
 	var echoed_transform: Transform3D = owner.call("echo_transform", expected_transform_3d)
 	var astar_grid := AStarGrid2D.new()
 	var grid_map := GridMap.new()
+	owner.add_child(grid_map)
 	var image := Image.new()
 	var packed_bytes := PackedByteArray([0, 1, 127, 255])
 	var packed_ints := PackedInt32Array([-2, 0, 4])
@@ -1578,8 +1579,36 @@ func _init() -> void:
 	restored.free()
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(scene_path))
 
+	var detaching := Node2D.new()
+	var transient_script: Script = ResourceLoader.load(
+		"res://sample.rs", "Script", ResourceLoader.CACHE_MODE_IGNORE
+	)
+	var script_lifetime: WeakRef = weakref(transient_script)
+	detaching.set_script(transient_script)
+	transient_script = null
+	if not _resource_is_alive(script_lifetime):
+		detaching.free()
+		_fail("The Rust instance did not retain its Script resource")
+		return
+	# No receiver is connected: Godot checks the instance's Script metadata.
+	detaching.call("emit_rid", RID())
+	var detach_result: Variant = detaching.call("detach_for_test")
+	if detach_result != 4 or detaching.get_script() != null:
+		detaching.free()
+		_fail("Rust callback did not finish after removing its own script")
+		return
+	detaching.free()
+	if _resource_is_alive(script_lifetime):
+		_fail("The removed Rust instance leaked its Script resource")
+		return
+
 	print("godot-rust Host smoke test passed")
 	quit(0)
+
+
+func _resource_is_alive(reference: WeakRef) -> bool:
+	# Keep get_ref's temporary strong reference out of the calling stack frame.
+	return reference.get_ref() != null
 
 
 func _fail(message: String) -> void:

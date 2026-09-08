@@ -881,6 +881,16 @@ class StageHostTests(unittest.TestCase):
             ),
         )
 
+    def test_godot_load_rejects_state_dropped_during_its_callback(self):
+        markers = list(test_godot_load.REQUIRED_MODULE_MARKERS)
+        finished = markers.index(test_godot_load.DETACH_FINISHED_MARKER)
+        dropped = markers.index(test_godot_load.DETACH_DROPPED_MARKER)
+        markers[finished], markers[dropped] = markers[dropped], markers[finished]
+        self.assertIn(
+            "Rust script state was dropped before its callback returned",
+            test_godot_load.output_errors("\n".join(markers)),
+        )
+
     def test_godot_load_validates_expected_instance_failures(self):
         output = "\n".join(
             (

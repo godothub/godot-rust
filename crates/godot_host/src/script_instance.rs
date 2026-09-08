@@ -18,7 +18,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 
 use crate::godot_metadata::{
     PROPERTY_USAGE_DEFAULT, method_flags, property_variant_type, variant_type,
@@ -54,6 +54,7 @@ struct RustScriptInstance {
     interface: Option<EngineInterface>,
     codec: Option<VariantCodec>,
     owner: usize,
+    owner_id: u64,
     script: usize,
     language: usize,
     source_path: String,
@@ -70,6 +71,9 @@ struct RustScriptInstance {
     _empty_metadata_name: Option<Box<OwnedStringName>>,
     _empty_metadata_hint: Option<Box<LocalGodotString>>,
     state: Option<Mutex<ModuleState>>,
+    // ScriptInstance owns its Script resource; Godot's Object only retains
+    // the ScriptInstance. Keep metadata alive until callback state is dropped.
+    _script_ref: Option<crate::engine_call::value::NativeGodotRef>,
 }
 
 struct ReflectedMethod {
@@ -411,6 +415,15 @@ pub(crate) fn create(
     let Some(codec) = VariantCodec::new(interface) else {
         return ptr::null_mut();
     };
+    let Some(get_instance_id) = interface.object_get_instance_id else {
+        return ptr::null_mut();
+    };
+    // SAFETY: Godot passes the live owner while creating its script instance.
+    let owner_id = unsafe { get_instance_id(owner) };
+    let Ok(script_ref) = crate::engine_call::value::NativeGodotRef::from_object(interface, script)
+    else {
+        return ptr::null_mut();
+    };
     let source_path = state.source_path().to_owned();
     let Ok(emit_signal_method) = crate::runtime::resolve_method(
         interface,
@@ -665,10 +678,11 @@ pub(crate) fn create(
             },
         })
         .collect();
-    let data = Box::into_raw(Box::new(RustScriptInstance {
+    let data = into_instance_data(RustScriptInstance {
         interface: Some(interface),
         codec: Some(codec),
         owner: owner as usize,
+        owner_id,
         script: script as usize,
         language: language as usize,
         source_path,
@@ -693,14 +707,14 @@ pub(crate) fn create(
         _empty_metadata_name: Some(empty_metadata_name),
         _empty_metadata_hint: Some(empty_metadata_hint),
         state: Some(Mutex::new(state)),
-    }))
-    .cast();
-    // SAFETY: `INSTANCE_INFO` has static storage, `data` is a live boxed value,
+        _script_ref: Some(script_ref),
+    });
+    // SAFETY: `INSTANCE_INFO` has static storage, `data` owns a strong reference,
     // and Godot will release it exactly once through `free_func`.
     let instance = unsafe { create(&INSTANCE_INFO, data) };
     if instance.is_null() {
         // SAFETY: Godot did not accept ownership when creation failed.
-        unsafe { drop(Box::from_raw(data.cast::<RustScriptInstance>())) };
+        unsafe { drop(Arc::from_raw(data.cast::<RustScriptInstance>())) };
     } else if let Ok(mut instances) = LIVE_INSTANCES
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
@@ -717,13 +731,26 @@ pub(crate) fn create(
     instance
 }
 
-fn data(instance: GDExtensionScriptInstanceDataPtr) -> Option<&'static RustScriptInstance> {
+fn into_instance_data(instance: RustScriptInstance) -> GDExtensionScriptInstanceDataPtr {
+    // Ownership crosses Godot's opaque callback boundary. This does not make
+    // the engine handles Send or Sync; only their lifetime is shared.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let instance = Arc::new(instance);
+    Arc::into_raw(instance).cast_mut().cast()
+}
+
+fn data(instance: GDExtensionScriptInstanceDataPtr) -> Option<Arc<RustScriptInstance>> {
     if instance.is_null() {
         return None;
     }
-    // SAFETY: Every callback receives the box allocated by `create`, and Godot
-    // does not invoke callbacks after `free_func`.
-    Some(unsafe { &*instance.cast::<RustScriptInstance>() })
+    let pointer = instance.cast::<RustScriptInstance>();
+    // SAFETY: Godot owns one strong reference when it enters a callback.
+    // Retain another until the callback returns: user code may synchronously
+    // remove its own script and invoke `free_func` during that callback.
+    Some(unsafe {
+        Arc::increment_strong_count(pointer);
+        Arc::from_raw(pointer)
+    })
 }
 
 pub(crate) fn belongs_to_script(
@@ -744,7 +771,9 @@ pub(crate) enum GenerationReloadError {
 impl core::fmt::Display for GenerationReloadError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Busy => formatter.write_str("a Rust script callback is still active"),
+            Self::Busy => {
+                formatter.write_str("a Rust script callback or background task is still active")
+            }
             Self::Rejected(message) => formatter.write_str(message),
         }
     }
@@ -752,8 +781,9 @@ impl core::fmt::Display for GenerationReloadError {
 
 /// Migrates every live ScriptInstance before publishing a candidate module.
 ///
-/// The registry lock keeps instance boxes alive, and all state locks remain
-/// held until every candidate state has been prepared. Consequently, failure
+/// Retained instance references keep state alive without holding the registry
+/// lock across user code. All state locks remain held until every candidate
+/// state has been prepared. Consequently, failure
 /// drops only candidate states and cannot partially modify the active
 /// generation.
 pub(crate) fn install_generation(
@@ -771,22 +801,29 @@ pub(crate) fn install_generation(
     // `free_func` needs the same registry, so doing this under the lock could
     // deadlock the editor.
     current.cancel_tasks().map_err(|error| {
-        GenerationReloadError::Rejected(format!(
-            "could not cancel tasks from the active generation: {:?}: {}",
-            error.status, error.message
-        ))
+        if error.status == AbiStatus::Unsupported {
+            GenerationReloadError::Busy
+        } else {
+            GenerationReloadError::Rejected(format!(
+                "could not cancel tasks from the active generation: {:?}: {}",
+                error.status, error.message
+            ))
+        }
     })?;
-    let instances = LIVE_INSTANCES
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map_err(|_| {
-            GenerationReloadError::Rejected("live instance registry is poisoned".into())
-        })?;
+    let instances = {
+        let registry = LIVE_INSTANCES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map_err(|_| {
+                GenerationReloadError::Rejected("live instance registry is poisoned".into())
+            })?;
+        registry
+            .iter()
+            .filter_map(|address| data(*address as GDExtensionScriptInstanceDataPtr))
+            .collect::<Vec<_>>()
+    };
     let mut prepared = Vec::with_capacity(instances.len());
-    for address in instances.iter().copied() {
-        // SAFETY: The registry lock prevents `free_func` from removing and
-        // dropping this registered box while the generation switch runs.
-        let instance = unsafe { &*(address as *const RustScriptInstance) };
+    for instance in &instances {
         let Some(state) = &instance.state else {
             continue;
         };
@@ -812,6 +849,7 @@ pub(crate) fn install_generation(
             ))
         })?;
         migrate_state(instance, &guard, &mut next)?;
+        ensure_instance_attached(instance)?;
         if next.has_node_fields() {
             let interface = instance.interface.ok_or_else(|| {
                 GenerationReloadError::Rejected("Godot interface is unavailable".into())
@@ -833,6 +871,9 @@ pub(crate) fn install_generation(
         prepared.push((instance, guard, Some(next)));
     }
     let count = prepared.len();
+    for instance in &instances {
+        ensure_instance_attached(instance)?;
+    }
     for (instance, current, next) in &mut prepared {
         **current = next
             .take()
@@ -842,6 +883,16 @@ pub(crate) fn install_generation(
     crate::module_loader::set_active_generation(candidate);
     drop(prepared);
     Ok(count)
+}
+
+fn ensure_instance_attached(instance: &RustScriptInstance) -> Result<(), GenerationReloadError> {
+    if instance.godot_instance.load(Ordering::Acquire) == 0 {
+        return Err(GenerationReloadError::Rejected(format!(
+            "script `{}` was removed while preparing its replacement",
+            instance.source_path
+        )));
+    }
+    Ok(())
 }
 
 fn migrate_state(
@@ -958,7 +1009,7 @@ unsafe extern "C" fn set(
     if instance.faults.is_fused() {
         return 0;
     }
-    let Some(property) = resolve_property(Some(instance), name) else {
+    let Some(property) = resolve_property(Some(&instance), name) else {
         return 0;
     };
     let Some(field) = property.field.as_ref() else {
@@ -1046,7 +1097,7 @@ unsafe extern "C" fn get(
     if instance.faults.is_fused() {
         return 0;
     }
-    let Some(property) = resolve_property(Some(instance), name) else {
+    let Some(property) = resolve_property(Some(&instance), name) else {
         return 0;
     };
     let Some(field) = property.field.as_ref() else {
@@ -1137,8 +1188,9 @@ unsafe extern "C" fn property_can_revert(
     instance: GDExtensionScriptInstanceDataPtr,
     name: GDExtensionConstStringNamePtr,
 ) -> GDExtensionBool {
+    let instance = data(instance);
     u8::from(
-        resolve_property(data(instance), name)
+        resolve_property(instance.as_deref(), name)
             .and_then(|property| property.field.as_ref())
             .and_then(ModuleField::property_default_value)
             .is_some(),
@@ -1154,7 +1206,7 @@ unsafe extern "C" fn property_get_revert(
         return 0;
     };
     let Some(field) =
-        resolve_property(Some(instance), name).and_then(|property| property.field.as_ref())
+        resolve_property(Some(&instance), name).and_then(|property| property.field.as_ref())
     else {
         return 0;
     };
@@ -1260,7 +1312,8 @@ unsafe extern "C" fn get_property_type(
     name: GDExtensionConstStringNamePtr,
     is_valid: *mut GDExtensionBool,
 ) -> GDExtensionVariantType {
-    let property = resolve_property(data(instance), name);
+    let instance = data(instance);
+    let property = resolve_property(instance.as_deref(), name);
     write_bool(is_valid, property.is_some());
     property
         .map(|property| property.type_)
@@ -1278,7 +1331,8 @@ unsafe extern "C" fn has_method(
     instance: GDExtensionScriptInstanceDataPtr,
     name: GDExtensionConstStringNamePtr,
 ) -> GDExtensionBool {
-    u8::from(resolve_method(data(instance), name).is_some())
+    let instance = data(instance);
+    u8::from(resolve_method(instance.as_deref(), name).is_some())
 }
 
 unsafe extern "C" fn get_method_argument_count(
@@ -1286,7 +1340,8 @@ unsafe extern "C" fn get_method_argument_count(
     name: GDExtensionConstStringNamePtr,
     is_valid: *mut GDExtensionBool,
 ) -> GDExtensionInt {
-    let method = resolve_method(data(instance), name);
+    let instance = data(instance);
+    let method = resolve_method(instance.as_deref(), name);
     let valid = method.is_some();
     write_bool(is_valid, valid);
     method.map(|method| method.argument_count()).unwrap_or(0)
@@ -1313,7 +1368,7 @@ unsafe extern "C" fn call(
         instance.finish_failed_call(result, error);
         return;
     }
-    let Some(method) = resolve_method(Some(instance), method) else {
+    let Some(method) = resolve_method(Some(&instance), method) else {
         write_call_error(
             error,
             GDExtensionCallErrorType::GDEXTENSION_CALL_ERROR_INVALID_METHOD,
@@ -1352,7 +1407,7 @@ unsafe extern "C" fn call(
         );
         return;
     }
-    let prepared = match prepare_call(instance, method, arguments, supplied_count) {
+    let prepared = match prepare_call(&instance, method, arguments, supplied_count) {
         Ok(prepared) => prepared,
         Err(mismatch) => {
             write_call_error(
@@ -1405,13 +1460,13 @@ unsafe extern "C" fn call(
     let _debug_scope = crate::debugger::CallbackScope::enter(
         &instance.source_path,
         callback_name,
-        ptr::from_ref(instance) as usize,
+        Arc::as_ptr(&instance) as usize,
         debug_locals,
     );
     let _profile_scope = crate::profiler::ProfileScope::enter(&instance.source_path, callback_name);
     let outcome = match state.try_lock() {
         Ok(mut state) => {
-            let _script_scope = ActiveScriptScope::enter(instance);
+            let _script_scope = ActiveScriptScope::enter(&instance);
             match prepared.target {
                 PreparedTarget::Lifecycle(invocation) => match invocation {
                     LifecycleInvocation::EnterTree => state.enter_tree(),
@@ -1534,7 +1589,10 @@ pub(crate) fn active_engine_context() -> Option<(EngineInterface, GDExtensionObj
     // duration of one synchronous callback on this thread.
     let instance = unsafe { &*instance };
     let interface = instance.interface?;
-    let owner = instance.owner as GDExtensionObjectPtr;
+    let get_instance = interface.object_get_instance_from_id?;
+    // SAFETY: ObjectDB resolves the cached identity without dereferencing an
+    // owner that user code may have freed earlier in the callback.
+    let owner = unsafe { get_instance(instance.owner_id) };
     (!owner.is_null()).then_some((interface, owner))
 }
 
@@ -1553,20 +1611,24 @@ pub(crate) fn with_engine_interface<T>(
     callback()
 }
 
-pub(crate) fn write_debug_members(instance_address: usize, result: GDExtensionTypePtr) -> bool {
-    let Ok(instances) = LIVE_INSTANCES
+fn retained_live_instance(instance_address: usize) -> Option<Arc<RustScriptInstance>> {
+    let instances = LIVE_INSTANCES
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
-    else {
+        .ok()?;
+    if !instances.contains(&instance_address) {
+        return None;
+    }
+    // The registry lock keeps Godot's reference alive while `data` retains an
+    // independent reference. Release the lock before invoking user getters:
+    // a getter may synchronously remove its script and call `free_func`.
+    data(instance_address as GDExtensionScriptInstanceDataPtr)
+}
+
+pub(crate) fn write_debug_members(instance_address: usize, result: GDExtensionTypePtr) -> bool {
+    let Some(instance) = retained_live_instance(instance_address) else {
         return false;
     };
-    if !instances.contains(&instance_address) {
-        return false;
-    }
-    // SAFETY: LIVE_INSTANCES contains only allocated RustScriptInstance
-    // addresses and its lock prevents `free_func` from removing and dropping
-    // this entry until the snapshot finishes.
-    let instance = unsafe { &*(instance_address as *const RustScriptInstance) };
     let (Some(interface), Some(codec), Some(state)) = (
         instance.interface,
         instance.codec.as_ref(),
@@ -1606,15 +1668,7 @@ pub(crate) fn write_debug_members(instance_address: usize, result: GDExtensionTy
 }
 
 pub(crate) fn debug_member_expression(instance_address: usize, expression: &str) -> Option<String> {
-    let instances = LIVE_INSTANCES
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .ok()?;
-    if !instances.contains(&instance_address) {
-        return None;
-    }
-    // SAFETY: The live-instance lock retains this allocation through the read.
-    let instance = unsafe { &*(instance_address as *const RustScriptInstance) };
+    let instance = retained_live_instance(instance_address)?;
     let state = instance.state.as_ref()?.try_lock().ok()?;
     for index in 0..state.field_count() {
         let field = state.field(index)?;
@@ -1678,8 +1732,8 @@ pub(crate) unsafe extern "C" fn current_owner_from_module(
     let Some(get_instance_id) = interface.object_get_instance_id else {
         return AbiCallResult::failure(AbiStatus::Internal, "Godot object identity is unavailable");
     };
-    // SAFETY: ActiveScriptScope keeps the ScriptInstance and its owner live
-    // through this synchronous callback.
+    // SAFETY: active_engine_context resolved a live owner from ObjectDB for
+    // this synchronous call; retaining the script alone does not own the node.
     let object_id = unsafe { get_instance_id(owner) };
     if object_id == 0 {
         return AbiCallResult::failure(
@@ -1854,7 +1908,13 @@ impl RustScriptInstance {
                 "Godot object method calls are unavailable",
             );
         };
-        if self.emit_signal_method == 0 || self.owner == 0 {
+        let owner = interface
+            .object_get_instance_from_id
+            .map_or(ptr::null_mut(), |lookup| {
+                // SAFETY: Resolve the identity without accessing an expired owner.
+                unsafe { lookup(self.owner_id) }
+            });
+        if self.emit_signal_method == 0 || owner.is_null() {
             return AbiCallResult::failure(
                 AbiStatus::Internal,
                 "signal method or owning Godot object is unavailable",
@@ -1871,7 +1931,7 @@ impl RustScriptInstance {
         unsafe {
             call(
                 self.emit_signal_method as GDExtensionMethodBindPtr,
-                self.owner as GDExtensionObjectPtr,
+                owner,
                 argument_pointers.as_ptr(),
                 argument_pointers.len() as GDExtensionInt,
                 result.as_mut_ptr(),
@@ -1943,14 +2003,18 @@ unsafe extern "C" fn free(instance: GDExtensionScriptInstanceDataPtr) {
             .get_or_init(|| Mutex::new(HashSet::new()))
             .lock();
         // A poisoned registry must still be repaired before releasing the
-        // instance box; otherwise a stale address could later be dereferenced
+        // engine's reference; otherwise a stale address could later be dereferenced
         // by generation migration.
         let mut instances = instances.unwrap_or_else(|poisoned| poisoned.into_inner());
         instances.remove(&(instance as usize));
         drop(instances);
-        // SAFETY: The pointer was allocated by `create`; Godot invokes this
-        // callback exactly once when deleting its ScriptInstance wrapper.
-        unsafe { drop(Box::from_raw(instance.cast::<RustScriptInstance>())) };
+        // SAFETY: Godot releases the reference created by `into_instance_data`
+        // exactly once. Active callbacks retain their own strong references.
+        unsafe {
+            let instance = Arc::from_raw(instance.cast::<RustScriptInstance>());
+            instance.godot_instance.store(0, Ordering::Release);
+            drop(instance);
+        };
     }
 }
 
@@ -2445,11 +2509,12 @@ mod tests {
     }
 
     #[test]
-    fn minimal_instance_reports_empty_metadata() {
-        let data = Box::into_raw(Box::new(RustScriptInstance {
+    fn instance_metadata_survives_removal_until_the_active_callback_returns() {
+        let data = into_instance_data(RustScriptInstance {
             interface: None,
             codec: None,
             owner: 1,
+            owner_id: 1,
             script: 2,
             language: 3,
             source_path: "res://minimal.rs".into(),
@@ -2482,11 +2547,19 @@ mod tests {
             _empty_metadata_name: None,
             _empty_metadata_hint: None,
             state: None,
-        }))
-        .cast();
+            _script_ref: None,
+        });
         let mut property_count = u32::MAX;
         let mut method_count = u32::MAX;
         let mut valid = 1;
+        LIVE_INSTANCES
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .expect("live instance registry")
+            .insert(data as usize);
+        let active_callback =
+            retained_live_instance(data as usize).expect("retained debugger instance");
+        let lifetime = Arc::downgrade(&active_callback);
 
         // SAFETY: The callbacks receive the live test instance and writable
         // local output slots expected by their ABI contracts.
@@ -2505,6 +2578,12 @@ mod tests {
             free(data);
         }
 
+        assert!(retained_live_instance(data as usize).is_none());
+        assert_eq!(active_callback.source_path, "res://minimal.rs");
+        assert_eq!(lifetime.strong_count(), 1);
+        drop(active_callback);
+        assert!(lifetime.upgrade().is_none());
+
         assert_eq!(property_count, 0);
         assert_eq!(method_count, 0);
         assert_eq!(valid, 0);
@@ -2512,10 +2591,11 @@ mod tests {
 
     #[test]
     fn unknown_calls_return_an_explicit_error() {
-        let data = Box::into_raw(Box::new(RustScriptInstance {
+        let data = into_instance_data(RustScriptInstance {
             interface: None,
             codec: None,
             owner: 1,
+            owner_id: 1,
             script: 2,
             language: 3,
             source_path: "res://unknown.rs".into(),
@@ -2548,8 +2628,8 @@ mod tests {
             _empty_metadata_name: None,
             _empty_metadata_hint: None,
             state: None,
-        }))
-        .cast();
+            _script_ref: None,
+        });
         let mut error = GDExtensionCallError {
             error: GDExtensionCallErrorType::GDEXTENSION_CALL_OK,
             argument: -1,

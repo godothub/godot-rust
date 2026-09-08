@@ -67,7 +67,7 @@ impl NativeGodotRef {
         Ok(Self::from_functions(get_object, set_object))
     }
 
-    pub(super) fn from_object(
+    pub(crate) fn from_object(
         interface: EngineInterface,
         object: GDExtensionObjectPtr,
     ) -> Result<Self, ValueError> {

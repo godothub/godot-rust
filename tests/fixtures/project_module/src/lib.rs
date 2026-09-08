@@ -17,6 +17,7 @@ struct EngineSmokeState {
 #[script(base = Node2D)]
 pub struct HostSmoke {
     virtual_draw_called: bool,
+    detaching_for_test: bool,
 
     #[export(default = 3, group = "State", range(min = 0, max = 100, step = 1))]
     counter: i64,
@@ -154,6 +155,17 @@ pub struct HostSmoke {
 
 #[script]
 impl HostSmoke {
+    #[func]
+    fn detach_for_test(&mut self) -> i64 {
+        self.detaching_for_test = true;
+        self.base()
+            .set_script(&Variant::nil())
+            .expect("detaching the test script should succeed");
+        self.counter += 1;
+        godot_print!("GODOT_RUST_DETACH_CALLBACK_FINISHED");
+        self.counter
+    }
+
     fn _ready(&mut self) {
         let _ = &self.counter_changed;
         match self.target.get_instance_id() {
@@ -801,6 +813,14 @@ impl HostSmoke {
 impl CanvasItemVirtual for HostSmoke {
     fn _draw(&mut self) {
         self.virtual_draw_called = true;
+    }
+}
+
+impl Drop for HostSmoke {
+    fn drop(&mut self) {
+        if self.detaching_for_test {
+            godot_print!("GODOT_RUST_DETACHED_INSTANCE_DROPPED");
+        }
     }
 }
 

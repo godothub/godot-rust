@@ -1,7 +1,7 @@
 use crate::managed_fs::{atomic_write, ensure_directory, has_managed_header};
 use crate::{CargoPackageModel, CargoTargetModel, GodotRustMode};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use syn::parse::Parser;
@@ -489,9 +489,7 @@ fn resource_relative_path(path: &Path) -> Result<String, String> {
 
 fn render_index(entries: &[ScriptIndexEntry], modules: &[(String, String, String)]) -> String {
     let mut output = format!("{GENERATED_HEADER_LINE}\n");
-    for (alias, path, _) in modules {
-        output.push_str(&format!("#[path = {path:?}]\nmod {alias};\n"));
-    }
+    render_import_modules(&mut output, modules);
     if !modules.is_empty() {
         output.push('\n');
     }
@@ -505,6 +503,135 @@ fn render_index(entries: &[ScriptIndexEntry], modules: &[(String, String, String
     }
     output.push_str("}\n");
     output
+}
+
+#[derive(Default)]
+struct ImportModule {
+    physical_names: BTreeSet<String>,
+    files: Vec<usize>,
+    children: BTreeMap<String, ImportModule>,
+}
+
+fn import_ident(name: &str) -> Option<String> {
+    let name = name.strip_prefix("r#").unwrap_or(name);
+    if name == "_" {
+        return None;
+    }
+    syn::parse_str::<syn::Ident>(name)
+        .or_else(|_| syn::parse_str::<syn::Ident>(&format!("r#{name}")))
+        .ok()
+        .map(|ident| ident.to_string())
+}
+
+fn render_import_modules(output: &mut String, modules: &[(String, String, String)]) {
+    let mut tree = ImportModule::default();
+    let mut fallback = BTreeMap::new();
+    let reserved: HashSet<_> = modules.iter().map(|(alias, _, _)| alias.as_str()).collect();
+    for (index, (_, path, _)) in modules.iter().enumerate() {
+        let stem = path.strip_suffix(".rs").expect("collected Rust script");
+        let mut parts = Vec::new();
+        for part in stem.split('/') {
+            let Some(ident) = import_ident(part) else {
+                fallback.insert(index, format!(
+                    "script `{path}` has no readable Rust import path: `{part}` is not a Rust module name; rename it using letters, digits, or underscores"
+                ));
+                break;
+            };
+            if parts.is_empty() && reserved.contains(ident.trim_start_matches("r#")) {
+                fallback.insert(index, format!(
+                    "script `{path}` uses a reserved generated module name; rename its first path component"
+                ));
+                break;
+            }
+            parts.push((ident, part));
+        }
+        if fallback.contains_key(&index) {
+            continue;
+        }
+        let mut parent = &mut tree;
+        for (ident, physical) in parts {
+            parent = parent.children.entry(ident).or_default();
+            parent.physical_names.insert(physical.to_owned());
+        }
+        parent.files.push(index);
+    }
+    let mut aliases = Vec::new();
+    render_import_tree(output, &tree, "", "", modules, &mut aliases, &mut fallback);
+    for (index, path) in aliases {
+        let alias = &modules[index].0;
+        output.push_str(&format!("pub(crate) use self::{path} as {alias};\n"));
+    }
+    for (index, warning) in fallback {
+        let (alias, path, _) = &modules[index];
+        let warning = warning.replace(['\n', '\r'], " ");
+        output.push_str(&format!("// {warning}\n#[path = {path:?}]\nmod {alias};\n"));
+    }
+}
+
+fn render_import_tree(
+    output: &mut String,
+    tree: &ImportModule,
+    prefix: &str,
+    indent: &str,
+    modules: &[(String, String, String)],
+    aliases: &mut Vec<(usize, String)>,
+    fallback: &mut BTreeMap<usize, String>,
+) {
+    for (ident, child) in &tree.children {
+        let path = format!("{prefix}{ident}");
+        if child.physical_names.len() != 1
+            || child.files.len() > 1
+            || !child.files.is_empty() && !child.children.is_empty()
+        {
+            collect_conflicting_imports(child, &path, modules, fallback);
+            continue;
+        }
+        let physical = child
+            .physical_names
+            .first()
+            .expect("a path component was inserted");
+        if ident.chars().any(char::is_uppercase) {
+            output.push_str(&format!("{indent}#[allow(non_snake_case)]\n"));
+        }
+        if let Some(&index) = child.files.first() {
+            let filename = format!("{physical}.rs");
+            output.push_str(&format!(
+                "{indent}#[path = {filename:?}]\n{indent}pub(crate) mod {ident};\n"
+            ));
+            aliases.push((index, path));
+        } else {
+            output.push_str(&format!(
+                "{indent}#[path = {physical:?}]\n{indent}pub(crate) mod {ident} {{\n"
+            ));
+            render_import_tree(
+                output,
+                child,
+                &format!("{path}::"),
+                &format!("{indent}    "),
+                modules,
+                aliases,
+                fallback,
+            );
+            output.push_str(&format!("{indent}}}\n"));
+        }
+    }
+}
+
+fn collect_conflicting_imports(
+    tree: &ImportModule,
+    path: &str,
+    modules: &[(String, String, String)],
+    fallback: &mut BTreeMap<usize, String>,
+) {
+    for &index in &tree.files {
+        fallback.insert(index, format!(
+            "script `{}` has a conflicting Rust import path `{path}`; rename the colliding file or directory",
+            modules[index].1,
+        ));
+    }
+    for child in tree.children.values() {
+        collect_conflicting_imports(child, path, modules, fallback);
+    }
 }
 
 fn stable_hash(value: &str) -> u64 {
@@ -604,7 +731,9 @@ mod tests {
         assert_eq!(first.scripts[0].resource_uid.as_deref(), Some("uid://b2"));
         let index = std::fs::read_to_string(&first.index_path).expect("index");
         assert!(index.starts_with(GENERATED_HEADER_LINE));
-        assert!(index.contains("#[path = \"actors/player.rs\"]"));
+        assert!(index.contains("pub(crate) mod actors"));
+        assert!(index.contains("pub(crate) mod player;"));
+        assert!(index.contains("use self::actors::player as godot_rs_script_"));
         assert!(
             index.contains("::Player => (\"res://src/scripts/actors/player.rs\", \"uid://b2\")")
         );
@@ -646,6 +775,91 @@ mod tests {
         let error =
             sync_script_index(&project.0, &project.package()).expect_err("user index rejected");
         assert!(error.contains("refusing to replace user-owned"));
+    }
+
+    #[test]
+    fn readable_paths_support_relative_imports_keywords_and_legacy_fallbacks() {
+        let project = TempProject::new();
+        let scripts = project.0.join("src/scripts");
+        let sources = [
+            ("health.rs", "pub struct Health;"),
+            (
+                "player.rs",
+                "pub struct Player;\npub fn health() -> super::health::Health { super::health::Health }",
+            ),
+            ("actors/health.rs", "pub struct Health;"),
+            (
+                "actors/enemy.rs",
+                "pub struct Enemy;\npub fn health() -> super::health::Health { super::health::Health }\npub fn root_health() -> crate::scripts::health::Health { crate::scripts::health::Health }",
+            ),
+            ("type.rs", "pub struct Keyword;"),
+            ("HealthView.rs", "pub struct HealthView;"),
+            ("match/type.rs", "pub struct NestedKeyword;"),
+            ("bad-name.rs", "pub struct Legacy;"),
+            ("conflict.rs", "pub struct Conflict;"),
+            ("conflict/child.rs", "pub struct Child;"),
+            ("r#same.rs", "pub struct RawSame;"),
+            ("same.rs", "pub struct Same;"),
+        ];
+        for (path, body) in sources {
+            let path = scripts.join(path);
+            std::fs::create_dir_all(path.parent().expect("script parent")).expect("directory");
+            std::fs::write(path, format!("#[script(base = Node)]\n{body}\n")).expect("script");
+        }
+        let report = sync_script_index(&project.0, &project.package()).expect("index");
+        let index = std::fs::read_to_string(report.index_path).expect("generated module");
+        assert!(index.contains("pub(crate) mod r#type;"));
+        assert!(index.contains("`bad-name` is not a Rust module name"));
+        assert!(index.contains("conflicting Rust import path `conflict`"));
+        assert!(index.contains("conflicting Rust import path `same`"));
+        assert!(!index.contains("#[deprecated"));
+
+        // Compile the generated module graph without the SDK; macro expansion is covered by SDK tests.
+        for (path, body) in sources {
+            std::fs::write(scripts.join(path), body).expect("plain Rust script body");
+        }
+        let source = r#"
+            #![deny(warnings)]
+            #![allow(dead_code)]
+            extern crate self as godot_rs;
+            #[macro_export]
+            macro_rules! script_module {
+                ($($script:path => ($path:literal, $uid:literal),)*) => {
+                    fn validate_script_types() { $(let _: Option<$script> = None;)* }
+                };
+            }
+            mod scripts;
+            fn validate_readable_paths() {
+                let _: scripts::health::Health = scripts::player::health();
+                let _: scripts::actors::health::Health = scripts::actors::enemy::health();
+                let _: scripts::health::Health = scripts::actors::enemy::root_health();
+                let _: scripts::r#type::Keyword = scripts::r#type::Keyword;
+                let _: scripts::HealthView::HealthView = scripts::HealthView::HealthView;
+                let _: scripts::r#match::r#type::NestedKeyword = scripts::r#match::r#type::NestedKeyword;
+            }
+        "#;
+        let root = project.0.join("src/lib.rs");
+        std::fs::write(&root, source).expect("compilation harness");
+        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let output = std::process::Command::new(compiler)
+            .args([
+                "--crate-name",
+                "script_imports",
+                "--crate-type",
+                "lib",
+                "--edition",
+                "2024",
+            ])
+            .arg(&root)
+            .arg("--out-dir")
+            .arg(&project.0)
+            .output()
+            .expect("run Rust compiler");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

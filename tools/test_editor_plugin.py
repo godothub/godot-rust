@@ -91,8 +91,183 @@ ERROR_PATTERNS = (
     re.compile(r"Parse Error:", re.IGNORECASE),
     re.compile(r"Failed to load script", re.IGNORECASE),
     re.compile(r"Invalid plugin", re.IGNORECASE),
+    re.compile(r"ObjectDB instances? (?:(?:was|were) )?leaked at exit", re.IGNORECASE),
+    re.compile(r"resources still in use at exit", re.IGNORECASE),
 )
 EDITOR_FLOW_TIMEOUT_SECONDS = 300
+COMPONENT_MARKER = "GODOT_RUST_EDITOR_COMPONENTS_PASSED"
+COMPONENT_TEST_SCRIPT = '''\
+@tool
+extends EditorPlugin
+
+const SourceMonitor = preload("res://addons/godot-rust/source_monitor.gd")
+const DiagnosticsPanel = preload("res://addons/godot-rust/diagnostics_panel.gd")
+const RustPlugin = preload("res://addons/godot-rust/plugin.gd")
+const RustSyntaxHighlighter = preload("res://addons/godot-rust/syntax_highlighter.gd")
+
+class PendingRequest:
+    extends RefCounted
+
+    var running := true
+
+    func is_running() -> bool:
+        return running
+
+var cancellation_requested := false
+
+
+func _enter_tree() -> void:
+    call_deferred("_run")
+
+
+func _run() -> void:
+    for _frame in 5:
+        await get_tree().process_frame
+    if not _verify_syntax_highlighter():
+        return
+    var monitor = SourceMonitor.new()
+    add_child(monitor)
+    for path in [
+        "res://src/owned/mod.rs",
+        "res://src/empty/mod.rs",
+        "res://src/header_prefix/mod.rs",
+    ]:
+        if not monitor._is_tracked_path(path):
+            _fail("User-owned Rust module is excluded from monitoring: " + path)
+            return
+    for path in ["res://src/generated/mod.rs", "res://src/generated_crlf/mod.rs"]:
+        if monitor._is_tracked_path(path):
+            _fail("Generated script index would retrigger automatic checks")
+            return
+    monitor.queue_free()
+
+    var panel = DiagnosticsPanel.new()
+    add_control_to_bottom_panel(panel, "Rust component test")
+    # Godot 4.4 schedules bottom-panel focus/scroll updates for a later frame.
+    for _frame in 2:
+        await get_tree().process_frame
+    panel.show_cargo_report("Rust check", {
+        "success": true,
+        "diagnostics": [{"level": "warning", "message": "test diagnostic"}],
+    })
+    if panel._tree.get_root().get_first_child() == null:
+        _fail("Diagnostic fixture did not populate the real panel")
+        return
+    panel.set_running("Rust build")
+    var running_status: String = panel._status_label.text
+    panel._clear_button.pressed.emit()
+    if panel._tree.get_root().get_first_child() != null:
+        _fail("Clear did not remove the diagnostic rows")
+        return
+    if (
+        panel._cancel_button.disabled
+        or not panel._check_button.disabled
+        or not panel._build_button.disabled
+        or panel._status_label.text != running_status
+    ):
+        _fail("Clearing diagnostics changed the active operation controls")
+        return
+    panel.cancel_requested.connect(_on_cancel_requested)
+    panel._cancel_button.pressed.emit()
+    if not cancellation_requested:
+        _fail("The active build could not be cancelled after clearing diagnostics")
+        return
+    panel.set_status("Finished")
+    panel._clear_button.pressed.emit()
+    if panel._check_button.disabled or not panel._cancel_button.disabled:
+        _fail("Clearing idle diagnostics changed the available actions")
+        return
+    var plugin = RustPlugin.new()
+    plugin._diagnostics_panel = panel
+    var request = PendingRequest.new()
+    plugin._build_process = request
+    panel.set_running("Rust build")
+    plugin._show_toolchain_repair()
+    if panel._cancel_button.disabled or not panel._build_button.disabled:
+        plugin.free()
+        _fail("A rejected tool action changed the active build controls")
+        return
+    plugin._set_workflow_status("Opened a diagnostic source")
+    if panel._cancel_button.disabled or not panel._check_button.disabled:
+        plugin.free()
+        _fail("An informational status changed the active build controls")
+        return
+    request.running = false
+    panel.set_running("Native reload commit")
+    plugin._request_finished("Native reload commit", {"ok": true, "result": {}}, "")
+    if (
+        panel._check_button.disabled
+        or panel._build_button.disabled
+        or not panel._cancel_button.disabled
+    ):
+        plugin.free()
+        _fail("A successful service response left the Rust panel busy")
+        return
+    plugin.free()
+    for _frame in 2:
+        await get_tree().process_frame
+    remove_control_from_bottom_panel(panel)
+    panel.queue_free()
+    await get_tree().process_frame
+    while get_editor_interface().get_resource_filesystem().is_scanning():
+        await get_tree().process_frame
+    print("GODOT_RUST_EDITOR_COMPONENTS_PASSED")
+    get_tree().quit()
+
+
+func _on_cancel_requested() -> void:
+    cancellation_requested = true
+
+
+func _verify_syntax_highlighter() -> bool:
+    var editor := CodeEdit.new()
+    var highlighter = RustSyntaxHighlighter.new()
+    var buffer_id: int = highlighter._buffer.get_instance_id()
+    editor.syntax_highlighter = highlighter
+    editor.text = 'fn callback() { "text"; /* note\\ncontinued */ let value = 42; }'
+    var colors: Dictionary = highlighter.get_line_syntax_highlighting(0)
+    var settings := get_editor_interface().get_editor_settings()
+    var prefix := "text_editor/theme/highlighting/"
+    var failure := ""
+    if _color_at(colors, 0) != settings.get_setting(prefix + "keyword_color"):
+        failure = "Rust keywords did not use the editor keyword color"
+    elif _color_at(colors, 16) != settings.get_setting(prefix + "string_color"):
+        failure = "Rust string contents did not use the editor string color"
+    elif _color_at(highlighter.get_line_syntax_highlighting(1), 0) != settings.get_setting(prefix + "comment_color"):
+        failure = "Rust multiline comment state was not preserved"
+    editor.text = 'let value = 42;\\nfn callback() {}'
+    if _color_at(highlighter.get_line_syntax_highlighting(1), 0) != settings.get_setting(prefix + "keyword_color"):
+        failure = "Editing Rust source retained stale multiline highlighting"
+    var alternate_color := Color(0.12, 0.34, 0.56)
+    var original_color: Color = settings.get_setting(prefix + "keyword_color")
+    settings.set_setting(prefix + "keyword_color", alternate_color)
+    highlighter.update_cache()
+    if _color_at(highlighter.get_line_syntax_highlighting(1), 0) != alternate_color:
+        failure = "Rust highlighting did not refresh after the editor theme changed"
+    settings.set_setting(prefix + "keyword_color", original_color)
+    editor.free()
+    highlighter = null
+    if is_instance_id_valid(buffer_id):
+        failure = "Rust syntax highlighter leaked its off-tree text buffer"
+    if not failure.is_empty():
+        _fail(failure)
+        return false
+    return true
+
+
+func _color_at(colors: Dictionary, column: int) -> Variant:
+    var color: Variant = null
+    for start in colors:
+        if int(start) > column:
+            break
+        color = colors[start].get("color")
+    return color
+
+
+func _fail(message: String) -> void:
+    push_error(message)
+    get_tree().quit(1)
+'''
 
 
 def discover_godot(explicit: str | None) -> str | None:
@@ -225,6 +400,11 @@ enabled=PackedStringArray("godot-rust")
 
 
 def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
+    component_output = ""
+    if scenario in ("flow", "components"):
+        component_output = run_component_test(godot)
+    if scenario == "components":
+        return component_output
     if not no_build:
         stage_example_plugin(release=False)
     runtime_returncode = 0
@@ -294,6 +474,66 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
             f"editor_status={completed.returncode}, "
             f"runtime_status={runtime_returncode}, evidence={errors}\n{output}"
         )
+    return component_output + output
+
+
+def run_component_test(godot: str) -> str:
+    """Exercise the shipped GDScript controls without loading Rust or Cargo."""
+    with tempfile.TemporaryDirectory(
+        prefix="godot-rust-editor-components-"
+    ) as temporary:
+        project = Path(temporary)
+        addon = project / "addons" / "godot-rust"
+        addon.mkdir(parents=True)
+        for source in (EXAMPLE / "addons" / "godot-rust").glob("*.gd"):
+            shutil.copy2(source, addon / source.name)
+        (project / "project.godot").write_text(
+            '[application]\nconfig/name="Rust editor component tests"\n'
+            '\n[editor_plugins]\nenabled=PackedStringArray("editor-components")\n',
+            encoding="utf-8",
+        )
+        fixture = project / "addons" / "editor-components"
+        fixture.mkdir()
+        (fixture / "plugin.cfg").write_text(
+            '[plugin]\nname="Editor Components"\n'
+            'description="Rust editor behavior tests"\n'
+            'author="godot-rust"\nversion="1.0"\nscript="plugin.gd"\n',
+            encoding="utf-8",
+        )
+        (fixture / "plugin.gd").write_text(
+            COMPONENT_TEST_SCRIPT, encoding="utf-8"
+        )
+        for directory, source in {
+            "owned": "pub fn user_module() {}\n",
+            "empty": "",
+            "header_prefix": "// @generated by godot-rust; user-maintained module\n",
+            "generated": (
+                "// @generated by godot-rust; "
+                "script files themselves are user-owned.\n"
+            ),
+            "generated_crlf": (
+                "// @generated by godot-rust; "
+                "script files themselves are user-owned.\r\n"
+            ),
+        }.items():
+            module = project / "src" / directory / "mod.rs"
+            module.parent.mkdir(parents=True)
+            module.write_bytes(source.encode("utf-8"))
+        completed = subprocess.run(
+            [godot, "--headless", "--editor", "--path", str(project)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    output = completed.stdout + completed.stderr
+    errors = output_errors(output, (COMPONENT_MARKER,))
+    if completed.returncode != 0 or errors:
+        raise RuntimeError(
+            "Godot editor component test failed: "
+            f"status={completed.returncode}, evidence={errors}\n{output}"
+        )
     return output
 
 
@@ -303,7 +543,7 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument(
         "--scenario",
-        choices=("flow", "diagnostics", "setup", "initialize"),
+        choices=("flow", "diagnostics", "setup", "initialize", "components"),
         default="flow",
     )
     parser.add_argument(
@@ -322,6 +562,13 @@ def main() -> int:
         return 1
     try:
         output = run_editor_test(godot, args.no_build, args.scenario)
+    except subprocess.TimeoutExpired as error:
+        print(f"Godot editor plugin test timed out: {error}", file=sys.stderr)
+        for captured in (error.stdout, error.stderr):
+            if captured:
+                text = captured.decode("utf-8", errors="replace") if isinstance(captured, bytes) else captured
+                print(text, file=sys.stderr)
+        return 1
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"Godot editor plugin test failed: {error}", file=sys.stderr)
         return 1

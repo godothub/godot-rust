@@ -384,7 +384,14 @@ func _verify_rust_editor_contract() -> bool:
 		or comment_color == identifier_color
 	):
 		code_edit.text = original_source
-		_fail("Godot did not color Rust keywords, strings, and comments")
+		_fail(
+			"Godot did not color Rust keywords, strings, and comments "
+			+ "(highlighter=%s, keyword=%s, identifier=%s, string=%s, comment=%s, transitions=%s)"
+			% [
+				highlighter.get_class(), keyword_color, identifier_color,
+				string_color, comment_color, highlighting,
+			]
+		)
 		return false
 	print("GODOT_RUST_EDITOR_LANGUAGE_CONTRACT")
 	print("GODOT_RUST_EDITOR_HIGHLIGHTING_READY")
@@ -504,11 +511,7 @@ func _verify_signal_callback_generation() -> bool:
 	for _frame in 3:
 		await get_tree().process_frame
 
-	var signal_tree: Tree
-	for child in connection_dock.get_children():
-		if child is Tree:
-			signal_tree = child as Tree
-			break
+	var signal_tree := _find_connection_node(connection_dock, "Tree") as Tree
 	if signal_tree == null:
 		_fail("Godot's ConnectionsDock has no signal tree")
 		return false

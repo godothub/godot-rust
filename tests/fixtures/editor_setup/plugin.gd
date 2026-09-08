@@ -37,10 +37,13 @@ func _run_setup_flow() -> void:
 		_fail("godot-rust modified the package before setup was confirmed")
 		return
 
-	for child in _godot_rust_plugin.get_children():
-		if child is ConfirmationDialog:
-			child.hide()
-	_godot_rust_plugin.call(&"_configure_project")
+	var configure_dialog: ConfirmationDialog = _godot_rust_plugin.get(
+		"_configure_dialog"
+	)
+	if configure_dialog == null or not configure_dialog.visible:
+		_fail("godot-rust did not ask for confirmation before configuring Cargo")
+		return
+	configure_dialog.get_ok_button().pressed.emit()
 	var setup_deadline := Time.get_ticks_msec() + 30_000
 	while Time.get_ticks_msec() < setup_deadline:
 		if (

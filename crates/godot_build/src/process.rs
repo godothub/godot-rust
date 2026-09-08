@@ -39,6 +39,7 @@ fn run_command_with_cancel_file(
     let stdout_reader = std::thread::spawn(move || read_bounded(stdout));
     let stderr_reader = std::thread::spawn(move || read_bounded(stderr));
 
+    let mut exit_status = None;
     let status = loop {
         if cancellation_requested(cancel_file) {
             terminate_process_tree(&mut child);
@@ -48,8 +49,8 @@ fn run_command_with_cancel_file(
             return Err(format!("{description} was cancelled"));
         }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Ok(Some(status)) => exit_status = Some(status),
+            Ok(None) => {}
             Err(error) => {
                 terminate_process_tree(&mut child);
                 let _ = child.wait();
@@ -58,6 +59,12 @@ fn run_command_with_cancel_file(
                 return Err(format!("could not wait for {description}: {error}"));
             }
         }
+        if stdout_reader.is_finished() && stderr_reader.is_finished() {
+            if let Some(status) = exit_status {
+                break status;
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
     };
     let (stdout, stdout_truncated) = stdout_reader
         .join()
@@ -130,11 +137,14 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     let _ = unsafe { kill(-process_id, SIGTERM) };
     let deadline = Instant::now() + TERMINATION_GRACE;
     while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
-            Err(_) => break,
+        let _ = child.try_wait();
+        // The group leader can exit while a descendant still owns an output
+        // pipe. Wait for the whole group before joining the pipe readers.
+        // SAFETY: Signal zero only checks the private process group's existence.
+        if unsafe { kill(-process_id, 0) } != 0 {
+            return;
         }
+        std::thread::sleep(POLL_INTERVAL);
     }
     // SAFETY: The same private child process group is force-stopped only
     // after its graceful termination window expires.
@@ -167,16 +177,17 @@ mod tests {
     fn ordinary_commands_preserve_stdout_stderr_and_status() {
         let mut command = if cfg!(windows) {
             let mut command = Command::new("cmd");
-            command.args(["/C", "echo output"]);
+            command.args(["/C", "echo output & echo error 1>&2 & exit /B 7"]);
             command
         } else {
             let mut command = Command::new("sh");
-            command.args(["-c", "printf output"]);
+            command.args(["-c", "printf output; printf error >&2; exit 7"]);
             command
         };
         let output = run_command(&mut command, "test command").expect("command output");
-        assert!(output.status.success());
+        assert_eq!(output.status.code(), Some(7));
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "output");
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "error");
     }
 
     #[test]
@@ -207,5 +218,55 @@ mod tests {
         let _ = std::fs::remove_file(&marker);
         assert!(error.contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_kills_descendants_after_the_group_leader_exits() {
+        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "godot-rust-cancel-descendant-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("test directory");
+        let ready = directory.join("ready");
+        let marker = directory.join("cancel");
+        let marker_writer = marker.clone();
+        let ready_reader = ready.clone();
+        let writer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !ready_reader.exists() && Instant::now() < deadline {
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            std::fs::write(marker_writer, b"cancel\n").expect("cancellation marker");
+        });
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "(trap '' TERM; printf ready > \"$1\"; exec sleep 6) & wait",
+                "sh",
+            ])
+            .arg(&ready);
+        let started = Instant::now();
+        let result = run_command_with_cancel_file(&mut command, "process tree", Some(&marker));
+        let elapsed = started.elapsed();
+        writer.join().expect("marker writer");
+        let descendant_started = ready.exists();
+        let _ = std::fs::remove_dir_all(directory);
+
+        assert!(
+            descendant_started,
+            "descendant must install its SIGTERM handler"
+        );
+        assert!(
+            result
+                .expect_err("cancelled process tree")
+                .contains("cancelled")
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancellation took {elapsed:?}"
+        );
     }
 }

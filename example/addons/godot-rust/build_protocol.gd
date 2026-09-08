@@ -124,10 +124,6 @@ static func parse_response(stdout: String, stderr: String) -> Dictionary:
 	}
 
 
-static func output_within_limit(stdout_bytes: int, stderr_bytes: int) -> bool:
-	return stdout_bytes + stderr_bytes <= OUTPUT_LIMIT
-
-
 static func output_limit_error() -> String:
 	return "exceeded the %d-byte output safety limit" % OUTPUT_LIMIT
 

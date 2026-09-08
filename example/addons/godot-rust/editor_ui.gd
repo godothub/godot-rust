@@ -24,7 +24,7 @@ const ZH_CN := {
 	"Preview and apply a machine-applicable suggestion from rustc.": "预览并应用 rustc 提供的可自动执行建议。",
 	"Restore files changed by the last Rust quick fix.": "恢复上一次 Rust 快速修复修改的文件。",
 	"Clear Rust diagnostics from this panel.": "清除此面板中的 Rust 诊断。",
-	"Create a redacted ZIP with tool versions and bounded diagnostics. Project source, environment variables, and absolute paths are excluded.": "创建包含工具版本和有限诊断信息的脱敏 ZIP；不会包含项目源码、环境变量值或绝对路径。",
+	"Create a ZIP with tool versions and diagnostic summaries. Project and home directory paths are redacted; diagnostic messages are included.": "创建包含工具版本和诊断摘要的 ZIP。项目目录和用户主目录路径会被遮盖；诊断消息会包含在内。",
 	"Install a supported Rust standard-library target through rustup. Platform SDKs and linkers are never modified automatically.": "通过 rustup 安装受支持的 Rust 标准库目标；不会自动修改平台 SDK 或链接器。",
 	"Level": "级别",
 	"Code": "代码",

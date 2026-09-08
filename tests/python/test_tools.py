@@ -961,7 +961,8 @@ class StageHostTests(unittest.TestCase):
             )[0],
         )
 
-    def test_godot_load_stages_a_clean_isolated_project(self):
+    @mock.patch.object(platform, "machine", return_value="x86_64")
+    def test_godot_load_stages_a_clean_isolated_project(self, _machine):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             host_library = root / stage_host.library_name(sys.platform)
@@ -1281,7 +1282,8 @@ class StageHostTests(unittest.TestCase):
             )
             build = project / "android/build"
             self.assertEqual((build / "gradlew").read_bytes(), b"#!/bin/sh\n")
-            self.assertTrue((build / "gradlew").stat().st_mode & stat.S_IXUSR)
+            if os.name == "posix":
+                self.assertTrue((build / "gradlew").stat().st_mode & stat.S_IXUSR)
             self.assertEqual((build / ".gdignore").read_text(), "\n")
             digest = hashlib.md5(
                 template.read_bytes(),

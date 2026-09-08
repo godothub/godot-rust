@@ -628,8 +628,8 @@ class StageHostTests(unittest.TestCase):
         self.assertIn("platform: windows-x86_64", workflow)
         self.assertIn("platform: android-arm64", workflow)
         self.assertIn("name: Build web-godot-${{ matrix.godot }}", workflow)
-        self.assertIn('gh release create "${{ inputs.version }}"', workflow)
-        self.assertIn('--title "${{ inputs.version }}"', workflow)
+        self.assertIn('gh release create "${RELEASE_VERSION}"', workflow)
+        self.assertIn('--title "${RELEASE_VERSION}"', workflow)
         self.assertIn("--notes-file dist/release-notes.md", workflow)
         self.assertIn("assemble-release:\n    name: Assemble release package", workflow)
         self.assertIn("publish-crates:", workflow)
@@ -638,6 +638,10 @@ class StageHostTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("CARGO_REGISTRY_TOKEN", workflow)
+        self.assertIn(
+            "CARGO_REGISTRY_TOKEN: ${{ secrets.RUST_TOKEN }}",
+            workflow,
+        )
         self.assertIn("- publish-crates", workflow)
         self.assertLess(
             workflow.index("- name: Verify downloaded release package"),
@@ -1593,6 +1597,28 @@ class StageHostTests(unittest.TestCase):
 
 
 class ReleaseTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("sh"), "requires a POSIX shell")
+    def test_release_version_input_cannot_execute_shell_commands(self):
+        workflow = (ROOT / ".github/workflows/publish-release.yml").read_text()
+        validation_step = next(
+            line.strip().removeprefix("run: ")
+            for line in workflow.splitlines()
+            if "run: python3 tools/validate_release.py" in line
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "injected"
+            result = subprocess.run(
+                ["sh", "-c", validation_step],
+                cwd=ROOT,
+                env={**os.environ, "RELEASE_VERSION": f'0.9.0$(touch "{marker}")'},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("canonical numeric", result.stderr)
+            self.assertFalse(marker.exists())
+
     def test_release_zip_path_policy_has_stable_properties(self):
         accepted = (
             "addons/godot-rust/plugin.cfg",

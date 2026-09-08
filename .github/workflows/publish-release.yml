@@ -16,6 +16,7 @@ permissions:
   contents: read
 
 env:
+  RELEASE_VERSION: ${{ inputs.version }}
   RUST_RELEASE_TOOLCHAIN: "1.85.0"
   WEB_RUST_TOOLCHAIN: nightly-2025-02-20
 
@@ -52,11 +53,11 @@ jobs:
       - name: Install RustSec audit tool
         run: cargo install cargo-audit --version 0.22.1 --locked
       - name: Validate version and changelog
-        run: python3 tools/validate_release.py --version "${{ inputs.version }}"
+        run: python3 tools/validate_release.py --version "${RELEASE_VERSION}"
       - name: Ensure exact release tag does not exist
         run: |
-          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
-            echo "Tag already exists: ${{ inputs.version }}"
+          if git show-ref --verify --quiet "refs/tags/${RELEASE_VERSION}"; then
+            echo "Tag already exists: ${RELEASE_VERSION}"
             exit 1
           fi
       - name: Run policy checks
@@ -204,7 +205,7 @@ jobs:
             --ios-device \
               target/aarch64-apple-ios/release/libgodot_host.dylib \
             --ios-simulator dist/apple-input/ios-simulator-host.dylib \
-            --version "${{ inputs.version }}" \
+            --version "${RELEASE_VERSION}" \
             --output dist/bin/apple/godot_host.xcframework
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -429,14 +430,14 @@ jobs:
       - name: Read release notes and assemble plugin
         run: |
           python3 tools/validate_release.py \
-            --version "${{ inputs.version }}" \
+            --version "${RELEASE_VERSION}" \
             --notes-output dist/release-notes.md
           python3 tools/assemble_release.py \
-            --version "${{ inputs.version }}" \
+            --version "${RELEASE_VERSION}" \
             --binaries dist/binaries \
             --source-commit "${{ github.sha }}" \
-            --sbom-output "dist/godot-rust-${{ inputs.version }}.cyclonedx.json" \
-            --output "dist/godot-rust-${{ inputs.version }}.zip"
+            --sbom-output "dist/godot-rust-${RELEASE_VERSION}.cyclonedx.json" \
+            --output "dist/godot-rust-${RELEASE_VERSION}.zip"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-package
@@ -465,12 +466,12 @@ jobs:
           rustup default "${RUST_RELEASE_TOOLCHAIN}"
       - name: Publish SDK crates in dependency order
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.RUST_TOKEN }}
         run: |
           test -n "${CARGO_REGISTRY_TOKEN}"
           for crate in godot_api godot_macro godot_rs; do
             python3 tools/publish_crate.py \
-              --version "${{ inputs.version }}" \
+              --version "${RELEASE_VERSION}" \
               "${crate}"
           done
 
@@ -499,8 +500,8 @@ jobs:
       - name: Verify downloaded release package
         run: >-
           python3 tools/verify_release_package.py
-          --version "${{ inputs.version }}"
-          "dist/godot-rust-${{ inputs.version }}.zip"
+          --version "${RELEASE_VERSION}"
+          "dist/godot-rust-${RELEASE_VERSION}.zip"
       - name: Attest release provenance
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
@@ -514,10 +515,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ inputs.version }}" \
-            "dist/godot-rust-${{ inputs.version }}.zip" \
+          gh release create "${RELEASE_VERSION}" \
+            "dist/godot-rust-${RELEASE_VERSION}.zip" \
             --target "${{ github.sha }}" \
-            --title "${{ inputs.version }}" \
+            --title "${RELEASE_VERSION}" \
             --notes-file dist/release-notes.md
       - name: Verify published release
         env:

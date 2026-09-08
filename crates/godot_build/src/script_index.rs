@@ -73,6 +73,7 @@ pub fn sync_script_index(
             project_root.as_ref().display()
         )
     })?;
+    let module_name = module_name(&target.src_path, scripts_path)?;
     validate_module_layout(scripts_path, target)?;
     ensure_directory(scripts_path, "Rust script directory")?;
     let scripts_path = scripts_path.canonicalize().map_err(|error| {
@@ -146,7 +147,6 @@ pub fn sync_script_index(
             "generated Rust script module index",
         )?;
     }
-    let module_name = module_name(target, &scripts_path)?;
     Ok(ScriptIndexReport {
         scripts_path,
         index_path,
@@ -157,20 +157,7 @@ pub fn sync_script_index(
 }
 
 fn validate_module_layout(scripts_path: &Path, target: &CargoTargetModel) -> Result<(), String> {
-    let target_parent = target.src_path.parent().ok_or_else(|| {
-        format!(
-            "Cargo cdylib source has no parent directory: {}",
-            target.src_path.display()
-        )
-    })?;
-    if scripts_path.parent() != Some(target_parent) {
-        return Err(format!(
-            "Rust script directory `{}` must be next to the selected crate root `{}`",
-            scripts_path.display(),
-            target.src_path.display()
-        ));
-    }
-    let module_name = module_name(target, scripts_path)?;
+    let module_name = module_name(&target.src_path, scripts_path)?;
     let metadata = std::fs::metadata(&target.src_path).map_err(|error| {
         format!(
             "could not inspect selected crate root `{}`: {error}",
@@ -195,19 +182,81 @@ fn validate_module_layout(scripts_path: &Path, target: &CargoTargetModel) -> Res
             target.src_path.display()
         )
     })?;
-    let declared = syntax.items.iter().any(
-        |item| matches!(item, Item::Mod(module) if module.ident == module_name && module.content.is_none()),
-    );
-    if !declared {
-        return Err(format!(
+    let module = syntax.items.iter().find_map(|item| match item {
+        Item::Mod(module) if module.ident == module_name => Some(module),
+        _ => None,
+    });
+    let module = module.ok_or_else(|| {
+        format!(
             "selected crate root `{}` must declare `mod {module_name};` so Cargo compiles Godot Rust scripts",
             target.src_path.display()
+        )
+    })?;
+    validate_module_declaration(module, &target.src_path, scripts_path)?;
+    Ok(())
+}
+
+pub(crate) fn validate_module_declaration(
+    module: &syn::ItemMod,
+    crate_root: &Path,
+    scripts_path: &Path,
+) -> Result<(), String> {
+    let module_name = &module.ident;
+    if module.content.is_some() {
+        return Err(format!(
+            "Rust crate root `{}` already defines an inline `{module_name}` module",
+            crate_root.display()
         ));
+    }
+    for attribute in &module.attrs {
+        if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
+            return Err(format!(
+                "Rust script module `{module_name}` in `{}` must be unconditional; \
+                 `cfg` and `cfg_attr` attributes are not supported",
+                crate_root.display()
+            ));
+        }
+        if attribute.path().is_ident("path") {
+            let explicit_path = match &attribute.meta {
+                syn::Meta::NameValue(value) => match &value.value {
+                    syn::Expr::Lit(value) => match &value.lit {
+                        syn::Lit::Str(value) => Some(value.value()),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+            let expected = scripts_path.join("mod.rs");
+            let resolved =
+                explicit_path.and_then(|path| crate_root.parent().map(|parent| parent.join(path)));
+            if resolved.as_deref() != Some(expected.as_path()) {
+                return Err(format!(
+                    "Rust script module `{module_name}` in `{}` has a `path` attribute \
+                     that does not select `{}`",
+                    crate_root.display(),
+                    expected.display()
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-fn module_name(target: &CargoTargetModel, scripts_path: &Path) -> Result<String, String> {
+pub(crate) fn module_name(crate_root: &Path, scripts_path: &Path) -> Result<String, String> {
+    let target_parent = crate_root.parent().ok_or_else(|| {
+        format!(
+            "Cargo cdylib source has no parent directory: {}",
+            crate_root.display()
+        )
+    })?;
+    if scripts_path.parent() != Some(target_parent) {
+        return Err(format!(
+            "Rust script directory `{}` must be next to the selected crate root `{}`",
+            scripts_path.display(),
+            crate_root.display()
+        ));
+    }
     let name = scripts_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -221,9 +270,22 @@ fn module_name(target: &CargoTargetModel, scripts_path: &Path) -> Result<String,
         format!(
             "Rust script directory `{}` must end in a valid Rust module name next to `{}`",
             scripts_path.display(),
-            target.src_path.display()
+            crate_root.display()
         )
     })?;
+    let competing_module = scripts_path.with_extension("rs");
+    if competing_module.try_exists().map_err(|error| {
+        format!(
+            "could not inspect Rust module `{}`: {error}",
+            competing_module.display()
+        )
+    })? {
+        return Err(format!(
+            "Rust script directory `{}` conflicts with existing module `{}`",
+            scripts_path.display(),
+            competing_module.display()
+        ));
+    }
     Ok(name.to_owned())
 }
 
@@ -592,5 +654,28 @@ mod tests {
         assert!(parse_resource_uid_text("uid://aa").is_none());
         assert!(parse_resource_uid_text("uid://z").is_none());
         assert!(parse_resource_uid_text("uid://9").is_none());
+    }
+
+    #[test]
+    fn script_index_requires_an_unconditional_module_using_the_generated_index() {
+        let project = TempProject::new();
+        let index_path = project.0.join("src/scripts/mod.rs");
+        for source in [
+            "#[path = \"elsewhere.rs\"] mod scripts;\n",
+            "#[cfg(any())] mod scripts;\n",
+            "#[cfg_attr(feature = \"other\", path = \"elsewhere.rs\")] mod scripts;\n",
+        ] {
+            std::fs::write(project.0.join("src/lib.rs"), source).expect("crate root");
+            sync_script_index(&project.0, &project.package())
+                .expect_err("unsupported module declaration");
+            assert!(!index_path.exists());
+        }
+        std::fs::write(
+            project.0.join("src/lib.rs"),
+            "#[path = \"scripts/mod.rs\"] mod scripts;\n",
+        )
+        .expect("explicit module path");
+        sync_script_index(&project.0, &project.package()).expect("valid explicit module path");
+        assert!(index_path.is_file());
     }
 }

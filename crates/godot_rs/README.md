@@ -1,9 +1,12 @@
 # godot_rs
 
-`godot_rs` is the public Rust scripting SDK used by the `godot-rust` Godot
-editor plugin. It provides typed Godot classes, properties, methods, signals,
-lifecycle callbacks, tasks, and project-module integration for both `script`
-and `extension` projects.
+[Project repository](https://github.com/godothub/godot-rust)
+
+`godot_rs` is the public Rust scripting SDK used by the
+[`godot-rust`](https://github.com/godothub/godot-rust) Godot editor plugin. It
+provides typed Godot classes, properties, methods, signals, lifecycle callbacks,
+tasks, and project-module integration for both `script` and `extension`
+projects.
 
 Add this crate to the Cargo project managed by the plugin:
 

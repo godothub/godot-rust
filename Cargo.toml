@@ -17,7 +17,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/godothub/godot-rust"
-homepage = "https://github.com/godothub/godot-rust"
+homepage = "https://godothub.com"
 
 [workspace.dependencies]
 bindgen = { version = "0.72.1", default-features = false, features = ["runtime"] }

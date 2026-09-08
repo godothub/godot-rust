@@ -1,7 +1,7 @@
 use crate::{
     BuildReceiptSummary, CargoPackageModel, CargoProjectModel, CargoTaskKind, CargoTaskReport,
-    PublishedGeneration, ScriptIndexReport, inspect_cargo_project, record_build_receipt,
-    run_package_cargo_task, sync_configured_script_index,
+    PublishedGeneration, ScriptIndexReport, inspect_cargo_project, run_package_cargo_task,
+    sync_configured_script_index,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -44,6 +44,11 @@ pub fn build_and_publish(
         }
     })?;
     let script_index = sync_configured_script_index(project_root, &package)?;
+    let stable_scripts = package
+        .scripts_path
+        .as_deref()
+        .map(crate::build_receipt::collect_script_inventory)
+        .transpose()?;
     let cargo_report =
         run_package_cargo_task(project_root, CargoTaskKind::Build, &package, Some(&cargo))?;
     if !cargo_report.success {
@@ -80,38 +85,35 @@ pub fn build_and_publish(
             receipt_issue: None,
         });
     }
-    if let Some(path) = crate::build_receipt::verify_snapshots(&stable_inputs)? {
-        return Err(format!(
-            "Rust build input changed while Cargo was confirming the project module: {}. The \
-             candidate was not published; build again after edits finish",
-            path.display()
-        ));
-    }
+    verify_build_inputs(
+        &stable_inputs,
+        stable_scripts.as_ref(),
+        "Cargo confirmation",
+    )?;
     let artifact = exact_project_artifact(&package, &confirmed_report)?;
     let publication = crate::publication::publish_validated_generation_guarded(
         project_root,
         artifact,
         &validator,
-        || match crate::build_receipt::verify_snapshots(&stable_inputs)? {
-            Some(path) => Err(format!(
-                "Rust build input changed while the project module was being validated: {}. The \
-                 candidate was not activated; build again after edits finish",
-                path.display()
-            )),
-            None => Ok(()),
-        },
+        || verify_build_inputs(&stable_inputs, stable_scripts.as_ref(), "module validation"),
     )
     .map(Some)?;
-    let (receipt, receipt_issue) = match record_build_receipt(
+    let (receipt, receipt_issue) = match crate::build_receipt::record_build_receipt_guarded(
         project_root,
-        &project,
-        &package,
+        (&project, &package),
         artifact,
         publication
             .as_ref()
             .expect("successful publication is present"),
         &cargo,
         &validator,
+        || {
+            verify_build_inputs(
+                &stable_inputs,
+                stable_scripts.as_ref(),
+                "Build Receipt creation",
+            )
+        },
     ) {
         Ok(receipt) => (Some(receipt), None),
         Err(error) => (None, Some(error)),
@@ -125,6 +127,24 @@ pub fn build_and_publish(
         receipt,
         receipt_issue,
     })
+}
+
+fn verify_build_inputs(
+    inputs: &[crate::build_receipt::TrackedInput],
+    scripts: Option<&crate::build_receipt::ScriptInventory>,
+    phase: &str,
+) -> Result<(), String> {
+    let changed = crate::build_receipt::verify_snapshots(inputs)?.or(match scripts {
+        Some(scripts) => crate::build_receipt::verify_script_inventory(scripts)?,
+        None => None,
+    });
+    match changed {
+        Some(path) => Err(format!(
+            "Rust build input changed during {phase}: {}. Build again after edits finish",
+            path.display()
+        )),
+        None => Ok(()),
+    }
 }
 
 fn exact_project_artifact<'a>(

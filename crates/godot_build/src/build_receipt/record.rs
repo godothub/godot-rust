@@ -23,6 +23,26 @@ pub fn record_build_receipt(
     cargo: &OsStr,
     validator: &OsStr,
 ) -> Result<BuildReceiptSummary, String> {
+    record_build_receipt_guarded(
+        project_root,
+        (project, package),
+        artifact,
+        publication,
+        cargo,
+        validator,
+        || Ok(()),
+    )
+}
+
+pub(crate) fn record_build_receipt_guarded(
+    project_root: &Path,
+    (project, package): (&CargoProjectModel, &CargoPackageModel),
+    artifact: &Path,
+    publication: &PublishedGeneration,
+    cargo: &OsStr,
+    validator: &OsStr,
+    before_commit: impl FnOnce() -> Result<(), String>,
+) -> Result<BuildReceiptSummary, String> {
     let project_root = project_root.canonicalize().map_err(|error| {
         format!(
             "could not resolve Godot project root `{}`: {error}",
@@ -114,6 +134,7 @@ pub fn record_build_receipt(
     }
 
     let receipt_path = project_root.join(BUILD_RECEIPT_FILE);
+    before_commit()?;
     write_receipt(&receipt_path, &receipt)?;
     receipt.summary(receipt_path)
 }

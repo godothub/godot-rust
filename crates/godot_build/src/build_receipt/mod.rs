@@ -15,4 +15,8 @@ pub use verify::check_build_receipt;
 
 pub(crate) use candidates::collect_build_candidates;
 pub(crate) use dep_info::read_artifact_dep_info;
-pub(crate) use inputs::{snapshot_paths, verify_snapshots};
+pub(crate) use inputs::{
+    ScriptInventory, TrackedInput, collect_script_inventory, snapshot_paths,
+    verify_script_inventory, verify_snapshots,
+};
+pub(crate) use record::record_build_receipt_guarded;

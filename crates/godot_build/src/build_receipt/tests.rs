@@ -252,3 +252,89 @@ fn a_different_validator_cannot_reuse_the_receipt() {
     assert!(!status.fresh);
     assert_eq!(status.reason, BuildReceiptReason::ValidatorChanged);
 }
+
+#[test]
+fn receipt_cannot_resnapshot_edits_made_after_the_build() {
+    use crate::{
+        CargoPackageModel, CargoProjectModel, CargoTargetModel, EditorWorkflowConfig,
+        GodotRustMode, PublishedGeneration,
+    };
+
+    let project = ReceiptProject::new();
+    let original_receipt = std::fs::read(&project.receipt_path).expect("original receipt");
+    let stable_inputs = snapshot_paths([project.source.clone()]).expect("build input snapshot");
+    let previous = read_receipt(&project.receipt_path).expect("previous receipt");
+    let package = CargoPackageModel {
+        id: previous.payload.package_id,
+        name: previous.payload.package_name,
+        manifest_path: project.manifest.clone(),
+        workspace_default: true,
+        godot_rs_dependency: true,
+        godot_rust_enabled: true,
+        godot_rust_mode: Some(GodotRustMode::Script),
+        godot_api: None,
+        scripts_path: Some(project.scripts.clone()),
+        editor: EditorWorkflowConfig::default(),
+        script_mode_configured: true,
+        configuration_issues: Vec::new(),
+        cdylib_targets: vec![CargoTargetModel {
+            name: previous.payload.target_name,
+            src_path: project.source.clone(),
+        }],
+    };
+    let model = CargoProjectModel {
+        project_root: project.root.clone(),
+        workspace_root: project.root.clone(),
+        target_directory: project.root.join("target"),
+        packages: vec![package.clone()],
+        selected_package: Some(package.clone()),
+        selection_reason: None,
+        native_package: None,
+        issues: Vec::new(),
+        command: Vec::new(),
+    };
+    let publication = PublishedGeneration {
+        build_id: previous.payload.build_id,
+        module_path: project.module.clone(),
+        last_known_good_path: project.root.join(crate::LAST_KNOWN_GOOD_FILE),
+        reused: true,
+        validator_stdout: String::new(),
+        validator_stderr: String::new(),
+    };
+    let escaped_source = project
+        .source
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace(' ', "\\ ")
+        .replace('#', "\\#");
+    std::fs::write(
+        project.module.with_extension("d"),
+        format!("module: {escaped_source}\n"),
+    )
+    .expect("Cargo dependency information");
+    std::fs::write(&project.source, b"pub struct EditedPlayer;\n")
+        .expect("source edited after build");
+
+    let error = super::record::record_build_receipt_guarded(
+        &project.root,
+        (&model, &package),
+        &project.module,
+        &publication,
+        OsStr::new("cargo"),
+        project.validator.as_os_str(),
+        || {
+            if super::inputs::verify_snapshots(&stable_inputs)?.is_some() {
+                Err("source changed since the build".to_owned())
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("stale build cannot acquire a fresh receipt");
+    assert!(error.contains("source changed since the build"), "{error}");
+    assert_eq!(
+        std::fs::read(&project.receipt_path).expect("preserved receipt"),
+        original_receipt
+    );
+    assert!(!project.check().fresh);
+}

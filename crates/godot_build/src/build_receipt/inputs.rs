@@ -24,7 +24,7 @@ pub(super) enum InputState {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(super) struct ScriptInventory {
+pub(crate) struct ScriptInventory {
     pub root: PathBuf,
     pub entries: Vec<TrackedInput>,
 }
@@ -69,7 +69,7 @@ pub(crate) fn verify_snapshots(recorded: &[TrackedInput]) -> Result<Option<PathB
         .find_map(|(expected, actual)| (expected != &actual).then(|| expected.path.clone())))
 }
 
-pub(super) fn collect_script_inventory(root: &Path) -> Result<ScriptInventory, String> {
+pub(crate) fn collect_script_inventory(root: &Path) -> Result<ScriptInventory, String> {
     let root = root.canonicalize().map_err(|error| {
         format!(
             "could not resolve Rust script directory `{}`: {error}",
@@ -84,7 +84,7 @@ pub(super) fn collect_script_inventory(root: &Path) -> Result<ScriptInventory, S
     })
 }
 
-pub(super) fn verify_script_inventory(
+pub(crate) fn verify_script_inventory(
     recorded: &ScriptInventory,
 ) -> Result<Option<PathBuf>, String> {
     if !recorded.root.is_absolute() {
@@ -346,6 +346,19 @@ mod tests {
         assert_eq!(inventory.entries.len(), 2);
         assert_eq!(
             verify_script_inventory(&inventory).expect("inventory verification"),
+            None
+        );
+
+        let added_source = directory.0.join("enemy.rs");
+        std::fs::write(&added_source, b"pub struct Enemy;").expect("new script");
+        assert!(
+            verify_script_inventory(&inventory)
+                .expect("new script inventory")
+                .is_some()
+        );
+        std::fs::remove_file(&added_source).expect("remove new script");
+        assert_eq!(
+            verify_script_inventory(&inventory).expect("restored inventory"),
             None
         );
 

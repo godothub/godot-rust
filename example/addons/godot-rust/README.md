@@ -1,72 +1,47 @@
-# godot-rust addon
+# godot-rust
 
-This directory is the canonical release-package root for the `godot-rust`
-Godot plugin. Release automation copies this directory once and injects every
-supported desktop platform into `bin/<platform>/`. The resulting release is
-one installable ZIP whose root is `addons/godot-rust`. `GODOT_LICENSE.md`
-records the license for the official Godot API inputs used to generate the
-Rust interface files.
+Write Rust scripts in Godot, edit their properties in the Inspector, and export
+your game through Godot's familiar workflow.
 
-Each platform directory contains:
+## Get started
 
-- `godot_host` dynamic library;
-- `godot_build` executable;
-- `godot_module_check` executable.
+You need Godot 4.4–4.7, Rust 1.85 or newer with Cargo, and your platform's native
+compiler toolchain.
 
-The editor plugin keeps the project as a standard Cargo package. It monitors
-Rust inputs, coalesces rapid saves into one background Cargo Check, displays
-structured diagnostics in the Rust bottom panel, and runs a fail-closed
-foreground build before Godot starts the project. A content-verified Build
-Receipt skips Cargo when the Rust inputs, Cargo configuration, toolchain,
-packaged tools, and published module still match the last successful build.
-Missing, corrupt, or stale evidence falls back to the full build gate.
-Check/Build actions use the same packaged build service and the user's local
-Cargo toolchain. Godot's standard Node signal dialog can create typed Rust
-callbacks, and separate generated `#[script] impl` blocks are merged into one
-script method table at compile time. Godot's standard Export window builds the
-matching Cargo Debug or Release target, validates the project ABI, and hands
-the runtime module to Godot's platform exporter. Exported Rust resource paths
-are retained with source-private placeholder contents.
+1. Copy `addons/godot-rust` into your Godot project.
+2. Enable **godot-rust** in **Project > Project Settings > Plugins**.
+3. Let the plugin configure Cargo, or follow the setup prompt for an existing
+   Cargo project.
+4. Create a **Rust** script from Godot's Attach Script dialog and save it under
+   `res://src/scripts/`.
 
-Successful editor builds are loaded at a main-thread safe point. Compatible
-live state is migrated transactionally; a rejected candidate leaves the
-previous generation active. The SDK also provides cooperative main-thread
-futures, named Rust classes, custom Resources, and Rust-script inheritance.
-Inherited Rust scripts can explicitly call the next implementation with the
-typed `self.call_super(...)` API, including lifecycle callbacks such as
-`self.call_super::<(), _>("_ready", ())`; trailing `#[default(...)]`
-arguments are applied by the retained base-script generation.
-Project setup creates rust-analyzer, Cargo task, CodeLLDB, and GDB files only
-when the matching user file does not already exist.
+Press **F5** to run the project or **F6** to run the current scene. The plugin
+builds Rust when needed. Use the bottom **Rust** panel to build manually, inspect
+compiler diagnostics, apply suggested fixes, or cancel a running operation.
 
-The editor controls follow the Godot editor scale and theme, wrap their action
-bars at narrow widths, expose keyboard focus and shortcuts, and provide
-English and Simplified Chinese labels from an addon-private catalog. Godot
-4.5 and newer also receive explicit accessibility names, descriptions, and
-polite live status announcements through the engine's accessibility API.
-Godot 4.4 retains the same keyboard workflow and descriptive tooltips because
-that version does not expose those screen-reader properties to extensions.
+## Work with Rust in Godot
 
-Rust callback errors are reported through Godot's debugger with the `.rs`
-resource path and callback name. Panics are contained at the project-module
-ABI boundary. A panic or three consecutive callback failures disables only the
-affected script instance; other instances of the same script keep running.
+- Expose fields to the Inspector, methods to Godot, and typed signals to the
+  standard signal connection dialog.
+- Get syntax highlighting in Godot's script editor, or use your preferred
+  external editor and rust-analyzer.
+- Check code automatically when you save. Build to apply compatible changes
+  with hot reload and keep Inspector property values. Changes to field types,
+  method signatures, or inheritance require restarting the scene.
+- Use Cargo dependencies and workspaces, custom Resources, script inheritance,
+  and cooperative async tasks. Extension Mode is available for registering
+  native Godot classes directly.
 
-Extension Mode registers complete ClassDB metadata and generated virtual
-overrides directly from Rust. Export validation covers four Android ABIs,
-real Android emulator execution, iOS device and Simulator XCFramework slices,
-real iOS Simulator execution, desktop applications, and Web browser runtime.
+## Export your game
 
-The GDScript components have separate responsibilities:
+Use **Project > Export**. Install the matching Godot export templates and native
+platform toolchains first. The plugin builds and packages the Rust runtime for
+Windows, Linux, macOS, Android, iOS, or Web. Mobile and Web targets need their
+platform SDKs; Web also needs a matching Godot dynamic extension template.
 
-- `source_monitor.gd`: bounded input fingerprinting and save debounce;
-- `build_process.gd`: cancellable background and foreground requests;
-- `build_protocol.gd`: bounded request, response, and cancellation transport;
-- `diagnostics_panel.gd`: Cargo diagnostics and source activation;
-- `export_plugin.gd`: fail-closed Rust builds and runtime-module packaging;
-- `plugin.gd`: Godot workflow coordination.
+See the [full guide](https://github.com/godothub/godot-rust/blob/main/example/README.md)
+for examples, platform setup, and hot reload details. Report problems through
+[GitHub Issues](https://github.com/godothub/godot-rust/issues).
 
-Do not package files from `tests/fixtures/`; those projects only exercise the
-canonical addon. Release assembly also embeds the project and Godot licenses,
-a CycloneDX SBOM, a Cargo third-party license inventory, and a SHA-256 manifest
-inside this single addon ZIP.
+The release includes the project license, dependency notices, and
+[Godot's license](GODOT_LICENSE.md).

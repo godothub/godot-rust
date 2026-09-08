@@ -4,9 +4,11 @@ import errno
 import importlib.util
 import hashlib
 import json
+import os
 import platform
 import plistlib
 import random
+import re
 import shutil
 import stat
 import subprocess
@@ -461,6 +463,8 @@ class StageHostTests(unittest.TestCase):
                 "plugin.gd.uid",
                 "source_monitor.gd",
                 "source_monitor.gd.uid",
+                "syntax_highlighter.gd",
+                "syntax_highlighter.gd.uid",
             },
             {path.name for path in addon.iterdir()},
         )
@@ -478,6 +482,22 @@ class StageHostTests(unittest.TestCase):
             'godot_host.xcframework"',
             descriptor,
         )
+
+    def test_editor_and_host_highlighting_use_the_same_rust_words(self):
+        host = (ROOT / "crates/godot_host/src/rust_source.rs").read_text()
+        editor = (
+            ROOT / "example/addons/godot-rust/syntax_highlighter.gd"
+        ).read_text()
+        for name in ("HIGHLIGHT_WORDS", "CONTROL_FLOW_WORDS"):
+            with self.subTest(words=name):
+                host_list = re.search(rf"const {name}:.*?= &\[(.*?)\];", host, re.S)
+                editor_list = re.search(rf"const {name} := \[(.*?)\]", editor, re.S)
+                self.assertIsNotNone(host_list)
+                self.assertIsNotNone(editor_list)
+                self.assertEqual(
+                    re.findall(r'"([^"\n]+)"', host_list[1]),
+                    re.findall(r'"([^"\n]+)"', editor_list[1]),
+                )
 
     def test_editor_actions_auto_select_script_or_native_mode(self):
         plugin = (

@@ -21,6 +21,9 @@ const RustExportPlugin := preload(
 	"res://addons/godot-rust/export_plugin.gd"
 )
 const SourceMonitor := preload("res://addons/godot-rust/source_monitor.gd")
+const RustSyntaxHighlighter := preload(
+	"res://addons/godot-rust/syntax_highlighter.gd"
+)
 const EditorUi := preload("res://addons/godot-rust/editor_ui.gd")
 
 var _active_action := ""
@@ -35,6 +38,7 @@ var _diagnostics_panel
 var _dependency_dialog: ConfirmationDialog
 var _bottom_panel_button: Button
 var _export_plugin
+var _syntax_highlighter: EditorSyntaxHighlighter
 var _source_monitor
 var _pending_auto_check_revision := -1
 var _running_check_revision := -1
@@ -61,6 +65,10 @@ func _enter_tree() -> void:
 	_editor_scale = maxf(get_editor_interface().get_editor_scale(), 1.0)
 	_safe_mode_enabled = FileAccess.file_exists(SAFE_MODE_PATH)
 	_safe_mode_started = _safe_mode_enabled
+	_syntax_highlighter = RustSyntaxHighlighter.new()
+	get_editor_interface().get_script_editor().register_syntax_highlighter(
+		_syntax_highlighter
+	)
 	_export_plugin = RustExportPlugin.new()
 	_export_plugin.configure(self)
 	add_export_plugin(_export_plugin)
@@ -197,6 +205,11 @@ func _start_after_editor_ready() -> void:
 
 
 func _exit_tree() -> void:
+	if is_instance_valid(_syntax_highlighter):
+		get_editor_interface().get_script_editor().unregister_syntax_highlighter(
+			_syntax_highlighter
+		)
+		_syntax_highlighter = null
 	for item in _tool_menu_items:
 		remove_tool_menu_item(item)
 	_tool_menu_items.clear()

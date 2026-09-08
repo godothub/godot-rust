@@ -615,12 +615,23 @@ mod tests {
             }
         }
 
-        let mut value = Box::pin(spawn_blocking(|| 42_u32));
+        let registry = Mutex::new(Vec::new());
+        let mut value = Box::pin(spawn_blocking_with(&registry, || 42_u32));
         assert_eq!(wait_for(&mut value), Ok(42));
 
-        let mut panic = Box::pin(spawn_blocking(|| -> u32 {
+        let mut panic = Box::pin(spawn_blocking_with(&registry, || -> u32 {
             panic!("worker panic fixture");
         }));
         assert_eq!(wait_for(&mut panic), Err(BlockingTaskError::Panic));
+
+        // Receiving a result can precede thread exit. Join both workers before
+        // the test ends, using an isolated registry so parallel tests cannot
+        // reap these handles or mistake these workers for live module tasks.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !blocking_workers_finished_in(&registry) {
+            assert!(Instant::now() < deadline, "workers did not finish");
+            std::thread::yield_now();
+        }
+        assert!(registry.lock().unwrap().is_empty());
     }
 }

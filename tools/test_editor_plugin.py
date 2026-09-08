@@ -94,7 +94,8 @@ ERROR_PATTERNS = (
     re.compile(r"ObjectDB instances? (?:(?:was|were) )?leaked at exit", re.IGNORECASE),
     re.compile(r"resources still in use at exit", re.IGNORECASE),
 )
-EDITOR_FLOW_TIMEOUT_SECONDS = 300
+# The flow performs a cold check followed by builds of two module generations.
+EDITOR_FLOW_TIMEOUT_SECONDS = 600
 COMPONENT_MARKER = "GODOT_RUST_EDITOR_COMPONENTS_PASSED"
 COMPONENT_TEST_SCRIPT = '''\
 @tool

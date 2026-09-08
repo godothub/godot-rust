@@ -5,6 +5,8 @@ const SCRIPT_PATH := "res://src/scripts/editor_created.rs"
 const SCRIPT_UID_PATH := SCRIPT_PATH + ".uid"
 const INDEX_PATH := "res://src/scripts/mod.rs"
 const HOT_RELOAD_SCRIPT_PATH := "res://src/scripts/base_greeting.rs"
+# This scenario uses a fresh Cargo target directory on CI.
+const INITIAL_CHECK_TIMEOUT_MSEC := 240_000
 
 var _dialog
 var _godot_rust_plugin
@@ -131,7 +133,8 @@ func _run_editor_flow() -> void:
 		return
 	var uid_text := ResourceUID.id_to_text(uid)
 	filesystem.scan()
-	var check_deadline := Time.get_ticks_msec() + 90_000
+	var check_started_at := Time.get_ticks_msec()
+	var check_deadline := check_started_at + INITIAL_CHECK_TIMEOUT_MSEC
 	while Time.get_ticks_msec() < check_deadline:
 		if (
 			_finished_check_revision >= _required_check_revision
@@ -141,7 +144,18 @@ func _run_editor_flow() -> void:
 			break
 		await get_tree().process_frame
 	if _finished_check_revision < _required_check_revision:
-		_fail("Saving the Rust script did not trigger an automatic Cargo Check")
+		var build_process = _godot_rust_plugin.get("_build_process")
+		_fail(
+			"Automatic Cargo Check did not finish within %d ms "
+			% (Time.get_ticks_msec() - check_started_at)
+			+ "(required revision=%d, finished revision=%d, action=%s, running=%s)"
+			% [
+				_required_check_revision,
+				_finished_check_revision,
+				build_process.active_action(),
+				build_process.is_running(),
+			]
+		)
 		return
 	if not _finished_check_success:
 		_fail("Automatic Cargo Check rejected the Rust script created by Godot")
@@ -149,6 +163,7 @@ func _run_editor_flow() -> void:
 	if not _index_contains_script(uid_text):
 		_fail("Automatic Cargo Check did not index the new Rust script")
 		return
+	print("GODOT_RUST_INITIAL_CHECK_MSEC %d" % (Time.get_ticks_msec() - check_started_at))
 	var index_file := FileAccess.open(INDEX_PATH, FileAccess.READ)
 	if index_file == null:
 		_fail("The generated Cargo script index could not be read")

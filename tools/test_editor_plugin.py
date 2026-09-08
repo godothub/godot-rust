@@ -179,6 +179,9 @@ func _run() -> void:
         _fail("Clearing idle diagnostics changed the available actions")
         return
     var plugin = RustPlugin.new()
+    if not _verify_root_setup_paths(plugin):
+        plugin.free()
+        return
     plugin._diagnostics_panel = panel
     var request = PendingRequest.new()
     plugin._build_process = request
@@ -218,6 +221,49 @@ func _run() -> void:
 
 func _on_cancel_requested() -> void:
     cancellation_requested = true
+
+
+func _verify_root_setup_paths(plugin) -> bool:
+    var cases := [
+        ["/canonical/game", "/canonical/game/Cargo.toml"],
+        ["//?/c:/game", "C:/game/Cargo.toml"],
+        ["C:/game", "//?/c:/game/Cargo.toml"],
+        ["//?/UNC/server/share/game", "//server/share/game/Cargo.toml"],
+    ]
+    for paths in cases:
+        for backslashes in [false, true]:
+            var root: String = paths[0]
+            var manifest: String = paths[1]
+            if backslashes:
+                root = root.replace("/", String.chr(92))
+                manifest = manifest.replace("/", String.chr(92))
+            var package := {
+                "name": "existing_game",
+                "manifest_path": manifest,
+                "godot_rust_mode": "script",
+                "configuration_issues": [],
+            }
+            var result := {"project_root": root, "packages": [package]}
+            if plugin._root_script_setup_candidate(result) != package:
+                _fail("Cargo setup did not match its canonical root: %s" % root)
+                return false
+    for rejected in [
+        {"manifest_path": "/canonical/other/Cargo.toml"},
+        {"manifest_path": "/canonical/game/cargo.toml"},
+        {"godot_rust_mode": "extension"},
+        {"configuration_issues": ["conflicting configuration"]},
+    ]:
+        var package := {
+            "manifest_path": "/canonical/game/Cargo.toml",
+            "godot_rust_mode": "script",
+            "configuration_issues": [],
+        }
+        package.merge(rejected, true)
+        var result := {"project_root": "/canonical/game", "packages": [package]}
+        if not plugin._root_script_setup_candidate(result).is_empty():
+            _fail("Cargo setup accepted an unrelated or incompatible package")
+            return false
+    return true
 
 
 func _verify_syntax_highlighter() -> bool:

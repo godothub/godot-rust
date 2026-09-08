@@ -1516,14 +1516,14 @@ func _handle_cargo_metadata(result: Dictionary) -> void:
 
 
 func _root_script_setup_candidate(result: Dictionary) -> Dictionary:
-	var expected_manifest := _project_root().path_join("Cargo.toml")
-	expected_manifest = expected_manifest.replace("\\", "/").simplify_path()
+	# Cargo canonicalizes paths, which may differ from Godot's project path.
+	var cargo_root := str(result.get("project_root", _project_root()))
+	var expected_manifest := _normalized_cargo_path(cargo_root.path_join("Cargo.toml"))
 	for value in result.get("packages", []):
 		if not value is Dictionary:
 			continue
 		var package: Dictionary = value
-		var manifest := str(package.get("manifest_path", ""))
-		manifest = manifest.replace("\\", "/").simplify_path()
+		var manifest := _normalized_cargo_path(str(package.get("manifest_path", "")))
 		if manifest != expected_manifest:
 			continue
 		if str(package.get("godot_rust_mode", "script")) == "extension":
@@ -1532,6 +1532,18 @@ func _root_script_setup_candidate(result: Dictionary) -> Dictionary:
 			continue
 		return package
 	return {}
+
+
+func _normalized_cargo_path(path: String) -> String:
+	var normalized := path.replace("\\", "/")
+	if normalized.begins_with("//?/UNC/"):
+		normalized = "//" + normalized.trim_prefix("//?/UNC/")
+	elif normalized.begins_with("//?/"):
+		normalized = normalized.trim_prefix("//?/")
+	normalized = normalized.simplify_path()
+	if normalized.length() >= 2 and normalized[1] == ":":
+		normalized = normalized.left(1).to_upper() + normalized.substr(1)
+	return normalized
 
 
 func _workspace_script_candidates(result: Dictionary) -> Array[Dictionary]:

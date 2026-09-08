@@ -6,10 +6,4 @@ struct Player {
     health: i64,
 }
 
-impl Player {
-    fn set_health(&mut self, value: i64) {
-        self.health = value;
-    }
-}
-
 fn main() {}

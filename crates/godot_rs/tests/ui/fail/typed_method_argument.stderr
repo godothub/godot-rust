@@ -1,13 +1,13 @@
 error[E0308]: mismatched types
-  --> tests/ui/fail/typed_method_argument.rs:16:27
+  --> tests/ui/fail/typed_method_argument.rs:17:27
    |
-16 |     let _ = health.damage("ten");
+17 |     let _ = health.damage("ten");
    |                    ------ ^^^^^ expected `i64`, found `&str`
    |                    |
    |                    arguments to this method are incorrect
    |
 note: method defined here
-  --> tests/ui/fail/typed_method_argument.rs:9:8
+  --> tests/ui/fail/typed_method_argument.rs:10:8
    |
-9  |     fn damage(&mut self, amount: i64) {
+10 |     fn damage(&mut self, amount: i64) {
    |        ^^^^^^            -----------

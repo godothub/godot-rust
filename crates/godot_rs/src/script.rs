@@ -212,6 +212,21 @@ pub struct ScriptDescriptor {
 }
 
 /// Implemented by the struct form of `#[script]`.
+///
+/// Node lifecycle callbacks require a Node-derived base. A Resource script
+/// cannot declare `_ready`:
+///
+/// ```compile_fail,E0277
+/// use godot_rs::prelude::*;
+///
+/// #[script(base = Resource)]
+/// struct Settings;
+///
+/// #[script]
+/// impl Settings {
+///     fn _ready(&mut self) {}
+/// }
+/// ```
 pub trait ScriptClass: GodotClass + Sized + 'static {
     const DESCRIPTOR: ScriptDescriptor;
 

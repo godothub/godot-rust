@@ -1,3 +1,4 @@
+use super::game_tuning::GameTuning;
 use godot_rs::prelude::*;
 use std::time::Duration;
 
@@ -36,19 +37,19 @@ pub struct Hello {
     tint: Color,
 
     #[export(group = "Gameplay")]
-    tuning: Option<GodotRef<Resource>>,
+    tuning: Option<GodotRef<GameTuning>>,
 
-    #[signal(args(message))]
-    greeted: Signal<(String,)>,
+    #[signal]
+    greeted: Signal<fn(message: String)>,
 
-    #[signal(args(position, tint))]
-    styled: Signal<(Vector2, Color)>,
+    #[signal]
+    styled: Signal<fn(position: Vector2, tint: Color)>,
 
-    #[signal(args(cell))]
-    grid_selected: Signal<(Vector2i,)>,
+    #[signal]
+    grid_selected: Signal<fn(cell: Vector2i)>,
 
-    #[signal(args(canvas))]
-    canvas_ready: Signal<(Rid,)>,
+    #[signal]
+    canvas_ready: Signal<fn(canvas: Rid)>,
 
     #[node("%Target")]
     target: NodeRef<Node>,
@@ -82,18 +83,18 @@ impl Hello {
         };
         let canvas = world.get_canvas()?;
         if canvas.is_valid() {
-            self.canvas_ready.emit((canvas,));
+            self.canvas_ready.emit(canvas)?;
             godot_print!("Canvas RID: {}", canvas.id());
         }
         let inherited: String = self.call_super("format_greeting", ())?;
         godot_print!("Inherited Rust script returned: {inherited}");
-        spawn(async move {
+        self.tasks().spawn(async move {
             next_frame().await;
             godot_print!("Rust task resumed for object {owner_id} on the next Godot frame.");
         });
         if let Some(tree) = self.base().get_tree()? {
             let next_process_frame = tree.signal_process_frame()?.wait();
-            spawn(async move {
+            self.tasks().spawn(async move {
                 match timeout(Duration::from_secs(1), next_process_frame).await {
                     Ok(Ok(())) => godot_print!("Rust awaited SceneTree.process_frame."),
                     Ok(Err(error)) => godot_warn!("Could not await Godot signal: {error}"),
@@ -110,29 +111,29 @@ impl Hello {
     }
 
     #[func(name = "greet_player")]
-    fn greet(&mut self, name: String) -> String {
+    fn greet(&mut self, name: String) -> EngineResult<String> {
         self.greetings_sent += 1;
         let message = if self.greeting_style == GreetingStyle::Formal {
             format!("{}，{name}。", self.greeting)
         } else {
             format!("{}, {name}!", self.greeting)
         };
-        self.greeted.emit((message.clone(),));
-        message
+        self.greeted.emit(message.clone())?;
+        Ok(message)
     }
 
     #[func]
-    fn offset_position(&mut self, offset: Vector2) -> Vector2 {
+    fn offset_position(&mut self, offset: Vector2) -> EngineResult<Vector2> {
         let position = self.spawn_point + offset;
-        self.styled.emit((position, self.tint));
-        position
+        self.styled.emit(position, self.tint)?;
+        Ok(position)
     }
 
     #[func]
-    fn select_grid_cell(&mut self, offset: Vector2i) -> Vector2i {
+    fn select_grid_cell(&mut self, offset: Vector2i) -> EngineResult<Vector2i> {
         let cell = self.grid_cell + offset;
-        self.grid_selected.emit((cell,));
-        cell
+        self.grid_selected.emit(cell)?;
+        Ok(cell)
     }
 
     #[func]

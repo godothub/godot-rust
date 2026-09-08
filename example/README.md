@@ -479,17 +479,17 @@ pub struct Mover {
     #[export(default = Color::rgba(0.2, 0.6, 1.0, 1.0), no_alpha)]
     tint: Color,
 
-    #[signal(args(position, tint))]
-    moved: Signal<(Vector2, Color)>,
+    #[signal]
+    moved: Signal<fn(position: Vector2, tint: Color)>,
 }
 
 #[script]
 impl Mover {
     #[func]
-    fn advance(&mut self, position: Vector2, delta: f32) -> Vector2 {
+    fn advance(&mut self, position: Vector2, delta: f32) -> EngineResult<Vector2> {
         let next = position + self.velocity * delta;
-        self.moved.emit((next, self.tint));
-        next
+        self.moved.emit(next, self.tint)?;
+        Ok(next)
     }
 }
 ```
@@ -530,17 +530,17 @@ pub struct Greeter {
     #[export(default = "res://main.tscn", file("*.tscn"))]
     scene_path: String,
 
-    #[signal(args(message))]
-    greeted: Signal<(String,)>,
+    #[signal]
+    greeted: Signal<fn(message: String)>,
 }
 
 #[script]
 impl Greeter {
     #[func]
-    fn greet(&mut self, name: String) -> String {
+    fn greet(&mut self, name: String) -> EngineResult<String> {
         let message = format!("{}，{name}", self.message);
-        self.greeted.emit((message.clone(),));
-        message
+        self.greeted.emit(message.clone())?;
+        Ok(message)
     }
 }
 ```
@@ -644,8 +644,8 @@ NavigationServer 等服务器资源的不透明句柄，可以直接用于 `#[fu
 返回值、类型化信号以及生成的 Godot API：
 
 ```rust
-#[signal(args(canvas))]
-canvas_ready: Signal<(Rid,)>,
+#[signal]
+canvas_ready: Signal<fn(canvas: Rid)>,
 
 fn _ready(&mut self) -> EngineResult<()> {
     let Some(viewport) = self.base().get_viewport()? else {
@@ -656,7 +656,7 @@ fn _ready(&mut self) -> EngineResult<()> {
     };
     let canvas = world.get_canvas()?;
     if canvas.is_valid() {
-        self.canvas_ready.emit((canvas,));
+        self.canvas_ready.emit(canvas)?;
     }
     Ok(())
 }

@@ -398,6 +398,8 @@ func prepare_rust_export(
 		)
 	if _build_process.is_running():
 		if _active_action not in [
+			"project probe",
+			"Cargo metadata",
 			"Automatic Rust check",
 			"Automatic Rust build",
 		]:
@@ -406,12 +408,12 @@ func prepare_rust_export(
 				"Wait for %s to finish, then export again." % _active_action
 			)
 		_set_workflow_status(
-			"Waiting for the active automatic Rust operation before export."
+			"Waiting for project initialization or the active automatic Rust operation before export."
 		)
 		if not _build_process.wait_for_completion():
 			return _rust_export_failure(
 				action,
-				"The active automatic Rust operation did not complete."
+				"Project initialization or the automatic Rust operation did not complete."
 			)
 
 	print(

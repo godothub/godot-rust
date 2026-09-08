@@ -1461,6 +1461,7 @@ mod tests {
         assert_eq!(drop_module_object_ref(output), AbiStatus::StaleHandle);
         drop(decoded);
         assert!(released);
+        release_return_backings();
     }
 
     fn test_object(host: &HostApiV1) -> crate::engine::GodotRef<crate::engine::RefCounted> {
@@ -1540,6 +1541,7 @@ mod tests {
             drop(backing);
             assert!(released);
         }
+        release_return_backings();
     }
 
     #[test]
@@ -1569,6 +1571,7 @@ mod tests {
         // SAFETY: This releases the exact registered output once.
         assert_eq!(unsafe { drop_owned_value(output) }, AbiStatus::Ok);
         assert!(released);
+        release_return_backings();
     }
 
     #[test]

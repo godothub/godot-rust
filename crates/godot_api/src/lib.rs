@@ -148,6 +148,20 @@ pub mod native {
         *const GDExtensionClassCreationInfo,
     );
 
+    /// Constructs a base Object with the reference-count convention required
+    /// by the selected extension class creation callback.
+    pub type GDExtensionClassdbConstructExtensionBase =
+        unsafe extern "C" fn(GDExtensionConstStringNamePtr) -> GDExtensionObjectPtr;
+
+    #[cfg(any(
+        godot_api_version = "4.4",
+        godot_api_version = "4.5",
+        godot_api_version = "4.6"
+    ))]
+    pub const CLASSDB_CONSTRUCT_EXTENSION_BASE_SYMBOL: &[u8] = b"classdb_construct_object2\0";
+    #[cfg(godot_api_version = "4.7")]
+    pub const CLASSDB_CONSTRUCT_EXTENSION_BASE_SYMBOL: &[u8] = b"classdb_construct_object3\0";
+
     #[cfg(godot_api_version = "4.4")]
     pub const CLASSDB_REGISTER_EXTENSION_CLASS_SYMBOL: &[u8] =
         b"classdb_register_extension_class4\0";
@@ -312,25 +326,32 @@ mod tests {
     #[test]
     fn selected_class_registration_alias_matches_the_official_generation() {
         #[cfg(godot_api_version = "4.4")]
-        let (creation_size, symbol) = (
+        let (creation_size, symbol, constructor_symbol) = (
             size_of::<native::GDExtensionClassCreationInfo4>(),
             b"classdb_register_extension_class4\0".as_slice(),
+            b"classdb_construct_object2\0".as_slice(),
         );
         #[cfg(any(godot_api_version = "4.5", godot_api_version = "4.6"))]
-        let (creation_size, symbol) = (
+        let (creation_size, symbol, constructor_symbol) = (
             size_of::<native::GDExtensionClassCreationInfo5>(),
             b"classdb_register_extension_class5\0".as_slice(),
+            b"classdb_construct_object2\0".as_slice(),
         );
         #[cfg(godot_api_version = "4.7")]
-        let (creation_size, symbol) = (
+        let (creation_size, symbol, constructor_symbol) = (
             size_of::<native::GDExtensionClassCreationInfo6>(),
             b"classdb_register_extension_class6\0".as_slice(),
+            b"classdb_construct_object3\0".as_slice(),
         );
         assert_eq!(
             size_of::<native::GDExtensionClassCreationInfo>(),
             creation_size
         );
         assert_eq!(native::CLASSDB_REGISTER_EXTENSION_CLASS_SYMBOL, symbol);
+        assert_eq!(
+            native::CLASSDB_CONSTRUCT_EXTENSION_BASE_SYMBOL,
+            constructor_symbol
+        );
     }
 
     #[test]

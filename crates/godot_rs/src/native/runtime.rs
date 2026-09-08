@@ -24,6 +24,7 @@ pub(crate) struct Interface {
     ) -> sys::GDExtensionInt,
     pub classdb_construct_object2:
         unsafe extern "C" fn(sys::GDExtensionConstStringNamePtr) -> sys::GDExtensionObjectPtr,
+    pub classdb_construct_extension_base: sys::GDExtensionClassdbConstructExtensionBase,
     pub classdb_get_class_tag:
         unsafe extern "C" fn(sys::GDExtensionConstStringNamePtr) -> *mut c_void,
     pub classdb_get_method_bind: unsafe extern "C" fn(
@@ -387,6 +388,32 @@ impl Interface {
             }
         }
 
+        let classdb_construct_extension_base = {
+            // SAFETY: godot_api selects the constructor matching the reference
+            // ownership convention of its class creation callback generation.
+            let raw = unsafe {
+                get_proc_address(
+                    sys::CLASSDB_CONSTRUCT_EXTENSION_BASE_SYMBOL
+                        .as_ptr()
+                        .cast::<c_char>(),
+                )
+            };
+            if raw.is_none() {
+                return Err(NativeError::new(format!(
+                    "Godot does not provide the extension base constructor required by API {GODOT_API}"
+                )));
+            }
+            // SAFETY: Both official constructor generations have the selected
+            // alias's exact signature; only their reference ownership differs.
+            unsafe {
+                core::mem::transmute::<
+                    sys::GDExtensionInterfaceFunctionPtr,
+                    Option<sys::GDExtensionClassdbConstructExtensionBase>,
+                >(raw)
+            }
+            .expect("selected extension base constructor was checked above")
+        };
+
         let classdb_register_extension_class = {
             // SAFETY: The selected symbol and normalized function signature are
             // emitted together by godot_api from one official ABI generation.
@@ -434,6 +461,7 @@ impl Interface {
                 "classdb_construct_object2",
                 sys::GDExtensionInterfaceClassdbConstructObject2
             ),
+            classdb_construct_extension_base,
             classdb_get_class_tag: load!(
                 "classdb_get_class_tag",
                 sys::GDExtensionInterfaceClassdbGetClassTag

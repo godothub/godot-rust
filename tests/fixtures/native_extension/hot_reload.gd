@@ -110,6 +110,10 @@ func _runtime_is_healthy() -> bool:
 	var runtime: Object = ClassDB.instantiate("GodotRsExtensionRuntime")
 	if runtime == null or not runtime.has_method("is_healthy"):
 		return false
+	var runtime_id := runtime.get_instance_id()
 	var healthy := bool(runtime.call("is_healthy"))
 	runtime = null
+	if is_instance_id_valid(runtime_id):
+		push_error("Native RefCounted health probe survived its last reference")
+		return false
 	return healthy

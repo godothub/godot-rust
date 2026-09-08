@@ -1576,8 +1576,11 @@ fn create_instance_inner<T: NativeClass>(
             return ptr::null_mut();
         }
     };
-    // SAFETY: The base class name is generated/validated and alive.
-    let object = unsafe { (interface.classdb_construct_object2)(base_name.as_ptr()) };
+    // SAFETY: The base class name is generated/validated and alive. The selected
+    // constructor matches the registered creation callback: Godot 4.7's
+    // create_instance3 must return an initialized RefCounted reference, while
+    // earlier callbacks use the legacy first-reference convention.
+    let object = unsafe { (interface.classdb_construct_extension_base)(base_name.as_ptr()) };
     if object.is_null() {
         interface.report_error(
             &format!(

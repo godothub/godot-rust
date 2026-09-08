@@ -29,6 +29,8 @@ ERROR_MARKERS = (
     "Invalid plugin",
     "could not be loaded",
     "ObjectDB instances leaked at exit",
+    "ObjectDB instances were leaked at exit",
+    "ObjectDB instance was leaked at exit",
     "resources still in use at exit",
 )
 EXPORT_TIMEOUT_SECONDS = 900

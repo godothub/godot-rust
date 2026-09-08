@@ -1044,6 +1044,8 @@ class StageHostTests(unittest.TestCase):
         self.assertIn("application/modify_resources=false", source)
         for leak_marker in (
             "ObjectDB instances leaked at exit",
+            "WARNING: 1 ObjectDB instance was leaked at exit",
+            "WARNING: 2 ObjectDB instances were leaked at exit",
             "resources still in use at exit",
         ):
             with self.assertRaises(RuntimeError):
@@ -1065,6 +1067,22 @@ class StageHostTests(unittest.TestCase):
                 f"{test_godot_export.EXPORT_MARKER}\nERROR: export failed",
                 test_godot_export.EXPORT_MARKER,
             )
+
+    def test_engine_checks_reject_object_leak_message_formats(self):
+        for message in (
+            "WARNING: ObjectDB instances leaked at exit",
+            "WARNING: 1 ObjectDB instance was leaked at exit",
+            "WARNING: 2 ObjectDB instances were leaked at exit",
+        ):
+            with self.subTest(message=message):
+                checks = (
+                    test_godot_load.output_errors(message),
+                    test_godot_load.fault_isolation_errors(0, message),
+                    test_editor_plugin.output_errors(message, ()),
+                    test_native_load.output_errors(message, "4.4"),
+                )
+                for errors in checks:
+                    self.assertTrue(any("leaked" in error for error in errors))
 
     def test_editor_binary_exports_use_matching_debug_feature_tags(self):
         for system, expected_preset in (

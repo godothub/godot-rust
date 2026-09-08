@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from test_native_load import (
+    ERROR_PATTERNS,
     SUPPORTED_APIS,
     build_native_fixture,
     discover_godot,
@@ -256,6 +257,9 @@ def run_native_hot_reload(godot: str, api: str) -> str:
                 "Godot Native hot-reload fixture failed with status "
                 f"{process.returncode}:\n{output}"
             )
+        errors = [pattern.pattern for pattern in ERROR_PATTERNS if pattern.search(output)]
+        if errors:
+            raise RuntimeError(f"Godot Native hot reload reported {errors}:\n{output}")
         if HOT_RELOAD_MARKER not in output:
             raise RuntimeError(
                 f"Godot did not report successful Native hot reload:\n{output}"

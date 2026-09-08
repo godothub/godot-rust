@@ -27,6 +27,8 @@ ERROR_PATTERNS = [
     re.compile(r"failed loading", re.IGNORECASE),
     re.compile(r"entry point .* not found", re.IGNORECASE),
     re.compile(r"godot_rust_init.*not found", re.IGNORECASE),
+    re.compile(r"ObjectDB instances? (?:(?:was|were) )?leaked at exit", re.IGNORECASE),
+    re.compile(r"resources still in use at exit", re.IGNORECASE),
 ]
 TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 MODULE_READY_MARKER = "GODOT_RUST_MODULE_READY"
@@ -145,6 +147,8 @@ def fault_isolation_errors(status: int, output: str) -> list[str]:
         re.compile(r"fatal error", re.IGNORECASE),
         re.compile(r"memory errors detected", re.IGNORECASE),
         re.compile(r"invalid read|invalid write", re.IGNORECASE),
+        re.compile(r"ObjectDB instances? (?:(?:was|were) )?leaked at exit", re.IGNORECASE),
+        re.compile(r"resources still in use at exit", re.IGNORECASE),
     ):
         if pattern.search(output):
             errors.append(pattern.pattern)

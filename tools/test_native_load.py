@@ -27,6 +27,8 @@ ERROR_PATTERNS = (
     re.compile(r"failed loading", re.IGNORECASE),
     re.compile(r"entry point .* not found", re.IGNORECASE),
     re.compile(r"godot_rs_native_init.*not found", re.IGNORECASE),
+    re.compile(r"ObjectDB instances? (?:(?:was|were) )?leaked at exit", re.IGNORECASE),
+    re.compile(r"resources still in use at exit", re.IGNORECASE),
 )
 
 

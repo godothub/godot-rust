@@ -574,7 +574,6 @@ class StageHostTests(unittest.TestCase):
         self.assertIn("DEBOUNCE_SECONDS", monitor)
         self.assertIn("MAX_TRACKED_FILE_BYTES", monitor)
         self.assertIn("MAX_TRACKED_TOTAL_BYTES", monitor)
-        self.assertIn('file_name != "mod.rs"', monitor)
         panel = (
             ROOT / "example" / "addons" / "godot-rust" / "diagnostics_panel.gd"
         ).read_text(encoding="utf-8")

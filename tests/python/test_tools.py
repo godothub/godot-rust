@@ -280,12 +280,14 @@ class RepositoryMarkerTests(unittest.TestCase):
                 self.assertTrue(is_ignored(path))
 
     def test_empty_directories_use_godothub_markers(self):
-        self.assertEqual(list(ROOT.rglob(".gitkeep")), [])
+        paths = subprocess.check_output(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=ROOT,
+        ).decode().split("\0")
+        self.assertEqual([path for path in paths if Path(path).name == ".gitkeep"], [])
         self.assertEqual(
             sorted(
-                path.relative_to(ROOT).as_posix()
-                for path in ROOT.rglob(".godothub")
-                if "target" not in path.parts
+                path for path in paths if Path(path).name == ".godothub"
             ),
             [
                 "example/addons/godot-rust/bin/.godothub",

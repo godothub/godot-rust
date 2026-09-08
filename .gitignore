@@ -57,6 +57,7 @@ lcov.info
 !.vscode/tasks.json
 !.vscode/launch.json
 *.code-workspace
+FORME.md
 *.swp
 *.swo
 *~

@@ -1742,7 +1742,7 @@ class ReleaseTests(unittest.TestCase):
             validate_release.parse_version("0.10.0"),
             (0, 10, 0),
         )
-        for invalid in ("00.1.0", "0.01.0", "0.1.00", "v0.1.0"):
+        for invalid in ("00.1.0", "0.01.0", "0.1.00", "v0.1.0", "0.1.1１"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_release.parse_version(invalid)
 
@@ -1770,21 +1770,38 @@ class ReleaseTests(unittest.TestCase):
             "",
         )
 
-    def test_release_changelogs_require_matching_unordered_lists(self):
+    def test_release_changelogs_accept_short_wrapped_unordered_lists(self):
         entries, errors = validate_release.changelog_errors(
-            "## 0.9.0\n\n- One\n- Two\n- Three\n- Four\n- Five\n- Six\n",
+            "## 0.9.0\n\n- A user-facing change with\n  a wrapped explanation.\n",
             "0.9.0",
             "CHANGELOG.md",
         )
-        self.assertEqual(len(entries), 6)
+        self.assertEqual(entries, ["A user-facing change with a wrapped explanation."])
         self.assertEqual(errors, [])
 
+    def test_release_changelogs_reject_non_list_content(self):
         _, errors = validate_release.changelog_errors(
             "## 0.9.0\n\n### Added\n\n- One\n",
             "0.9.0",
             "CHANGELOG.md",
         )
         self.assertIn("only unordered-list entries", errors[0])
+
+        _, errors = validate_release.changelog_errors(
+            "## 0.9.0\n\n  Orphaned continuation\n- One\n",
+            "0.9.0",
+            "CHANGELOG.md",
+        )
+        self.assertIn("only unordered-list entries", errors[0])
+
+    def test_release_changelogs_reject_missing_or_empty_versions(self):
+        for changelog in ("## 0.8.0\n\n- Old\n", "## 0.9.0\n\n", "## 0.9.0\n\n- \n"):
+            with self.subTest(changelog=changelog):
+                entries, errors = validate_release.changelog_errors(
+                    changelog, "0.9.0", "CHANGELOG.md"
+                )
+                self.assertEqual(entries, [])
+                self.assertTrue(any("at least one" in error for error in errors))
 
     def test_release_notes_are_written_from_the_changelog_section(self):
         with tempfile.TemporaryDirectory() as directory:

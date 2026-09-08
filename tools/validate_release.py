@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NUMERIC_IDENTIFIER = r"(?:0|[1-9]\d*)"
+NUMERIC_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 VERSION_PATTERN = re.compile(
     rf"^(?P<major>{NUMERIC_IDENTIFIER})"
     rf"\.(?P<minor>{NUMERIC_IDENTIFIER})"
@@ -31,13 +31,25 @@ def parse_version(version: str) -> tuple[int, int, int]:
 
 
 def release_entries(changelog: str, version: str) -> list[str]:
-    """Extract bullet entries from a version section."""
-    section = release_section(changelog, version)
-    return [
-        line[2:].strip()
-        for line in section.splitlines()
-        if line.startswith("- ") and line[2:].strip()
-    ]
+    """Extract complete entries, including wrapped lines, from a version section."""
+    entries, _ = _release_list(release_section(changelog, version))
+    return entries
+
+
+def _release_list(section: str) -> tuple[list[str], list[str]]:
+    """Read a flat Markdown list without imposing a release-note length quota."""
+    entries: list[str] = []
+    invalid_lines: list[str] = []
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("- ") and line[2:].strip():
+            entries.append(line[2:].strip())
+        elif line.startswith("  ") and entries:
+            entries[-1] += " " + line.strip()
+        else:
+            invalid_lines.append(line)
+    return entries, invalid_lines
 
 
 def release_section(changelog: str, version: str) -> str:
@@ -79,21 +91,16 @@ def changelog_errors(
 ) -> tuple[list[str], list[str]]:
     """Validate one release section and return its entries plus violations."""
     section = release_section(changelog, version)
-    entries = release_entries(changelog, version)
+    entries, invalid_lines = _release_list(section)
     errors: list[str] = []
-    invalid_lines = [
-        line
-        for line in section.splitlines()
-        if line.strip() and not line.startswith("- ")
-    ]
     if invalid_lines:
         errors.append(
-            f"{filename} release {version} must contain only unordered-list entries"
+            f"{filename} release {version} must contain only unordered-list entries "
+            "and indented continuation lines"
         )
-    if not 6 <= len(entries) <= 15:
+    if not entries:
         errors.append(
-            f"{filename} release {version} must contain 6-15 user-facing entries; "
-            f"found {len(entries)}"
+            f"{filename} release {version} must contain at least one user-facing entry"
         )
     return entries, errors
 
@@ -165,7 +172,7 @@ def main() -> int:
             published = json.loads(
                 args.published_release_json.read_text(encoding="utf-8")
             )
-            published_body = published.get("body")
+            published_body = published.get("body") if isinstance(published, dict) else None
             if not isinstance(published_body, str):
                 errors.append("published release JSON must contain a string body")
             elif published_body != release_body(changelog, args.version):

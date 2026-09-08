@@ -142,7 +142,7 @@ struct GenerationInner {
     poll_tasks: AbiPollTasksFn,
     cancel_tasks: AbiCancelTasksFn,
     scripts: Vec<LoadedScript>,
-    _library: Library,
+    library: Option<Library>,
 }
 
 struct PendingGeneration {
@@ -554,7 +554,7 @@ impl ModuleGeneration {
                 poll_tasks: extensions.poll_tasks,
                 cancel_tasks: extensions.cancel_tasks,
                 scripts,
-                _library: library,
+                library: Some(library),
             }),
         };
         generation.validate_method_defaults()?;
@@ -606,7 +606,15 @@ impl ModuleGeneration {
         };
         // SAFETY: The callback belongs to this retained generation and is
         // invoked once before it becomes inactive.
-        status_result(unsafe { callback() }, "project task cancellation failed")
+        let status = unsafe { callback() };
+        status_result(
+            status,
+            if status == AbiStatus::Unsupported {
+                "background Rust workers are still running; retry hot reload after they finish"
+            } else {
+                "project task cancellation failed"
+            },
+        )
     }
 
     fn validate_method_defaults(&self) -> Result<(), ModuleLoadError> {
@@ -767,7 +775,20 @@ impl Drop for GenerationInner {
         if let Some(shutdown) = self.shutdown {
             // SAFETY: Context and callback were returned by this still-loaded
             // module generation.
-            let _ = unsafe { shutdown(self.context as *mut c_void) };
+            let status = unsafe { shutdown(self.context as *mut c_void) };
+            if status != AbiStatus::Ok {
+                // A running worker can still execute this library. Retain it
+                // and conservatively retain the ABI allocations when shutdown
+                // did not confirm complete cleanup. The SDK revokes its Host
+                // callbacks; hot reload checks cancel_tasks before retirement.
+                if let Some(library) = self.library.take() {
+                    core::mem::forget(library);
+                }
+                host_eprintln!(
+                    "godot-rust: project module shutdown returned {status:?}; keeping the module loaded until process exit"
+                );
+                return;
+            }
         }
         if self.host != 0 {
             // SAFETY: `host` came from `Box::into_raw` when this generation was
@@ -795,7 +816,21 @@ impl Drop for PendingGeneration {
                 if let Some(shutdown) = api.shutdown {
                     // SAFETY: Pending validation still retains the loaded
                     // library.
-                    let _ = unsafe { shutdown(api.context) };
+                    let status = unsafe { shutdown(api.context) };
+                    if status != AbiStatus::Ok {
+                        if let Some(library) = self.library.take() {
+                            core::mem::forget(library);
+                        }
+                        if let Some(host) = self.host.take() {
+                            let _ = Box::into_raw(host);
+                        }
+                        if let Some(context) = self.host_context.take() {
+                            let _ = Box::into_raw(context);
+                        }
+                        host_eprintln!(
+                            "godot-rust: rejected project module shutdown returned {status:?}; keeping the module loaded until process exit"
+                        );
+                    }
                 }
             }
         }

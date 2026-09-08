@@ -291,6 +291,10 @@ fn _ready(&mut self) -> EngineResult<()> {
 完成的任务。Future 必须拥有其捕获值并满足 `'static`，不能把 `&mut self` 保留
 到当前回调结束之后。
 
+耗时计算或阻塞 I/O 可用 `spawn_blocking` 放到后台线程，Godot 对象和 API 仍需留在
+主线程。取消等待不会停止已经运行的后台工作；热重载会等这些工作结束后再应用
+新代码，因此后台任务应能自行结束。
+
 ## 安全热重载
 
 编辑器中的 Rust Build 成功并发布新的 Last Known Good 后，Host 会在主线程帧

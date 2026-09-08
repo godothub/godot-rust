@@ -2,6 +2,7 @@ use core::ffi::c_void;
 use core::fmt::{self, Write};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::RwLock;
 
 use godot_api::abi::{
     ABI_MODULE_EXTENSION_GODOT_API, ABI_MODULE_EXTENSION_OWNED_VALUES, ABI_MODULE_EXTENSION_TASKS,
@@ -24,6 +25,9 @@ use crate::error::{EngineError, EngineResult};
 use crate::log::Level;
 
 static HOST_API: AtomicPtr<HostApiV1> = AtomicPtr::new(ptr::null_mut());
+// Logging is available to blocking workers. Shutdown must wait for their
+// current Host log callbacks before the Host may unload its own library.
+static HOST_LOG_ACCESS: RwLock<()> = RwLock::new(());
 
 /// Initializes the generated project-module table.
 ///
@@ -79,12 +83,18 @@ pub unsafe fn initialize(
     AbiStatus::Ok
 }
 
-/// Clears the Host callback table before a module generation is unloaded.
+/// Revokes Host callbacks even when running workers prevent module unloading.
 #[doc(hidden)]
 pub unsafe extern "C" fn shutdown(_context: *mut c_void) -> AbiStatus {
-    crate::task::cancel_all();
+    // Always release main-thread engine values before engine teardown, even
+    // when detached workers require the library to remain loaded. Future
+    // destructors may log, so cancellation must precede the exclusive lock.
+    let status = cancel_tasks_for_unload(false);
+    let _logs = HOST_LOG_ACCESS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     HOST_API.store(ptr::null_mut(), Ordering::Release);
-    AbiStatus::Ok
+    status
 }
 
 unsafe extern "C" fn poll_tasks() -> AbiStatus {
@@ -95,8 +105,23 @@ unsafe extern "C" fn poll_tasks() -> AbiStatus {
 }
 
 unsafe extern "C" fn cancel_tasks() -> AbiStatus {
-    match std::panic::catch_unwind(crate::task::cancel_all) {
-        Ok(()) => AbiStatus::Ok,
+    cancel_tasks_for_unload(true)
+}
+
+fn cancel_tasks_for_unload(preserve_tasks_if_busy: bool) -> AbiStatus {
+    match std::panic::catch_unwind(|| {
+        if preserve_tasks_if_busy && !crate::task::blocking_workers_finished() {
+            return AbiStatus::Unsupported;
+        }
+        crate::task::cancel_all();
+        // User destructors can start blocking work while tasks are cancelled.
+        if crate::task::blocking_workers_finished() {
+            AbiStatus::Ok
+        } else {
+            AbiStatus::Unsupported
+        }
+    }) {
+        Ok(status) => status,
         Err(_) => AbiStatus::Panic,
     }
 }
@@ -291,33 +316,33 @@ fn drop_owned_range(address: usize, length: usize) {
 }
 
 pub(crate) fn write_log(level: Level, arguments: fmt::Arguments<'_>) {
-    let host = HOST_API.load(Ordering::Acquire);
-    if host.is_null() {
-        let message = arguments.to_string();
-        if crate::native::runtime::active_interface().is_some() {
-            let value = crate::variant::Variant::from(message.clone());
-            let result = match level {
-                Level::Debug => crate::engine::utility::print_verbose(&value, &[]),
-                Level::Info => crate::engine::utility::print(&value, &[]),
-                Level::Warning => crate::engine::utility::push_warning(&value, &[]),
-                Level::Error => crate::engine::utility::push_error(&value, &[]),
-            };
-            if result.is_ok() {
-                return;
-            }
-        }
-        eprintln!("{message}");
+    if HOST_API.load(Ordering::Acquire).is_null() {
+        write_fallback_log(level, arguments);
         return;
     }
-    // SAFETY: The Host table remains valid until shutdown, which only runs
-    // after callbacks for this generation have stopped.
+    // Display implementations are user code and may log or initiate shutdown.
+    // Format before retaining the Host log callback to permit that re-entry.
+    let mut message = StackMessage::new();
+    let _ = message.write_fmt(arguments);
+    let logs = HOST_LOG_ACCESS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let host = HOST_API.load(Ordering::Acquire);
+    if host.is_null() {
+        drop(logs);
+        write_fallback_log(
+            level,
+            format_args!("{}", String::from_utf8_lossy(&message.bytes[..message.len])),
+        );
+        return;
+    }
+    // SAFETY: The read guard prevents shutdown from clearing this table and
+    // returning to a Host that may then unload the callback's library.
     let host = unsafe { &*host };
     let Some(log) = host.log else {
         return;
     };
 
-    let mut message = StackMessage::new();
-    let _ = message.write_fmt(arguments);
     let level = match level {
         Level::Debug => AbiLogLevel::Debug,
         Level::Info => AbiLogLevel::Info,
@@ -333,6 +358,23 @@ pub(crate) fn write_log(level: Level, arguments: fmt::Arguments<'_>) {
             message.as_abi(),
         )
     };
+}
+
+fn write_fallback_log(level: Level, arguments: fmt::Arguments<'_>) {
+    let message = arguments.to_string();
+    if crate::native::runtime::active_interface().is_some() {
+        let value = crate::variant::Variant::from(message.clone());
+        let result = match level {
+            Level::Debug => crate::engine::utility::print_verbose(&value, &[]),
+            Level::Info => crate::engine::utility::print(&value, &[]),
+            Level::Warning => crate::engine::utility::push_warning(&value, &[]),
+            Level::Error => crate::engine::utility::push_error(&value, &[]),
+        };
+        if result.is_ok() {
+            return;
+        }
+    }
+    eprintln!("{message}");
 }
 
 pub(crate) fn emit_signal(field_index: u32, arguments: &[AbiValueV1]) -> AbiCallResult {

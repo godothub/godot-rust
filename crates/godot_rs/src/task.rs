@@ -11,7 +11,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::{EngineError, EngineResult};
@@ -20,7 +22,10 @@ use crate::signal::Signal;
 thread_local! {
     static TASKS: RefCell<Vec<Task>> = const { RefCell::new(Vec::new()) };
     static NEXT_TASK_ID: Cell<u64> = const { Cell::new(1) };
+    static CANCELLING_TASKS: Cell<bool> = const { Cell::new(false) };
 }
+
+static BLOCKING_WORKERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 
 struct Task {
     id: u64,
@@ -65,13 +70,17 @@ pub fn spawn(future: impl Future<Output = ()> + 'static) -> TaskHandle {
         id
     });
     let cancelled = Rc::new(AtomicBool::new(false));
-    TASKS.with(|tasks| {
-        tasks.borrow_mut().push(Task {
-            id,
-            cancelled: cancelled.clone(),
-            future: Some(Box::pin(future)),
-        });
-    });
+    let mut task = Task {
+        id,
+        cancelled: cancelled.clone(),
+        future: Some(Box::pin(future)),
+    };
+    if CANCELLING_TASKS.get() {
+        cancelled.store(true, Ordering::Release);
+        drop_task_future(&mut task);
+    } else {
+        TASKS.with(|tasks| tasks.borrow_mut().push(task));
+    }
     TaskHandle { id, cancelled }
 }
 
@@ -195,13 +204,26 @@ impl std::error::Error for BlockingTaskError {}
 /// Engine objects and generated Godot APIs must stay on the main thread and
 /// therefore must not be moved into this closure. Dropping the returned
 /// future detaches an already-running worker; Rust threads cannot be forcibly
-/// cancelled safely.
+/// cancelled safely. Hot reload is deferred until these workers finish. At
+/// engine shutdown, a module with running workers remains loaded until the
+/// process exits, but its Host callbacks are revoked. Subsequent worker logs
+/// use standard error instead of calling the retired Host.
 #[must_use]
 pub fn spawn_blocking<T, F>(work: F) -> BlockingTask<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    spawn_blocking_with(&BLOCKING_WORKERS, work)
+}
+
+fn spawn_blocking_with<T, F>(registry: &Mutex<Vec<JoinHandle<()>>>, work: F) -> BlockingTask<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    reap_finished_workers(registry);
+    let mut workers = registry.lock().unwrap_or_else(|error| error.into_inner());
     let (sender, receiver) = mpsc::sync_channel(1);
     let spawn = std::thread::Builder::new()
         .name("godot-rust-worker".to_owned())
@@ -212,9 +234,43 @@ where
     BlockingTask {
         receiver: spawn.map_or_else(
             |error| Err(BlockingTaskError::Spawn(error.to_string())),
-            |_| Ok(receiver),
+            |worker| {
+                workers.push(worker);
+                Ok(receiver)
+            },
         ),
     }
+}
+
+fn reap_finished_workers(registry: &Mutex<Vec<JoinHandle<()>>>) {
+    let finished = {
+        let mut workers = registry.lock().unwrap_or_else(|error| error.into_inner());
+        let mut finished = Vec::new();
+        let mut index = 0;
+        while index < workers.len() {
+            if workers[index].is_finished() {
+                finished.push(workers.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        finished
+    };
+    for worker in finished {
+        let _ = worker.join();
+    }
+}
+
+pub(crate) fn blocking_workers_finished() -> bool {
+    blocking_workers_finished_in(&BLOCKING_WORKERS)
+}
+
+fn blocking_workers_finished_in(registry: &Mutex<Vec<JoinHandle<()>>>) -> bool {
+    reap_finished_workers(registry);
+    registry
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty()
 }
 
 /// Future returned by [`spawn_blocking`].
@@ -356,8 +412,18 @@ pub fn poll_frame() {
 
 #[doc(hidden)]
 pub fn cancel_all() {
+    struct CancellationScope(bool);
+
+    impl Drop for CancellationScope {
+        fn drop(&mut self) {
+            CANCELLING_TASKS.set(self.0);
+        }
+    }
+
+    let _scope = CancellationScope(CANCELLING_TASKS.replace(true));
     let tasks = TASKS.with(|tasks| core::mem::take(&mut *tasks.borrow_mut()));
     for mut task in tasks {
+        task.cancelled.store(true, Ordering::Release);
         drop_task_future(&mut task);
     }
 }
@@ -456,6 +522,65 @@ mod tests {
         poll_frame();
         cancel_all();
         assert!(dropped_normally.get());
+    }
+
+    #[test]
+    fn cancellation_also_drops_tasks_spawned_by_future_destructors() {
+        struct SpawnOnDrop(Rc<Cell<bool>>);
+
+        impl Drop for SpawnOnDrop {
+            fn drop(&mut self) {
+                struct MarkDrop(Rc<Cell<bool>>);
+
+                impl Drop for MarkDrop {
+                    fn drop(&mut self) {
+                        self.0.set(true);
+                    }
+                }
+
+                let mark = MarkDrop(self.0.clone());
+                let nested = spawn(async move {
+                    let _mark = mark;
+                    core::future::pending::<()>().await;
+                });
+                assert!(nested.is_cancelled());
+            }
+        }
+
+        cancel_all();
+        let dropped = Rc::new(Cell::new(false));
+        let guard = SpawnOnDrop(dropped.clone());
+        let handle = spawn(async move {
+            let _guard = guard;
+            core::future::pending::<()>().await;
+        });
+        cancel_all();
+        assert!(handle.is_cancelled());
+        assert!(dropped.get());
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+
+        let completed = Rc::new(Cell::new(false));
+        let output = completed.clone();
+        spawn(async move { output.set(true) });
+        poll_frame();
+        assert!(completed.get());
+    }
+
+    #[test]
+    fn detached_blocking_workers_prevent_unloading_until_they_finish() {
+        let registry = Mutex::new(Vec::new());
+        let (release, wait) = mpsc::sync_channel(0);
+        let task = spawn_blocking_with(&registry, move || wait.recv().unwrap());
+        drop(task);
+        assert!(!blocking_workers_finished_in(&registry));
+        release.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !blocking_workers_finished_in(&registry) {
+            assert!(Instant::now() < deadline, "worker did not finish");
+            std::thread::yield_now();
+        }
+        assert!(registry.lock().unwrap().is_empty());
     }
 
     #[test]

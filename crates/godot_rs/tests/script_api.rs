@@ -690,13 +690,6 @@ fn struct_macro_generates_defaults_and_field_metadata() {
     assert_eq!(abilities.hint, godot_rs::abi::ABI_PROPERTY_HINT_FLAGS);
     assert_eq!(Ability::from_bits_retain(1 << 12).bits(), 1 << 12);
 
-    player.health_changed.emit((100, 90));
-    player.message_sent.emit((String::from("构建完成"),));
-    player.motion_changed.emit((
-        Vector2::new(1.0, 2.0),
-        Vector3::new(3.0, 4.0, 5.0),
-        Color::rgba(0.25, 0.5, 0.75, 1.0),
-    ));
     player.take_damage(10);
     player.sync_state(9);
     assert_eq!(player.transient_counter, 9);
@@ -1487,7 +1480,8 @@ fn generated_module_exports_c_abi_descriptors_and_state() {
     // SAFETY: The generated state is a live Player until the drop callback.
     unsafe { &*state.cast::<Player>() }
         .health_changed
-        .emit((100, 90));
+        .emit((100, 90))
+        .expect("captured signal emission");
     assert_eq!(signal_capture.field_index, 3);
     assert_eq!(signal_capture.arguments.len(), 2);
     assert_eq!(signal_capture.arguments[0].type_, AbiValueType::I64);
@@ -1498,16 +1492,22 @@ fn generated_module_exports_c_abi_descriptors_and_state() {
     // SAFETY: State was created for Player and remains live until its paired
     // drop callback at the end of this test.
     let player = unsafe { &*state.cast::<Player>() };
-    player.message_sent.emit((String::from("保存成功"),));
+    player
+        .message_sent
+        .emit((String::from("保存成功"),))
+        .expect("captured signal emission");
     assert_eq!(signal_capture.field_index, 4);
     assert_eq!(signal_capture.strings, ["保存成功"]);
     // SAFETY: The generated state remains live and its signal field carries
     // inline, allocation-free math ABI values.
-    unsafe { &*state.cast::<Player>() }.motion_changed.emit((
-        Vector2::new(1.0, 2.0),
-        Vector3::new(3.0, 4.0, 5.0),
-        Color::rgba(0.25, 0.5, 0.75, 1.0),
-    ));
+    unsafe { &*state.cast::<Player>() }
+        .motion_changed
+        .emit((
+            Vector2::new(1.0, 2.0),
+            Vector3::new(3.0, 4.0, 5.0),
+            Color::rgba(0.25, 0.5, 0.75, 1.0),
+        ))
+        .expect("captured signal emission");
     assert_eq!(signal_capture.field_index, 27);
     assert_eq!(signal_capture.arguments[0].vector2(), Some([1.0, 2.0]));
     assert_eq!(signal_capture.arguments[1].vector3(), Some([3.0, 4.0, 5.0]));

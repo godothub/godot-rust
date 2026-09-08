@@ -3,11 +3,14 @@ use proc_macro2::{Ident, Span, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
+use syn::visit_mut::VisitMut;
 use syn::{
     Attribute, Error, Expr, Fields, FnArg, GenericArgument, ImplItem, ImplItemConst, ImplItemFn,
     Item, ItemEnum, ItemImpl, ItemStruct, LitStr, Meta, Pat, Path, PathArguments, ReturnType,
     Token, Type, Visibility,
 };
+
+mod typed_script;
 
 /// Declares an attachable Rust Script or its Godot-facing impl block.
 #[proc_macro_attribute]
@@ -538,7 +541,9 @@ struct FieldMetadata {
     property_type: Option<PropertyType>,
     property_hint: u32,
     property_hint_string: String,
+    property_hint_expression: Option<TokenStream2>,
     typed_array_element: Option<String>,
+    typed_array_class: Option<Type>,
     property_object_class: Option<Type>,
     property_node_usage: bool,
     property_group: Option<String>,
@@ -546,7 +551,7 @@ struct FieldMetadata {
     property_setter: Option<syn::Ident>,
     property_read_only: bool,
     node_path: Option<String>,
-    node_class: Option<String>,
+    node_class: Option<Type>,
     node_optional: bool,
     signal_arguments: Vec<SignalArgumentMetadata>,
 }
@@ -561,7 +566,9 @@ impl Default for FieldMetadata {
             property_type: None,
             property_hint: 0,
             property_hint_string: String::new(),
+            property_hint_expression: None,
             typed_array_element: None,
+            typed_array_class: None,
             property_object_class: None,
             property_node_usage: false,
             property_group: None,
@@ -660,13 +667,25 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
     let mut initializers = Vec::new();
     let mut field_getters = Vec::new();
     let mut field_setters = Vec::new();
+    let mut property_proxies = Vec::new();
+    let mut signal_proxies = Vec::new();
+    let name = &item.ident;
+    let self_type: Type = syn::parse_quote!(#name);
     match &mut item.fields {
         Fields::Named(fields) => {
             for (index, field) in fields.named.iter_mut().enumerate() {
                 let Some(name) = field.ident.as_ref() else {
                     return Err(Error::new_spanned(field, "script field must have a name"));
                 };
-                let metadata = take_field_metadata(&mut field.attrs, &field.ty)?;
+                if name == "__godot_rs_tasks" {
+                    return Err(Error::new_spanned(
+                        name,
+                        "this field name is reserved for the script task scope",
+                    ));
+                }
+                let mut generated_type = field.ty.clone();
+                ExplicitSelfType(&self_type).visit_type_mut(&mut generated_type);
+                let metadata = take_field_metadata(&mut field.attrs, &generated_type)?;
                 let index = u32::try_from(index).map_err(|_| {
                     Error::new_spanned(name, "script has too many fields for the project ABI")
                 })?;
@@ -675,8 +694,14 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                     let godot_name = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
                     let godot_name = LitStr::new(godot_name, name.span());
                     quote!(::godot_rs::signal::Signal::new(#index, #godot_name))
+                } else if metadata.kind == FieldKind::Node {
+                    let class = metadata.node_class.as_ref().expect("validated node class");
+                    quote!({
+                        ::godot_rs::script::assert_export_node::<#class>();
+                        ::core::default::Default::default()
+                    })
                 } else if metadata.property_type == Some(PropertyType::GodotInteger) {
-                    let field_type = &field.ty;
+                    let field_type = &generated_type;
                     metadata.default.as_ref().map_or_else(
                         || {
                             quote!(
@@ -722,9 +747,20 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                         .unwrap_or_else(|| quote!(::core::default::Default::default()))
                 };
                 initializers.push(quote!(#name: #initializer));
-                descriptors.push(field_descriptor(name, &field.ty, &metadata)?);
+                descriptors.push(field_descriptor(name, &generated_type, &metadata)?);
+                if metadata.property_type.is_some() {
+                    property_proxies.push(typed_script::property_api(
+                        name,
+                        &generated_type,
+                        index,
+                        metadata.property_read_only,
+                    ));
+                }
+                if metadata.kind == FieldKind::Signal {
+                    signal_proxies.push(typed_script::signal_api(name, &generated_type));
+                }
                 if metadata.property_type.is_some() || metadata.reload == ReloadPolicy::Persist {
-                    let field_type = &field.ty;
+                    let field_type = &generated_type;
                     let field_value = metadata.property_getter.as_ref().map_or_else(
                         || quote!(::core::clone::Clone::clone(&self.#name)),
                         |getter| quote!(self.#getter()),
@@ -759,7 +795,7 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                         });
                     }
                 } else if metadata.kind == FieldKind::Node {
-                    let field_type = &field.ty;
+                    let field_type = &generated_type;
                     field_setters.push(quote! {
                         #index => {
                             let Ok(decoded) =
@@ -788,6 +824,14 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
     }
 
     let name = &item.ident;
+    let api_name = typed_script::api_name(name);
+    let api = typed_script::class_api(
+        name,
+        &item.vis,
+        &base_type,
+        &property_proxies,
+        &signal_proxies,
+    );
     let base_name = base_type.to_string();
     let tool = arguments.tool;
     let abstract_ = arguments.abstract_;
@@ -812,14 +856,25 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
             quote!(::core::option::Option::Some(#path))
         },
     );
-    let constructor = match &item.fields {
-        Fields::Named(_) => quote!(Self { #(#initializers),* }),
-        Fields::Unit => quote!(Self),
+    let task_field = syn::Field::parse_named.parse2(quote! {
+        #[doc(hidden)]
+        __godot_rs_tasks: ::std::cell::OnceCell<::godot_rs::task::TaskScope>
+    })?;
+    match &mut item.fields {
+        Fields::Named(fields) => fields.named.push(task_field),
+        Fields::Unit => {
+            item.fields = Fields::Named(syn::parse_quote!({ #task_field }));
+            item.semi_token = None;
+        }
         Fields::Unnamed(_) => unreachable!("tuple fields were rejected"),
-    };
+    }
+    initializers.push(quote!(__godot_rs_tasks: ::std::cell::OnceCell::new()));
+    let constructor = quote!(Self { #(#initializers),* });
 
     Ok(quote! {
         #item
+
+        #api
 
         impl #name {
             /// Returns the Godot object that owns the current Rust script.
@@ -830,6 +885,8 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
         }
 
         impl ::godot_rs::script::ScriptClass for #name {
+            type Api = #api_name;
+
             const DESCRIPTOR: ::godot_rs::script::ScriptDescriptor = {
                 const FIELDS: &'static [::godot_rs::script::FieldDescriptor] =
                     &[#(#descriptors),*];
@@ -895,6 +952,8 @@ fn take_field_metadata(
 ) -> syn::Result<FieldMetadata> {
     let mut metadata = FieldMetadata::default();
     let mut retained = Vec::with_capacity(attributes.len());
+    let mut initializer_attribute = None;
+    let mut property_attribute = None;
     for attribute in core::mem::take(attributes) {
         if attribute.path().is_ident("export") || attribute.path().is_ident("property") {
             let kind = if attribute.path().is_ident("export") {
@@ -920,6 +979,11 @@ fn take_field_metadata(
                     metadata.property_hint = 23;
                     metadata.property_hint_string = array.hint_string;
                     metadata.typed_array_element = Some(array.element_name);
+                    let element =
+                        single_type_argument(field_type, "Array").expect("validated typed array");
+                    metadata.typed_array_class = reflected_object_class(element);
+                    metadata.property_hint_expression =
+                        Some(array_hint_expression(element, &attribute)?);
                 }
             }
             if matches!(
@@ -939,55 +1003,17 @@ fn take_field_metadata(
                 metadata.property_node_usage =
                     kind == FieldKind::Export && property_type == PropertyType::NodeRef;
             }
-            merge_default(&mut metadata, find_default(&entries), &attribute)?;
-            if matches!(
-                property_type,
-                PropertyType::String | PropertyType::StringName | PropertyType::NodePath
-            ) {
-                validate_string_default(metadata.default.as_ref(), &attribute)?;
-            }
-            if matches!(
-                property_type,
-                PropertyType::Array
-                    | PropertyType::Dictionary
-                    | PropertyType::PackedByteArray
-                    | PropertyType::PackedInt32Array
-                    | PropertyType::PackedInt64Array
-                    | PropertyType::PackedFloat32Array
-                    | PropertyType::PackedFloat64Array
-                    | PropertyType::PackedStringArray
-                    | PropertyType::PackedVector2Array
-                    | PropertyType::PackedVector3Array
-                    | PropertyType::PackedColorArray
-                    | PropertyType::PackedVector4Array
-            ) && metadata.default.is_some()
-            {
-                return Err(Error::new_spanned(
-                    &attribute,
-                    "container exports currently use their empty Godot value as the default; remove `default = ...`",
-                ));
-            }
-            if matches!(
-                property_type,
-                PropertyType::NodeRef | PropertyType::ResourceRef
-            ) && metadata.default.is_some()
-            {
-                return Err(Error::new_spanned(
-                    &attribute,
-                    "exported Godot object references use `None` as their default; remove `default = ...`",
-                ));
-            }
+            merge_default(&mut metadata, find_default(&entries)?, &attribute)?;
             metadata.options = attribute_options(&attribute);
+            property_attribute = Some(attribute);
         } else if attribute.path().is_ident("node") {
             set_field_kind(&mut metadata, FieldKind::Node, &attribute)?;
             let arguments = attribute.parse_args::<NodeArguments>()?;
-            metadata.node_class = Some(validate_node_type(
-                field_type,
-                arguments.optional,
-                &attribute,
-            )?);
+            let optional =
+                arguments.optional || single_type_argument(field_type, "Option").is_some();
+            metadata.node_class = Some(validate_node_type(field_type, optional, &attribute)?);
             metadata.node_path = Some(arguments.path.value());
-            metadata.node_optional = arguments.optional;
+            metadata.node_optional = optional;
             metadata.options = attribute_options(&attribute);
         } else if attribute.path().is_ident("signal") {
             set_field_kind(&mut metadata, FieldKind::Signal, &attribute)?;
@@ -1004,12 +1030,70 @@ fn take_field_metadata(
             }
             metadata.reload = policy;
             merge_default(&mut metadata, default, &attribute)?;
+        } else if attribute.path().is_ident("init") {
+            let entries = parse_meta_arguments(&attribute)?;
+            if entries.len() != 1
+                || !matches!(entries.first(), Some(Meta::NameValue(value)) if value.path.is_ident("default"))
+            {
+                return Err(Error::new_spanned(
+                    attribute,
+                    "field initialization uses `#[init(default = expression)]`",
+                ));
+            }
+            merge_default(&mut metadata, find_default(&entries)?, &attribute)?;
+            initializer_attribute = Some(attribute);
         } else {
             retained.push(attribute);
         }
     }
+    if let Some(attribute) = initializer_attribute {
+        if metadata.kind != FieldKind::Plain {
+            return Err(Error::new_spanned(
+                attribute,
+                "`init` initializes plain Rust fields; use the property's `default` option, or let Godot bind nodes and signals",
+            ));
+        }
+    }
+    if let Some(attribute) = property_attribute {
+        validate_property_default(&metadata, &attribute)?;
+    }
     *attributes = retained;
     Ok(metadata)
+}
+
+fn validate_property_default(metadata: &FieldMetadata, source: &Attribute) -> syn::Result<()> {
+    match metadata.property_type {
+        Some(PropertyType::String | PropertyType::StringName | PropertyType::NodePath) => {
+            validate_string_default(metadata.default.as_ref(), source)?;
+        }
+        Some(
+            PropertyType::Array
+            | PropertyType::Dictionary
+            | PropertyType::PackedByteArray
+            | PropertyType::PackedInt32Array
+            | PropertyType::PackedInt64Array
+            | PropertyType::PackedFloat32Array
+            | PropertyType::PackedFloat64Array
+            | PropertyType::PackedStringArray
+            | PropertyType::PackedVector2Array
+            | PropertyType::PackedVector3Array
+            | PropertyType::PackedColorArray
+            | PropertyType::PackedVector4Array,
+        ) if metadata.default.is_some() => {
+            return Err(Error::new_spanned(
+                source,
+                "container exports currently use their empty Godot value as the default; remove `default = ...`",
+            ));
+        }
+        Some(PropertyType::NodeRef | PropertyType::ResourceRef) if metadata.default.is_some() => {
+            return Err(Error::new_spanned(
+                source,
+                "exported Godot object references use `None` as their default; remove `default = ...`",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn set_field_kind(
@@ -1331,23 +1415,75 @@ fn array_element_metadata(element: &Type, source: &Attribute) -> syn::Result<(St
     Ok((format!("{variant_type}:"), godot_name.to_owned()))
 }
 
+fn array_hint_expression(element: &Type, source: &Attribute) -> syn::Result<TokenStream2> {
+    let parts = if let Some(class) = reflected_object_class(element) {
+        let prefix = if single_type_argument(element, "GodotRef").is_some() {
+            "24/17:"
+        } else {
+            "24/34:"
+        };
+        vec![
+            quote!(#prefix),
+            quote!(<#class as ::godot_rs::engine::GodotClass>::CLASS_NAME),
+        ]
+    } else if let Some(nested) = single_type_argument(element, "Array") {
+        let nested = array_hint_expression(nested, source)?;
+        vec![quote!("28:"), nested]
+    } else {
+        let (hint, _) = array_element_metadata(element, source)?;
+        return Ok(quote!(#hint));
+    };
+    Ok(quote!({
+        const PARTS: &[&str] = &[#(#parts),*];
+        const LENGTH: usize = {
+            let mut length = 0;
+            let mut index = 0;
+            while index < PARTS.len() {
+                length += PARTS[index].len();
+                index += 1;
+            }
+            length
+        };
+        const BYTES: [u8; LENGTH] = {
+            let mut output = [0; LENGTH];
+            let mut offset = 0;
+            let mut part = 0;
+            while part < PARTS.len() {
+                let bytes = PARTS[part].as_bytes();
+                let mut index = 0;
+                while index < bytes.len() {
+                    output[offset] = bytes[index];
+                    offset += 1;
+                    index += 1;
+                }
+                part += 1;
+            }
+            output
+        };
+        match ::core::str::from_utf8(&BYTES) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(_) => panic!("Godot property hints are UTF-8"),
+        }
+    }))
+}
+
 fn simple_type_name(type_: &Type, source: &Attribute) -> syn::Result<String> {
     let Type::Path(path) = type_ else {
         return Err(Error::new_spanned(
             source,
-            "an exported Array object element must use one generated Godot class",
+            "an exported Array object element must use one Godot class or Rust script type",
         ));
     };
     let Some(segment) = path.path.segments.last() else {
         return Err(Error::new_spanned(
             source,
-            "an exported Array object element must use one generated Godot class",
+            "an exported Array object element must use one Godot class or Rust script type",
         ));
     };
     if !matches!(segment.arguments, PathArguments::None) {
         return Err(Error::new_spanned(
             source,
-            "an exported Array object element must use one generated Godot class",
+            "an exported Array object element must use one Godot class or Rust script type",
         ));
     }
     Ok(segment.ident.to_string())
@@ -1568,11 +1704,16 @@ fn set_hint_value(
     Ok(())
 }
 
-fn find_default(entries: &Punctuated<Meta, Token![,]>) -> Option<Expr> {
-    entries.iter().find_map(|entry| match entry {
-        Meta::NameValue(value) if value.path.is_ident("default") => Some(value.value.clone()),
-        _ => None,
-    })
+fn find_default(entries: &Punctuated<Meta, Token![,]>) -> syn::Result<Option<Expr>> {
+    let mut default = None;
+    for entry in entries {
+        if let Meta::NameValue(value) = entry {
+            if value.path.is_ident("default") && default.replace(value.value.clone()).is_some() {
+                return Err(Error::new_spanned(value, "duplicate `default` value"));
+            }
+        }
+    }
+    Ok(default)
 }
 
 struct NodeArguments {
@@ -1586,6 +1727,9 @@ impl Parse for NodeArguments {
         let mut optional = false;
         while !input.is_empty() {
             input.parse::<Token![,]>()?;
+            if input.is_empty() {
+                break;
+            }
             let option = input.parse::<Path>()?;
             if !option.is_ident("optional") {
                 return Err(Error::new_spanned(
@@ -1605,11 +1749,7 @@ impl Parse for NodeArguments {
     }
 }
 
-fn validate_node_type(
-    field_type: &Type,
-    optional: bool,
-    source: &Attribute,
-) -> syn::Result<String> {
+fn validate_node_type(field_type: &Type, optional: bool, source: &Attribute) -> syn::Result<Type> {
     let node_ref = if optional {
         single_type_argument(field_type, "Option").ok_or_else(|| {
             Error::new_spanned(
@@ -1630,25 +1770,25 @@ fn validate_node_type(
             },
         )
     })?;
-    let Type::Path(target) = target else {
+    let Type::Path(path) = target else {
         return Err(Error::new_spanned(
             source,
-            "a node target must be one generated Godot class",
+            "a node target must be one Godot class or Rust script type",
         ));
     };
-    let Some(segment) = target.path.segments.last() else {
+    let Some(segment) = path.path.segments.last() else {
         return Err(Error::new_spanned(
             source,
-            "a node target must be one generated Godot class",
+            "a node target must be one Godot class or Rust script type",
         ));
     };
     if !matches!(segment.arguments, PathArguments::None) {
         return Err(Error::new_spanned(
             source,
-            "a node target must be one generated Godot class",
+            "a node target must be one Godot class or Rust script type",
         ));
     }
-    Ok(segment.ident.to_string())
+    Ok(target.clone())
 }
 
 fn single_type_argument<'a>(field_type: &'a Type, expected: &str) -> Option<&'a Type> {
@@ -1677,6 +1817,56 @@ fn parse_signal_schema(
 ) -> syn::Result<Vec<SignalArgumentMetadata>> {
     validate_outer_type(field_type, "Signal", attribute)?;
     let entries = parse_meta_arguments(attribute)?;
+    if let Some(Type::BareFn(signature)) = single_type_argument(field_type, "Signal") {
+        if !entries.is_empty() {
+            return Err(Error::new_spanned(
+                attribute,
+                "function-style signals declare argument names in `Signal<fn(name: Type, ...)>`; remove `args(...)`",
+            ));
+        }
+        if signature.unsafety.is_some()
+            || signature.abi.is_some()
+            || signature.variadic.is_some()
+            || signature.lifetimes.is_some()
+            || !matches!(&signature.output, ReturnType::Default)
+                && !matches!(&signature.output, ReturnType::Type(_, ty) if matches!(ty.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()))
+        {
+            return Err(Error::new_spanned(
+                signature,
+                "signals use a safe Rust function signature with no return value, such as `Signal<fn(amount: i64)>`",
+            ));
+        }
+        if signature.inputs.len() > 8 {
+            return Err(Error::new_spanned(
+                signature,
+                "signals currently support at most 8 arguments",
+            ));
+        }
+        let mut names = std::collections::HashSet::new();
+        return signature
+            .inputs
+            .iter()
+            .map(|argument| {
+                let Some((name, _)) = &argument.name else {
+                    return Err(Error::new_spanned(
+                        argument,
+                        "name each signal argument, such as `Signal<fn(amount: i64)>`",
+                    ));
+                };
+                if name == "_" || !names.insert(name.to_string()) {
+                    return Err(Error::new_spanned(
+                        name,
+                        "signal argument names must be unique and cannot be `_`",
+                    ));
+                }
+                abi_value_type(&argument.ty)?;
+                Ok(SignalArgumentMetadata {
+                    name: name.clone(),
+                    type_: argument.ty.clone(),
+                })
+            })
+            .collect();
+    }
     let mut names = None;
     for entry in entries {
         match entry {
@@ -1715,6 +1905,15 @@ fn parse_signal_schema(
                 argument_types.len()
             ),
         ));
+    }
+    let mut unique_names = std::collections::HashSet::new();
+    for name in &names {
+        if name == "_" || !unique_names.insert(name.to_string()) {
+            return Err(Error::new_spanned(
+                name,
+                "signal argument names must be unique and cannot be `_`",
+            ));
+        }
     }
     names
         .into_iter()
@@ -2386,16 +2585,29 @@ fn field_descriptor(
             let hint = metadata.property_hint;
             quote!(#hint)
         };
-        let hint_string = LitStr::new(&metadata.property_hint_string, Span::call_site());
+        let hint_string = metadata
+            .property_hint_expression
+            .clone()
+            .unwrap_or_else(|| {
+                metadata.property_object_class.as_ref().map_or_else(
+                    || {
+                        let hint = LitStr::new(&metadata.property_hint_string, Span::call_site());
+                        quote!(#hint)
+                    },
+                    |class| quote!(<#class as ::godot_rs::engine::GodotClass>::CLASS_NAME),
+                )
+            });
         let group = metadata.property_group.as_ref().map(|group| {
             let group = LitStr::new(group, Span::call_site());
             quote!(::core::option::Option::Some(#group))
         });
         let group = group.unwrap_or_else(|| quote!(::core::option::Option::None));
-        let typed_array_element = metadata.typed_array_element.as_ref().map(|element| {
+        let typed_array_element = metadata.typed_array_class.as_ref().map(|class| quote!(
+            ::core::option::Option::Some(<#class as ::godot_rs::engine::GodotClass>::CLASS_NAME)
+        )).or_else(|| metadata.typed_array_element.as_ref().map(|element| {
             let element = LitStr::new(element, Span::call_site());
             quote!(::core::option::Option::Some(#element))
-        });
+        }));
         let typed_array_element =
             typed_array_element.unwrap_or_else(|| quote!(::core::option::Option::None));
         let integer_options = if type_ == PropertyType::GodotInteger {
@@ -2406,11 +2618,10 @@ fn field_descriptor(
             quote!(::core::option::Option::None)
         };
         let encoded = encode_property_schema(
-            metadata.property_group.as_deref(),
-            &metadata.property_hint_string,
-            metadata.typed_array_element.as_deref(),
+            metadata.property_group.as_deref().unwrap_or_default(),
+            &hint_string,
+            &typed_array_element,
         );
-        let encoded = LitStr::new(&encoded, Span::call_site());
         let base_usage = if metadata.kind == FieldKind::Property {
             quote!(::godot_rs::abi::ABI_PROPERTY_USAGE_SCRIPT_STORAGE)
         } else if metadata.property_node_usage {
@@ -2449,18 +2660,15 @@ fn field_descriptor(
                 .expect("node path was validated"),
             Span::call_site(),
         );
-        let class_name = LitStr::new(
-            metadata
-                .node_class
-                .as_deref()
-                .expect("node class was validated"),
-            Span::call_site(),
-        );
+        let class = metadata
+            .node_class
+            .as_ref()
+            .expect("node class was validated");
         let optional = metadata.node_optional;
         quote! {
             ::core::option::Option::Some(::godot_rs::script::NodeDescriptor {
                 path: #path,
-                class_name: #class_name,
+                class_name: <#class as ::godot_rs::engine::GodotClass>::CLASS_NAME,
                 optional: #optional,
             })
         }
@@ -2525,21 +2733,73 @@ fn field_descriptor(
 }
 
 fn encode_property_schema(
-    group: Option<&str>,
-    hint_string: &str,
-    typed_array_element: Option<&str>,
-) -> String {
-    let group = group.unwrap_or_default();
-    let typed_array_element = typed_array_element.unwrap_or_default();
-    format!(
-        "gdrs-property-v2:{}:{}:{}:{}{}{}",
-        group.len(),
-        hint_string.len(),
-        typed_array_element.len(),
-        group,
-        hint_string,
-        typed_array_element,
-    )
+    group: &str,
+    hint_string: &TokenStream2,
+    typed_array_element: &TokenStream2,
+) -> TokenStream2 {
+    quote!({
+        const PARTS: &[&str] = &[#group, #hint_string, match #typed_array_element {
+            ::core::option::Option::Some(value) => value,
+            ::core::option::Option::None => "",
+        }];
+        const PREFIX: &[u8] = b"gdrs-property-v2:";
+        const fn digits(mut value: usize) -> usize {
+            let mut count = 1;
+            while value >= 10 {
+                count += 1;
+                value /= 10;
+            }
+            count
+        }
+        const LENGTH: usize = {
+            let mut length = PREFIX.len();
+            let mut part = 0;
+            while part < PARTS.len() {
+                length += digits(PARTS[part].len()) + 1 + PARTS[part].len();
+                part += 1;
+            }
+            length
+        };
+        const BYTES: [u8; LENGTH] = {
+            let mut bytes = [0; LENGTH];
+            let mut offset = 0;
+            while offset < PREFIX.len() {
+                bytes[offset] = PREFIX[offset];
+                offset += 1;
+            }
+            let mut part = 0;
+            while part < PARTS.len() {
+                let mut value = PARTS[part].len();
+                let count = digits(value);
+                let mut digit = 0;
+                while digit < count {
+                    bytes[offset + count - digit - 1] = b'0' + (value % 10) as u8;
+                    value /= 10;
+                    digit += 1;
+                }
+                offset += count;
+                bytes[offset] = b':';
+                offset += 1;
+                part += 1;
+            }
+            part = 0;
+            while part < PARTS.len() {
+                let text = PARTS[part].as_bytes();
+                let mut index = 0;
+                while index < text.len() {
+                    bytes[offset] = text[index];
+                    offset += 1;
+                    index += 1;
+                }
+                part += 1;
+            }
+            bytes
+        };
+        match ::core::str::from_utf8(&BYTES) {
+            ::core::result::Result::Ok(value) => value,
+            ::core::result::Result::Err(_) => panic!("Godot property schemas are UTF-8"),
+        }
+    })
 }
 
 fn expand_impl(arguments: TokenStream2, mut item: ItemImpl) -> syn::Result<TokenStream2> {
@@ -2577,6 +2837,7 @@ fn expand_impl(arguments: TokenStream2, mut item: ItemImpl) -> syn::Result<Token
     let mut descriptors = Vec::new();
     let mut wrappers = Vec::new();
     let mut invocations = Vec::new();
+    let mut proxies = Vec::new();
 
     for impl_item in &mut item.items {
         match impl_item {
@@ -2590,6 +2851,9 @@ fn expand_impl(arguments: TokenStream2, mut item: ItemImpl) -> syn::Result<Token
                     }
                     if let Some(invocation) = expansion.invocation {
                         invocations.push(invocation);
+                    }
+                    if let Some(proxy) = expansion.proxy {
+                        proxies.push(proxy);
                     }
                 }
             }
@@ -2612,6 +2876,7 @@ fn expand_impl(arguments: TokenStream2, mut item: ItemImpl) -> syn::Result<Token
         #item
 
         #(#wrappers)*
+        #(#proxies)*
 
         ::godot_rs::inventory::submit! {
             ::godot_rs::script::MethodBlock {
@@ -2704,6 +2969,7 @@ fn constant_descriptor(self_type: &Type, constant: &ImplItemConst) -> syn::Resul
         descriptor,
         wrapper: None,
         invocation: Some(invocation),
+        proxy: None,
     })
 }
 
@@ -2721,6 +2987,19 @@ struct MethodExpansion {
     descriptor: TokenStream2,
     wrapper: Option<TokenStream2>,
     invocation: Option<TokenStream2>,
+    proxy: Option<TokenStream2>,
+}
+
+struct ExplicitSelfType<'a>(&'a Type);
+
+impl VisitMut for ExplicitSelfType<'_> {
+    fn visit_type_mut(&mut self, type_: &mut Type) {
+        if matches!(type_, Type::Path(path) if path.qself.is_none() && path.path.is_ident("Self")) {
+            *type_ = self.0.clone();
+        } else {
+            syn::visit_mut::visit_type_mut(self, type_);
+        }
+    }
 }
 
 fn method_descriptor(
@@ -2761,6 +3040,28 @@ fn method_descriptor(
         ));
     }
     if lifecycle.is_none() && func.is_none() && rpc.is_none() && virtual_trait.is_none() {
+        let message = match method.sig.ident.to_string().as_str() {
+            "_init" => Some(
+                "`_init` is not a Rust script callback; initialize state with `#[init(default = expression)]` and access scene nodes in `_ready`",
+            ),
+            "_notification"
+            | "_unhandled_key_input"
+            | "_shortcut_input"
+            | "_get_configuration_warnings"
+            | "_get"
+            | "_set"
+            | "_get_property_list"
+            | "_validate_property"
+            | "_property_can_revert"
+            | "_property_get_revert"
+            | "_to_string" => Some(
+                "this Godot callback is not automatically registered in an inherent impl; implement its generated `*Virtual` trait with `#[script]`",
+            ),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Err(Error::new_spanned(&method.sig.ident, message));
+        }
         return Ok(None);
     }
     if !method.sig.generics.params.is_empty() {
@@ -2829,6 +3130,21 @@ fn method_descriptor(
         ));
     }
 
+    let signature = token_string(&method.sig);
+    // Generated metadata and proxies live outside the user's impl, where Self
+    // either has no meaning or names a proxy. Keep the original method intact.
+    let mut generated_method = method.clone();
+    let mut explicit_self = ExplicitSelfType(self_type);
+    for argument in &mut generated_method.sig.inputs {
+        if let FnArg::Typed(argument) = argument {
+            explicit_self.visit_type_mut(&mut argument.ty);
+        }
+    }
+    if let ReturnType::Type(_, type_) = &mut generated_method.sig.output {
+        explicit_self.visit_type_mut(type_);
+    }
+    let method = &generated_method;
+
     let receiver = receiver_kind(method)?;
     let mut typed_arguments: Vec<_> = method
         .sig
@@ -2877,7 +3193,6 @@ fn method_descriptor(
         .unwrap_or(rust_method_name);
     let method_id = fnv1a(method_name_string.as_bytes());
     let exported_method_name = LitStr::new(method_name_string, method_name.span());
-    let signature = token_string(&method.sig);
     let options = rpc.as_ref().map(attribute_options).unwrap_or_default();
     let options = LitStr::new(&options, Span::call_site());
     let receiver_tokens = match receiver {
@@ -2948,7 +3263,7 @@ fn method_descriptor(
         lifecycle,
         Some(Lifecycle::Input | Lifecycle::UnhandledInput)
     ) {
-        vec![Some("InputEvent".to_owned())]
+        vec![Some(quote!("InputEvent"))]
     } else {
         typed_arguments
             .iter()
@@ -2962,10 +3277,7 @@ fn method_descriptor(
         .map(|((name, type_), class_name)| {
             let class_name = class_name.as_ref().map_or_else(
                 || quote!(::core::option::Option::None),
-                |class_name| {
-                    let class_name = LitStr::new(class_name, Span::call_site());
-                    quote!(::core::option::Option::Some(#class_name))
-                },
+                |class_name| quote!(::core::option::Option::Some(#class_name)),
             );
             quote! {
                 ::godot_rs::script::MethodArgumentDescriptor {
@@ -2994,10 +3306,7 @@ fn method_descriptor(
         .map(|class_name| {
             class_name.as_ref().map_or_else(
                 || quote!(::godot_rs::abi::AbiByteSlice::EMPTY),
-                |class_name| {
-                    let class_name = LitStr::new(class_name, Span::call_site());
-                    quote!(::godot_rs::abi::AbiByteSlice::from_static(#class_name))
-                },
+                |class_name| quote!(::godot_rs::abi::AbiByteSlice::from_static(#class_name)),
             )
         })
         .collect::<Vec<_>>();
@@ -3024,10 +3333,7 @@ fn method_descriptor(
         .collect::<Vec<_>>();
     let return_class = reflected_return_value_metadata(&method.sig.output).map_or_else(
         || quote!(::core::option::Option::None),
-        |class_name| {
-            let class_name = LitStr::new(&class_name, Span::call_site());
-            quote!(::core::option::Option::Some(#class_name))
-        },
+        |class_name| quote!(::core::option::Option::Some(#class_name)),
     );
 
     let descriptor = quote! {{
@@ -3065,6 +3371,18 @@ fn method_descriptor(
         descriptor,
         wrapper,
         invocation,
+        proxy: if lifecycle.is_none() && virtual_trait.is_none() {
+            Some(typed_script::method_api(
+                self_type,
+                type_name,
+                method,
+                method_id,
+                &exported_method_name,
+                is_vararg,
+            )?)
+        } else {
+            None
+        },
     }))
 }
 
@@ -3302,7 +3620,7 @@ fn has_type_arguments(value: &Type) -> bool {
         .is_some_and(|segment| !matches!(segment.arguments, PathArguments::None))
 }
 
-fn reflected_object_class(value: &Type) -> Option<syn::Ident> {
+fn reflected_object_class(value: &Type) -> Option<Type> {
     let Type::Path(path) = value else {
         return None;
     };
@@ -3318,7 +3636,7 @@ fn reflected_object_class(value: &Type) -> Option<syn::Ident> {
             .then(|| reflected_object_class(inner))
             .flatten();
     }
-    if segment.ident != "ObjectRef" && segment.ident != "NodeRef" {
+    if segment.ident != "ObjectRef" && segment.ident != "NodeRef" && segment.ident != "GodotRef" {
         return None;
     }
     let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
@@ -3327,20 +3645,12 @@ fn reflected_object_class(value: &Type) -> Option<syn::Ident> {
     let GenericArgument::Type(Type::Path(class)) = arguments.args.first()? else {
         return None;
     };
-    (arguments.args.len() == 1)
-        .then(|| {
-            class
-                .path
-                .segments
-                .last()
-                .map(|segment| segment.ident.clone())
-        })
-        .flatten()
+    (arguments.args.len() == 1).then(|| Type::Path(class.clone()))
 }
 
-fn reflected_value_metadata(value: &Type) -> Option<String> {
-    if let Some(class_name) = reflected_object_class(value) {
-        return Some(class_name.to_string());
+fn reflected_value_metadata(value: &Type) -> Option<TokenStream2> {
+    if let Some(class) = reflected_object_class(value) {
+        return Some(quote!(<#class as ::godot_rs::engine::GodotClass>::CLASS_NAME));
     }
     let Type::Path(path) = value else {
         return None;
@@ -3355,36 +3665,25 @@ fn reflected_value_metadata(value: &Type) -> Option<String> {
     let GenericArgument::Type(element) = arguments.args.first()? else {
         return None;
     };
-    (arguments.args.len() == 1)
+    if arguments.args.len() == 1 {
+        if let Some(class) = reflected_object_class(element) {
+            return Some(quote!(<#class as ::godot_rs::engine::GodotClass>::CLASS_NAME));
+        }
+    }
+    let name = (arguments.args.len() == 1)
         .then(|| reflected_array_element_name(element))
-        .flatten()
+        .flatten()?;
+    Some(quote!(#name))
 }
 
 fn reflected_array_element_name(value: &Type) -> Option<String> {
     if let Some(class_name) = reflected_object_class(value) {
-        return Some(class_name.to_string());
+        return outer_type_name(&class_name);
     }
     let Type::Path(path) = value else {
         return None;
     };
     let segment = path.path.segments.last()?;
-    if segment.ident == "GodotRef" {
-        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-            return None;
-        };
-        let GenericArgument::Type(Type::Path(class)) = arguments.args.first()? else {
-            return None;
-        };
-        return (arguments.args.len() == 1)
-            .then(|| {
-                class
-                    .path
-                    .segments
-                    .last()
-                    .map(|segment| segment.ident.to_string())
-            })
-            .flatten();
-    }
     let name = match segment.ident.to_string().as_str() {
         "bool" => "bool",
         "i32" | "i64" => "int",
@@ -3405,11 +3704,14 @@ fn reflected_array_element_name(value: &Type) -> Option<String> {
     Some(name.to_owned())
 }
 
-fn reflected_return_value_metadata(output: &ReturnType) -> Option<String> {
+fn reflected_return_value_metadata(output: &ReturnType) -> Option<TokenStream2> {
     let ReturnType::Type(_, output_type) = output else {
         return None;
     };
-    if outer_type_name(output_type).as_deref() != Some("ScriptResult") {
+    if !matches!(
+        outer_type_name(output_type).as_deref(),
+        Some("ScriptResult" | "EngineResult")
+    ) {
         return reflected_value_metadata(output_type);
     }
     let Type::Path(path) = output_type.as_ref() else {
@@ -3479,7 +3781,10 @@ fn return_abi_value_type(output: &ReturnType) -> syn::Result<TokenStream2> {
     if matches!(output_type.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()) {
         return Ok(quote!(::godot_rs::abi::AbiValueType::NIL));
     }
-    if outer_type_name(output_type).as_deref() != Some("ScriptResult") {
+    if !matches!(
+        outer_type_name(output_type).as_deref(),
+        Some("ScriptResult" | "EngineResult")
+    ) {
         return abi_value_type(output_type);
     }
     let Type::Path(path) = output_type.as_ref() else {
@@ -3874,6 +4179,11 @@ impl Lifecycle {
         let convert =
             quote!(::godot_rs::script::IntoCallbackStatus::into_callback_status(result).into_abi());
         let reject_null = quote! {
+            fn assert_node_callback<T: ::godot_rs::script::ScriptBase>()
+            where
+                T::Base: ::godot_rs::engine::Inherits<::godot_rs::engine::Node>,
+            {}
+            assert_node_callback::<#self_type>();
             if instance.is_null() {
                 return ::godot_rs::abi::AbiCallResult::failure(
                     ::godot_rs::abi::AbiStatus::InvalidArgument,
@@ -3942,9 +4252,9 @@ fn valid_callback_return(output: &ReturnType) -> bool {
         ReturnType::Default => true,
         ReturnType::Type(_, output) => match output.as_ref() {
             Type::Tuple(tuple) => tuple.elems.is_empty(),
-            Type::Path(path) => path.path.segments.last().is_some_and(|segment| {
-                segment.ident == "ScriptResult" || segment.ident == "EngineResult"
-            }),
+            Type::Path(_) => single_type_argument(output, "ScriptResult")
+                .or_else(|| single_type_argument(output, "EngineResult"))
+                .is_some_and(|value| matches!(value, Type::Tuple(tuple) if tuple.elems.is_empty())),
             _ => false,
         },
     }
@@ -4057,28 +4367,160 @@ mod tests {
             .validate(&invalid)
             .expect_err("invalid callback");
         assert!(error.to_string().contains("&mut self"));
+
+        let invalid: ImplItemFn = parse_quote!(
+            fn _ready(&mut self) -> EngineResult<i64> {
+                Ok(1)
+            }
+        );
+        assert!(
+            Lifecycle::Ready
+                .validate(&invalid)
+                .expect_err("callbacks cannot return values")
+                .to_string()
+                .contains("EngineResult<()>")
+        );
     }
 
     #[test]
     fn node_fields_enforce_optional_shape() {
         let required: Type = parse_quote!(NodeRef<Sprite2D>);
         assert_eq!(
-            validate_node_type(&required, false, &parse_quote!(#[node("%Sprite")]))
-                .expect("required NodeRef"),
-            "Sprite2D"
+            outer_type_name(
+                &validate_node_type(&required, false, &parse_quote!(#[node("%Sprite")]))
+                    .expect("required NodeRef")
+            )
+            .as_deref(),
+            Some("Sprite2D")
         );
 
         let optional: Type = parse_quote!(Option<NodeRef<Camera2D>>);
         assert_eq!(
-            validate_node_type(&optional, true, &parse_quote!(#[node("%Camera", optional)]))
-                .expect("optional NodeRef"),
-            "Camera2D"
+            outer_type_name(
+                &validate_node_type(&optional, true, &parse_quote!(#[node("%Camera", optional)]))
+                    .expect("optional NodeRef")
+            )
+            .as_deref(),
+            Some("Camera2D")
         );
 
         let invalid: Type = parse_quote!(NodeRef<Camera2D>);
         let error = validate_node_type(&invalid, true, &parse_quote!(#[node("%Camera", optional)]))
+            .map(|_| ())
             .expect_err("optional field must use Option");
         assert!(error.to_string().contains("Option<NodeRef<T>>"));
+
+        let mut attributes = vec![parse_quote!(#[node("%Camera")])];
+        let inferred = take_field_metadata(&mut attributes, &optional).expect("inferred Option");
+        assert!(inferred.node_optional);
+        assert!(attributes.is_empty());
+    }
+
+    #[test]
+    fn field_initialization_is_independent_of_reload() {
+        let mut attributes = vec![
+            parse_quote!(#[init(default = Vec::with_capacity(16))]),
+            parse_quote!(#[reload(skip)]),
+        ];
+        let metadata = take_field_metadata(&mut attributes, &parse_quote!(Vec<i64>))
+            .expect("plain state initializer");
+        assert!(metadata.default.is_some());
+        assert!(metadata.reload == ReloadPolicy::Skip);
+        assert!(attributes.is_empty());
+
+        for attributes in [
+            vec![parse_quote!(#[init])],
+            vec![parse_quote!(#[export(default = 1, default = 2)])],
+            vec![
+                parse_quote!(#[init(default = 1)]),
+                parse_quote!(#[init(default = 2)]),
+            ],
+            vec![parse_quote!(#[export]), parse_quote!(#[init(default = 1)])],
+            vec![parse_quote!(#[init(default = 1)]), parse_quote!(#[export])],
+        ] {
+            assert!(take_field_metadata(&mut attributes.clone(), &parse_quote!(i64)).is_err());
+        }
+        for mut attributes in [
+            vec![
+                parse_quote!(#[export]),
+                parse_quote!(#[reload(default = Array::default())]),
+            ],
+            vec![
+                parse_quote!(#[reload(default = Array::default())]),
+                parse_quote!(#[export]),
+            ],
+        ] {
+            assert!(take_field_metadata(&mut attributes, &parse_quote!(Array<i64>)).is_err());
+        }
+    }
+
+    #[test]
+    fn function_signals_keep_names_and_types_together() {
+        let schema = parse_signal_schema(
+            &parse_quote!(#[signal]),
+            &parse_quote!(Signal<fn(previous: i64, current: i64)>),
+        )
+        .expect("named function signature");
+        assert_eq!(schema.len(), 2);
+        assert_eq!(schema[0].name, "previous");
+        assert_eq!(schema[1].name, "current");
+        assert!(
+            parse_signal_schema(&parse_quote!(#[signal]), &parse_quote!(Signal<fn()>))
+                .expect("zero argument signal")
+                .is_empty()
+        );
+
+        for signature in [
+            parse_quote!(Signal<fn(i64)>),
+            parse_quote!(Signal<fn(value: i64, value: i64)>),
+            parse_quote!(Signal<fn(value: i64) -> bool>),
+            parse_quote!(Signal<unsafe fn(value: i64)>),
+        ] {
+            assert!(parse_signal_schema(&parse_quote!(#[signal]), &signature).is_err());
+        }
+        assert!(
+            parse_signal_schema(
+                &parse_quote!(#[signal(args(value))]),
+                &parse_quote!(Signal<fn(value: i64)>),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unsupported_callbacks_do_not_silently_become_helpers() {
+        let methods: [ImplItemFn; 2] = [
+            parse_quote!(
+                fn _init(&mut self) {}
+            ),
+            parse_quote!(
+                fn _notification(&mut self, what: i32) {}
+            ),
+        ];
+        for mut method in methods {
+            assert!(
+                method_descriptor(
+                    &parse_quote!(Player),
+                    &parse_quote!(Player),
+                    &mut method,
+                    None
+                )
+                .is_err()
+            );
+        }
+        let mut helper = parse_quote!(
+            fn _private_helper(&self) {}
+        );
+        assert!(
+            method_descriptor(
+                &parse_quote!(Player),
+                &parse_quote!(Player),
+                &mut helper,
+                None
+            )
+            .expect("ordinary Rust helper")
+            .is_none()
+        );
     }
 
     #[test]

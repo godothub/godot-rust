@@ -57,6 +57,52 @@ pub(crate) unsafe extern "C" fn poll_signal_from_module(
     }
 }
 
+pub(crate) unsafe extern "C" fn poll_signal_values_from_module(
+    context: *mut c_void,
+    token: u64,
+    output_fired: *mut u8,
+    output_arguments: *mut AbiValueV1,
+) -> AbiCallResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if output_fired.is_null() || output_arguments.is_null() {
+            return Err(ValueError::invalid("Signal future output storage is null"));
+        }
+        // SAFETY: Both outputs are non-null writable module storage for this call.
+        unsafe {
+            *output_fired = 0;
+            *output_arguments = AbiValueV1::NIL;
+        }
+        let Some(watch) = take_completed(context, token)? else {
+            return Ok(());
+        };
+        let arguments = watch.state.take_arguments()?;
+        // SAFETY: take_completed validated the context against the watch's
+        // retained generation before any owned output is created.
+        let host = unsafe { &*context.cast::<crate::engine_call::EngineCallContext>() };
+        let value = match arguments {
+            Some(arguments) => crate::engine_call::own_returned_dynamic(
+                host,
+                godot_api::abi::AbiValueType::ARRAY,
+                arguments,
+            )?,
+            None => AbiValueV1::NIL,
+        };
+        // SAFETY: Both outputs remain writable through this synchronous call.
+        unsafe {
+            *output_arguments = value;
+            *output_fired = 1;
+        }
+        Ok(())
+    })) {
+        Ok(Ok(())) => AbiCallResult::OK,
+        Ok(Err(error)) => AbiCallResult::failure(error.status(), error.message()),
+        Err(_) => AbiCallResult::failure(
+            AbiStatus::Panic,
+            "godot-rust caught a panic while polling typed Signal arguments",
+        ),
+    }
+}
+
 pub(crate) unsafe extern "C" fn cancel_signal_from_module(
     context: *mut c_void,
     token: u64,
@@ -157,9 +203,18 @@ fn watch_signal(
 }
 
 fn poll_signal(context: *mut c_void, token: u64, output_fired: *mut u8) -> Result<(), ValueError> {
-    if context.is_null() || token == 0 || output_fired.is_null() {
-        return Err(ValueError::new(
-            AbiStatus::InvalidArgument,
+    if output_fired.is_null() {
+        return Err(ValueError::invalid("Signal future fired output is null"));
+    }
+    let completed = take_completed(context, token)?;
+    // SAFETY: Null was rejected and the module supplied writable output storage.
+    unsafe { *output_fired = u8::from(completed.is_some()) };
+    Ok(())
+}
+
+fn take_completed(context: *mut c_void, token: u64) -> Result<Option<SignalWatch>, ValueError> {
+    if context.is_null() || token == 0 {
+        return Err(ValueError::invalid(
             "Signal future poll arguments are invalid",
         ));
     }
@@ -179,16 +234,32 @@ fn poll_signal(context: *mut c_void, token: u64, output_fired: *mut u8) -> Resul
             "Signal future token belongs to a different module generation",
         ));
     }
-    let fired = watch.state.fired();
-    // SAFETY: Null was rejected and the project module owns writable storage
-    // for the synchronous callback.
-    unsafe { *output_fired = u8::from(fired) };
-    if fired {
-        if let Some(watch) = watches.remove(&token) {
-            watch.state.deactivate();
-        }
+    if watch.state.fired() {
+        let watch = watches.remove(&token).expect("Signal watch was validated");
+        drop(watches);
+        watch.state.deactivate();
+        return Ok(Some(watch));
     }
-    Ok(())
+    let interface = crate::script_instance::active_engine_interface().ok_or_else(|| {
+        ValueError::new(
+            AbiStatus::Unsupported,
+            "Signal futures require a main-thread task",
+        )
+    })?;
+    let lookup = interface.object_get_instance_from_id.ok_or_else(|| {
+        ValueError::new(AbiStatus::Internal, "Godot object lookup is unavailable")
+    })?;
+    // SAFETY: The active engine interface is live on the Godot main thread.
+    if unsafe { lookup(watch.signal.object_id()) }.is_null() {
+        let watch = watches.remove(&token).expect("Signal watch was validated");
+        drop(watches);
+        watch.state.deactivate();
+        return Err(ValueError::new(
+            AbiStatus::StaleHandle,
+            "Godot Signal owner no longer exists",
+        ));
+    }
+    Ok(None)
 }
 
 fn cancel_signal(context: *mut c_void, token: u64) -> Result<(), ValueError> {

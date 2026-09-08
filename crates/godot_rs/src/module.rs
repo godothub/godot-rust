@@ -29,6 +29,237 @@ static HOST_API: AtomicPtr<HostApiV1> = AtomicPtr::new(ptr::null_mut());
 // current Host log callbacks before the Host may unload its own library.
 static HOST_LOG_ACCESS: RwLock<()> = RwLock::new(());
 
+type ReturnRegistry = core::cell::RefCell<ModuleReturns>;
+
+thread_local! {
+    // A trivial TLS slot avoids registering a TLS destructor for this registry.
+    // Module shutdown releases it explicitly before revoking Host access.
+    static MODULE_RETURNS: core::cell::Cell<*mut ReturnRegistry> = const { core::cell::Cell::new(ptr::null_mut()) };
+    static RELEASING_RETURN_BACKINGS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+struct ModuleReturns {
+    next_token: u64,
+    objects: std::collections::HashMap<u64, (u64, crate::engine::SharedGodotRefOwnership)>,
+    bytes: std::collections::HashMap<usize, ModuleReturnValue>,
+}
+
+fn with_return_registry<R>(operation: impl FnOnce(&ReturnRegistry) -> R) -> R {
+    MODULE_RETURNS.with(|slot| {
+        let pointer = if slot.get().is_null() {
+            let pointer = Box::into_raw(Box::new(ReturnRegistry::new(ModuleReturns {
+                next_token: 1,
+                objects: std::collections::HashMap::new(),
+                bytes: std::collections::HashMap::new(),
+            })));
+            slot.set(pointer);
+            pointer
+        } else {
+            slot.get()
+        };
+        // SAFETY: Only this thread accesses its registry. Shutdown drops it after
+        // all module callbacks and resource destructors have finished.
+        operation(unsafe { &*pointer })
+    })
+}
+
+struct ModuleReturnValue {
+    value_type: AbiValueType,
+    bytes: Box<[u8]>,
+    _value: crate::variant::Variant,
+}
+
+pub(crate) fn owned_dynamic_value(
+    value_type: AbiValueType,
+    value: crate::variant::Variant,
+) -> Result<AbiValueV1, AbiCallResult> {
+    let bytes = value
+        .__bytes()
+        .map_err(|error| AbiCallResult::callback_failed(error.message()))?
+        .to_vec()
+        .into_boxed_slice();
+    owned_retained_bytes(value_type, bytes, value)
+}
+
+pub(crate) fn owned_callable_value(
+    value: crate::callable::Callable,
+) -> Result<AbiValueV1, AbiCallResult> {
+    let bytes = value
+        .__bytes()
+        .map_err(|error| AbiCallResult::callback_failed(error.message()))?
+        .to_vec()
+        .into_boxed_slice();
+    owned_retained_bytes(
+        AbiValueType::CALLABLE,
+        bytes,
+        crate::variant::Variant::from(value),
+    )
+}
+
+fn owned_retained_bytes(
+    value_type: AbiValueType,
+    bytes: Box<[u8]>,
+    value: crate::variant::Variant,
+) -> Result<AbiValueV1, AbiCallResult> {
+    if RELEASING_RETURN_BACKINGS.get() {
+        return Err(AbiCallResult::failure(
+            AbiStatus::Unsupported,
+            "module return values are being released",
+        ));
+    }
+    with_return_registry(|registry| {
+        let mut registry = registry.try_borrow_mut().map_err(|_| {
+            AbiCallResult::failure(
+                AbiStatus::ReentrantCall,
+                "module return registry is already borrowed",
+            )
+        })?;
+        if registry.bytes.len() >= 65_536 {
+            return Err(AbiCallResult::failure(
+                AbiStatus::Unsupported,
+                "too many unreleased module returns",
+            ));
+        }
+        let address = bytes.as_ptr() as usize;
+        let output = AbiValueV1 {
+            type_: value_type,
+            reserved_flags: ABI_VALUE_OWNED_BYTES,
+            payload: [address as u64, bytes.len() as u64],
+        };
+        registry.bytes.insert(
+            address,
+            ModuleReturnValue {
+                value_type,
+                bytes,
+                _value: value,
+            },
+        );
+        Ok(output)
+    })
+}
+
+fn release_return_backings() {
+    struct ReleaseScope;
+    impl Drop for ReleaseScope {
+        fn drop(&mut self) {
+            RELEASING_RETURN_BACKINGS.set(false);
+        }
+    }
+    RELEASING_RETURN_BACKINGS.set(true);
+    let _scope = ReleaseScope;
+    MODULE_RETURNS.with(|slot| {
+        let pointer = slot.get();
+        if pointer.is_null() {
+            return;
+        }
+        // SAFETY: This thread still owns the registry until the final Box drop.
+        let registry = unsafe { &*pointer };
+        let (objects, bytes) = {
+            let mut registry = registry.borrow_mut();
+            (
+                core::mem::take(&mut registry.objects),
+                core::mem::take(&mut registry.bytes),
+            )
+        };
+        // Resource destruction can reenter the module; leave the empty registry
+        // available while rejecting any new return ownership during shutdown.
+        drop(objects);
+        drop(bytes);
+        slot.set(ptr::null_mut());
+        // SAFETY: The cleared slot transfers its unique allocation to shutdown.
+        drop(unsafe { Box::from_raw(pointer) });
+    });
+}
+
+pub(crate) fn owned_object_ref<T: crate::engine::GodotClass>(
+    value: crate::engine::GodotRef<T>,
+) -> Result<AbiValueV1, AbiCallResult> {
+    const MAX_MODULE_OBJECT_REFS: usize = 65_536;
+    if RELEASING_RETURN_BACKINGS.get() {
+        return Err(AbiCallResult::failure(
+            AbiStatus::Unsupported,
+            "module return values are being released",
+        ));
+    }
+    with_return_registry(|registry| {
+        let mut registry = registry.try_borrow_mut().map_err(|_| {
+            AbiCallResult::failure(
+                AbiStatus::ReentrantCall,
+                "module object return registry is already borrowed",
+            )
+        })?;
+        if registry.objects.len() >= MAX_MODULE_OBJECT_REFS {
+            return Err(AbiCallResult::failure(
+                AbiStatus::Unsupported,
+                "too many unreleased module object returns",
+            ));
+        }
+        let token = registry.next_token;
+        registry.next_token = token.checked_add(1).ok_or_else(|| {
+            AbiCallResult::failure(
+                AbiStatus::Unsupported,
+                "module object return token space is exhausted",
+            )
+        })?;
+        let object_id = value.instance_id();
+        registry
+            .objects
+            .insert(token, (object_id, value.dynamic_ownership()));
+        Ok(AbiValueV1 {
+            type_: AbiValueType::OBJECT_ID,
+            reserved_flags: godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF,
+            payload: [object_id, token],
+        })
+    })
+}
+
+pub(crate) fn clone_module_object_ref<T: crate::engine::GodotClass>(
+    value: AbiValueV1,
+) -> Option<crate::engine::GodotRef<T>> {
+    if MODULE_RETURNS.get().is_null()
+        || value.type_ != AbiValueType::OBJECT_ID
+        || value.reserved_flags != godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
+    {
+        return None;
+    }
+    with_return_registry(|registry| {
+        let registry = registry.try_borrow().ok()?;
+        let (object_id, ownership) = registry.objects.get(&value.payload[1])?;
+        (*object_id == value.payload[0])
+            .then(|| crate::engine::GodotRef::from_dynamic_parts(*object_id, ownership.clone()))
+    })
+}
+
+fn drop_module_object_ref(value: AbiValueV1) -> AbiStatus {
+    if value.type_ != AbiValueType::OBJECT_ID || value.payload[0] == 0 || value.payload[1] == 0 {
+        return AbiStatus::InvalidArgument;
+    }
+    if MODULE_RETURNS.get().is_null() {
+        return AbiStatus::StaleHandle;
+    }
+    let removed = with_return_registry(|registry| {
+        let Ok(mut registry) = registry.try_borrow_mut() else {
+            return Err(AbiStatus::ReentrantCall);
+        };
+        let Some((object_id, _)) = registry.objects.get(&value.payload[1]) else {
+            return Err(AbiStatus::StaleHandle);
+        };
+        if *object_id != value.payload[0] {
+            return Err(AbiStatus::InvalidArgument);
+        }
+        Ok(registry.objects.remove(&value.payload[1]))
+    });
+    match removed {
+        Ok(owned) => {
+            // Releasing the final reference may enter Godot; keep the registry
+            // borrow out of that call so another return can be released safely.
+            drop(owned);
+            AbiStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
 /// Initializes the generated project-module table.
 ///
 /// # Safety
@@ -90,11 +321,13 @@ pub unsafe extern "C" fn shutdown(_context: *mut c_void) -> AbiStatus {
     // when detached workers require the library to remain loaded. Future
     // destructors may log, so cancellation must precede the exclusive lock.
     let status = cancel_tasks_for_unload(false);
+    let released = std::panic::catch_unwind(release_return_backings).is_ok();
+    crate::script::clear_script_registry();
     let _logs = HOST_LOG_ACCESS
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     HOST_API.store(ptr::null_mut(), Ordering::Release);
-    status
+    if released { status } else { AbiStatus::Panic }
 }
 
 unsafe extern "C" fn poll_tasks() -> AbiStatus {
@@ -216,9 +449,41 @@ pub fn owned_bytes(value_type: AbiValueType, bytes: Vec<u8>) -> AbiValueV1 {
 /// Releases one dynamic value allocated by [`owned_utf8`].
 #[doc(hidden)]
 pub unsafe extern "C" fn drop_owned_value(value: AbiValueV1) -> AbiStatus {
+    if value.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
+        return std::panic::catch_unwind(|| drop_module_object_ref(value))
+            .unwrap_or(AbiStatus::Panic);
+    }
     let Ok((address, length)) = owned_value_range(value) else {
         return AbiStatus::InvalidArgument;
     };
+    let retained =
+        if MODULE_RETURNS.get().is_null() {
+            Ok(None)
+        } else {
+            with_return_registry(|registry| {
+                let mut values = registry
+                    .try_borrow_mut()
+                    .map_err(|_| AbiStatus::ReentrantCall)?;
+                if values.bytes.get(&address).is_some_and(|entry| {
+                    entry.bytes.len() != length || entry.value_type != value.type_
+                }) {
+                    return Err(AbiStatus::InvalidArgument);
+                }
+                Ok(values.bytes.remove(&address))
+            })
+        };
+    match retained {
+        Err(status) => return status,
+        Ok(Some(value)) => {
+            return if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value))).is_ok()
+            {
+                AbiStatus::Ok
+            } else {
+                AbiStatus::Panic
+            };
+        }
+        Ok(None) => {}
+    }
     // SAFETY: The module owns this exact bounded range until the allocation is
     // reconstructed below.
     let bytes = unsafe { core::slice::from_raw_parts(address as *const u8, length) };
@@ -479,6 +744,48 @@ pub(crate) fn poll_signal(token: u64) -> EngineResult<bool> {
     }
 }
 
+pub(crate) fn poll_signal_values(token: u64) -> EngineResult<Option<Vec<crate::variant::Variant>>> {
+    let host = engine_host_api("the godot-rust Host does not support typed Signal futures")?;
+    if !host.header.is_compatible(HostApiV1::MINIMUM_SIZE, 37) {
+        return Err(EngineError::unavailable(
+            "typed Signal futures require godot-rust Host ABI 3.37 or later",
+        ));
+    }
+    let callback_slot = host.reserved[godot_api::abi::HOST_API_SLOT_POLL_SIGNAL_VALUES];
+    if callback_slot == 0 {
+        return Err(EngineError::unavailable(
+            "the godot-rust Host did not provide typed Signal polling",
+        ));
+    }
+    // SAFETY: ABI minor 37 defines this slot as AbiPollSignalValuesFn.
+    let callback = unsafe {
+        core::mem::transmute::<usize, godot_api::abi::AbiPollSignalValuesFn>(callback_slot)
+    }
+    .expect("non-zero callback slot");
+    let mut fired = 0_u8;
+    let mut value = AbiValueV1::NIL;
+    // SAFETY: The Host owns the callback, and both outputs remain writable
+    // throughout this synchronous call. HostMethodValue owns returned storage.
+    let result = unsafe { callback(host.context, token, &mut fired, &mut value) };
+    let value = HostMethodValue { value, host };
+    if result.status != AbiStatus::Ok {
+        return Err(EngineError::from_abi(result));
+    }
+    match fired {
+        0 => Ok(None),
+        1 if value.abi() == AbiValueV1::NIL => Ok(Some(Vec::new())),
+        1 => {
+            use crate::engine::EngineReturn;
+            let values =
+                crate::variant::Array::<crate::variant::Variant>::__from_host_return(value)?;
+            Ok(Some(values.into_vec()))
+        }
+        _ => Err(EngineError::invalid_result(
+            "the godot-rust Host returned an invalid Signal future state",
+        )),
+    }
+}
+
 pub(crate) fn cancel_signal(token: u64) {
     let host = HOST_API.load(Ordering::Acquire);
     if host.is_null() {
@@ -610,10 +917,85 @@ pub(crate) fn call_super_method(name: &str, arguments: &[AbiValueV1]) -> EngineR
     Ok(output)
 }
 
+pub(crate) fn call_script_member(
+    receiver: u64,
+    script_uid: i64,
+    member: u64,
+    operation: u8,
+    arguments: &[AbiValueV1],
+) -> EngineResult<HostMethodValue> {
+    let host = engine_host_api("typed script access requires the Script Mode Host")?;
+    let slot = host.reserved[godot_api::abi::HOST_API_SLOT_CALL_SCRIPT_MEMBER];
+    if !host.header.is_compatible(HostApiV1::MINIMUM_SIZE, 37) || slot == 0 {
+        return Err(EngineError::unavailable(
+            "this Host does not support typed script access",
+        ));
+    }
+    let callback =
+        // SAFETY: ABI 37 assigns this nonzero slot to AbiCallScriptMemberFn.
+        unsafe { core::mem::transmute::<usize, godot_api::abi::AbiCallScriptMemberFn>(slot) }
+            .expect("nonzero script callback");
+    let count = u32::try_from(arguments.len())
+        .map_err(|_| EngineError::invalid_argument("too many typed script arguments"))?;
+    let mut output = AbiValueV1::NIL;
+    // SAFETY: The Host and all buffers stay alive throughout this synchronous call.
+    let result = unsafe {
+        callback(
+            host.context,
+            receiver,
+            script_uid,
+            member,
+            operation,
+            arguments.as_ptr(),
+            count,
+            &mut output,
+        )
+    };
+    if result.status != AbiStatus::Ok {
+        return Err(EngineError::from_abi(result));
+    }
+    Ok(HostMethodValue {
+        value: output,
+        host: ptr::from_ref(host),
+    })
+}
+
+pub(crate) fn validate_object(
+    receiver: u64,
+    class_name: &'static str,
+    script_uid: Option<i64>,
+) -> EngineResult<()> {
+    let host = engine_host_api("object validation requires an active Godot runtime")?;
+    let slot = host.reserved[godot_api::abi::HOST_API_SLOT_VALIDATE_OBJECT];
+    if !host.header.is_compatible(HostApiV1::MINIMUM_SIZE, 37) || slot == 0 {
+        return Err(EngineError::unavailable(
+            "this Host does not support checked object casts",
+        ));
+    }
+    let callback =
+        // SAFETY: ABI 37 assigns this nonzero slot to AbiValidateObjectFn.
+        unsafe { core::mem::transmute::<usize, godot_api::abi::AbiValidateObjectFn>(slot) }
+            .expect("nonzero object validation callback");
+    // SAFETY: Static class text and the Host table remain live for the call.
+    let result = unsafe {
+        callback(
+            host.context,
+            receiver,
+            AbiByteSlice::from_static(class_name),
+            script_uid.unwrap_or(-1),
+        )
+    };
+    if result.status == AbiStatus::Ok {
+        Ok(())
+    } else {
+        Err(EngineError::from_abi(result))
+    }
+}
+
 pub(crate) fn release_module_output(value: AbiValueV1) {
     if matches!(
         value.reserved_flags,
-        ABI_VALUE_OWNED_UTF8 | ABI_VALUE_OWNED_BYTES
+        ABI_VALUE_OWNED_UTF8 | ABI_VALUE_OWNED_BYTES | godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
     ) {
         // SAFETY: A successful base-method call transfers exactly one
         // project-module-owned value back to this SDK.
@@ -719,6 +1101,36 @@ impl HostMethodValue {
         self.value = AbiValueV1::NIL;
         Ok(Some((object_id, token)))
     }
+}
+
+pub(crate) fn retain_object_ref(object_id: u64) -> EngineResult<HostObjectRefToken> {
+    let host = engine_host_api("retaining a GodotRef requires the Script Mode Host")?;
+    let slot = host.reserved[godot_api::abi::HOST_API_SLOT_RETAIN_OBJECT];
+    if !host.header.is_compatible(HostApiV1::MINIMUM_SIZE, 37) || slot == 0 {
+        return Err(EngineError::unavailable(
+            "this Host cannot retain borrowed GodotRef arguments",
+        ));
+    }
+    let callback =
+        // SAFETY: ABI minor 37 assigns this nonzero slot to AbiRetainObjectFn.
+        unsafe { core::mem::transmute::<usize, godot_api::abi::AbiRetainObjectFn>(slot) }
+            .expect("nonzero retention callback");
+    let mut value = AbiValueV1::NIL;
+    // SAFETY: The Host and writable output remain live through this call.
+    let result = unsafe { callback(host.context, object_id, &mut value) };
+    let value = HostMethodValue { value, host };
+    if result.status != AbiStatus::Ok {
+        return Err(EngineError::from_abi(result));
+    }
+    let (retained_id, ownership) = value
+        .into_owned_object_ref()?
+        .ok_or_else(|| EngineError::invalid_result("the Host retained a null GodotRef"))?;
+    if retained_id != object_id {
+        return Err(EngineError::invalid_result(
+            "the Host retained a different GodotRef object",
+        ));
+    }
+    Ok(ownership)
 }
 
 pub(crate) fn take_owned_object_ref(
@@ -853,45 +1265,6 @@ pub(crate) fn retain_callable_value(token: u64) -> EngineResult<Option<HostCalla
         },
         host: ptr::from_ref(host),
     }))
-}
-
-pub(crate) fn retain_callable_for_transfer(token: u64) -> EngineResult<()> {
-    let ownership = retain_callable_value(token)?;
-    if let Some(ownership) = ownership {
-        // The module-owned Callable byte value releases this exact retained
-        // Host reference when the Host finishes consuming the method result.
-        core::mem::forget(ownership);
-    }
-    Ok(())
-}
-
-pub(crate) fn retain_dynamic_callables_for_transfer(bytes: &[u8]) -> EngineResult<()> {
-    let mut retained = Vec::new();
-    let mut error = None;
-    let valid = godot_api::abi::visit_dynamic_callable_tokens(bytes, |token| {
-        match retain_callable_value(token) {
-            Ok(Some(ownership)) => {
-                retained.push(ownership);
-                true
-            }
-            Ok(None) => true,
-            Err(value) => {
-                error = Some(value);
-                false
-            }
-        }
-    });
-    if !valid {
-        return Err(error.unwrap_or_else(|| {
-            EngineError::invalid_result("dynamic Callable ownership metadata is invalid")
-        }));
-    }
-    for ownership in retained {
-        // Each module-owned dynamic result releases this transferred reference
-        // after the Host finishes consuming its recursive wire value.
-        core::mem::forget(ownership);
-    }
-    Ok(())
 }
 
 fn release_host_value(host: *const HostApiV1, value: AbiValueV1) -> AbiStatus {
@@ -1041,6 +1414,193 @@ mod tests {
         // SAFETY: The test supplies a live bool as the callback context.
         unsafe { context.cast::<bool>().write(true) };
         AbiStatus::Ok
+    }
+
+    #[test]
+    fn module_object_return_keeps_last_reference_until_matching_release() {
+        let mut released = false;
+        let mut reserved = [0; 16];
+        reserved[HOST_API_SLOT_DROP_VALUE] = release_test_object_ref as *const () as usize;
+        let host = HostApiV1 {
+            header: AbiHeader::new(HostApiV1::MINIMUM_SIZE),
+            context: ptr::from_mut(&mut released).cast(),
+            log: None,
+            reserved,
+        };
+        let object = crate::engine::GodotRef::<crate::engine::RefCounted>::from_owned_parts(
+            42,
+            HostObjectRefToken {
+                value: AbiValueV1 {
+                    type_: AbiValueType::OBJECT_ID,
+                    reserved_flags: ABI_VALUE_OWNED_OBJECT_REF,
+                    payload: [42, 7],
+                },
+                host: ptr::from_ref(&host),
+            },
+        );
+        let output = owned_object_ref(object).expect("module owns the returned reference");
+        assert!(
+            !released,
+            "return conversion must keep the only engine reference alive"
+        );
+        assert_eq!(
+            output.reserved_flags,
+            godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
+        );
+        let wrong_id = AbiValueV1 {
+            payload: [43, output.payload[1]],
+            ..output
+        };
+        assert_eq!(drop_module_object_ref(wrong_id), AbiStatus::InvalidArgument);
+        assert!(!released);
+        let decoded = <crate::engine::GodotRef<crate::engine::RefCounted>
+            as crate::script::FromAbiValue>::from_abi(output).expect("same-module super result");
+        // SAFETY: output transfers exactly one registered module return reference.
+        assert_eq!(unsafe { drop_owned_value(output) }, AbiStatus::Ok);
+        assert!(!released, "decoded super result retains its own reference");
+        assert_eq!(drop_module_object_ref(output), AbiStatus::StaleHandle);
+        drop(decoded);
+        assert!(released);
+    }
+
+    fn test_object(host: &HostApiV1) -> crate::engine::GodotRef<crate::engine::RefCounted> {
+        crate::engine::GodotRef::from_owned_parts(
+            42,
+            HostObjectRefToken {
+                value: AbiValueV1 {
+                    type_: AbiValueType::OBJECT_ID,
+                    reserved_flags: ABI_VALUE_OWNED_OBJECT_REF,
+                    payload: [42, 7],
+                },
+                host: ptr::from_ref(host),
+            },
+        )
+    }
+
+    fn object_container(kind: usize, host: &HostApiV1) -> (AbiValueType, crate::variant::Variant) {
+        use crate::variant::{Array, Dictionary, Variant};
+        let object = test_object(host);
+        match kind {
+            0 => (AbiValueType::VARIANT, Variant::from(object)),
+            1 => (
+                AbiValueType::ARRAY,
+                Variant::from(Array::from(vec![object])),
+            ),
+            2 => {
+                let mut values = Dictionary::default();
+                values.insert("resource", object);
+                (AbiValueType::DICTIONARY, Variant::from(values))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn dynamic_returns_and_signal_arguments_keep_their_last_resource_alive() {
+        use crate::signal::SignalValue;
+        for kind in 0..3 {
+            let mut released = false;
+            let mut reserved = [0; 16];
+            reserved[HOST_API_SLOT_DROP_VALUE] = release_test_object_ref as *const () as usize;
+            let host = HostApiV1 {
+                header: AbiHeader::new(HostApiV1::MINIMUM_SIZE),
+                context: ptr::from_mut(&mut released).cast(),
+                log: None,
+                reserved,
+            };
+            let (value_type, value) = object_container(kind, &host);
+            let output = owned_dynamic_value(value_type, value).expect("owned container result");
+            assert!(
+                !released,
+                "return wire must retain embedded resource ownership"
+            );
+            let wrong_type = AbiValueV1 {
+                type_: AbiValueType::CALLABLE,
+                ..output
+            };
+            assert_eq!(
+                // SAFETY: A mismatched type is rejected without consuming the live allocation.
+                unsafe { drop_owned_value(wrong_type) },
+                AbiStatus::InvalidArgument
+            );
+            assert!(!released);
+            // SAFETY: This releases the exact registered output once.
+            assert_eq!(unsafe { drop_owned_value(output) }, AbiStatus::Ok);
+            assert!(released);
+
+            released = false;
+            let (_, value) = object_container(kind, &host);
+            let mut backing = None;
+            let signal_value = value.into_signal_value(&mut backing);
+            assert_eq!(signal_value.type_, AbiValueType::VARIANT);
+            assert!(
+                !released,
+                "synchronous signal arguments must own embedded resources"
+            );
+            drop(backing);
+            assert!(released);
+        }
+    }
+
+    #[test]
+    fn callable_return_keeps_its_refcounted_target_until_native_copy() {
+        use crate::script::IntoMethodResult;
+        let mut released = false;
+        let mut reserved = [0; 16];
+        reserved[HOST_API_SLOT_DROP_VALUE] = release_test_object_ref as *const () as usize;
+        let host = HostApiV1 {
+            header: AbiHeader::new(HostApiV1::MINIMUM_SIZE),
+            context: ptr::from_mut(&mut released).cast(),
+            log: None,
+            reserved,
+        };
+        let object = test_object(&host);
+        let callable = crate::callable::Callable::from_godot_ref_method(&object, "get_value");
+        drop(object);
+        let mut output = AbiValueV1::NIL;
+        assert_eq!(callable.write_result(&mut output).status, AbiStatus::Ok);
+        assert!(!released);
+        let (pointer, length) = output
+            .byte_range(AbiValueType::CALLABLE)
+            .expect("Callable output");
+        // SAFETY: The registered module return remains live until the drop below.
+        let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
+        assert!(godot_api::abi::callable_value_retains_target(bytes));
+        // SAFETY: This releases the exact registered output once.
+        assert_eq!(unsafe { drop_owned_value(output) }, AbiStatus::Ok);
+        assert!(released);
+    }
+
+    #[test]
+    fn dynamic_result_rejects_null_output_and_shutdown_releases_return_backings() {
+        use crate::script::IntoMethodResult;
+        let mut released = false;
+        let mut reserved = [0; 16];
+        reserved[HOST_API_SLOT_DROP_VALUE] = release_test_object_ref as *const () as usize;
+        let host = HostApiV1 {
+            header: AbiHeader::new(HostApiV1::MINIMUM_SIZE),
+            context: ptr::from_mut(&mut released).cast(),
+            log: None,
+            reserved,
+        };
+        let (_, value) = object_container(1, &host);
+        assert_eq!(
+            value.write_result(ptr::null_mut()).status,
+            AbiStatus::InvalidArgument
+        );
+        assert!(released);
+        assert!(with_return_registry(|values| values
+            .borrow()
+            .bytes
+            .is_empty()));
+        released = false;
+        let (_, value) = object_container(2, &host);
+        let mut output = AbiValueV1::NIL;
+        assert_eq!(value.write_result(&mut output).status, AbiStatus::Ok);
+        assert!(!released);
+        release_return_backings();
+        assert!(released);
+        assert!(MODULE_RETURNS.get().is_null());
     }
 
     #[test]

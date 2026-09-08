@@ -27,6 +27,9 @@ pub const ABI_SIGNAL_VERSION: u16 = 1;
 /// Callable-header flag indicating a Host-owned native Callable token.
 pub const ABI_CALLABLE_OWNED: u16 = 1 << 0;
 
+/// Standard Callable whose native copies must keep its RefCounted target alive.
+pub const ABI_CALLABLE_RETAIN_TARGET: u16 = 1 << 1;
+
 /// Root-header flag indicating that the Host retains the encoded native value.
 pub const ABI_DYNAMIC_ROOT_OWNED: u16 = 1 << 0;
 
@@ -48,7 +51,7 @@ pub const ABI_VALUE_OWNED_CALLABLE: u32 = 1 << 4;
 pub const ABI_MAJOR: u16 = 3;
 
 /// Current backward-compatible ABI revision.
-pub const ABI_MINOR: u16 = 36;
+pub const ABI_MINOR: u16 = 37;
 
 /// Header at the beginning of every versioned ABI table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -188,7 +191,10 @@ pub fn validate_callable_value(bytes: &[u8]) -> bool {
     let Some(token) = read_dynamic_u64(bytes, 12) else {
         return false;
     };
-    if !matches!((flags, token), (0, 0) | (ABI_CALLABLE_OWNED, 1..=u64::MAX)) {
+    if !matches!(
+        (flags, token),
+        (0 | ABI_CALLABLE_RETAIN_TARGET, 0) | (ABI_CALLABLE_OWNED, 1..=u64::MAX)
+    ) {
         return false;
     }
     let Some(method_length) = read_dynamic_u32(bytes, 28).map(|value| value as usize) else {
@@ -197,9 +203,18 @@ pub fn validate_callable_value(bytes: &[u8]) -> bool {
     let Some(method_end) = HEADER_BYTES.checked_add(method_length) else {
         return false;
     };
-    method_end == bytes.len()
+    (flags != ABI_CALLABLE_RETAIN_TARGET
+        || (read_dynamic_u64(bytes, 20).is_some_and(|id| id != 0) && method_length != 0))
+        && method_end == bytes.len()
         && core::str::from_utf8(&bytes[HEADER_BYTES..method_end])
             .is_ok_and(|method| !method.as_bytes().contains(&0))
+}
+
+/// Whether a validated standard Callable requires native target ownership.
+#[must_use]
+pub fn callable_value_retains_target(bytes: &[u8]) -> bool {
+    validate_callable_value(bytes)
+        && read_dynamic_u16(bytes, 10) == Some(ABI_CALLABLE_RETAIN_TARGET)
 }
 
 /// Returns the Host token encoded in a validated Callable payload.
@@ -632,6 +647,14 @@ pub const ABI_VALUE_OWNED_UTF8: u32 = 1 << 0;
 pub const ABI_VALUE_OWNED_OBJECT_REF: u32 = 1 << 1;
 /// [`AbiValueV1`] points to a Host- or module-owned fixed-layout byte buffer.
 pub const ABI_VALUE_OWNED_BYTES: u32 = 1 << 2;
+
+/// [`AbiValueV1`] carries a module-retained RefCounted return value.
+///
+/// Payload is `[object_id, module_token]`. The receiving Host must acquire its
+/// own reference before invoking the originating module's value-drop callback.
+/// Tokens belong to one module generation and are never Host ownership tokens.
+/// Introduced in ABI minor 37.
+pub const ABI_VALUE_MODULE_OBJECT_REF: u32 = 1 << 5;
 
 impl AbiValueV1 {
     pub const NIL: Self = Self {
@@ -1924,6 +1947,21 @@ pub type AbiPollSignalFn = Option<
     unsafe extern "C" fn(context: *mut c_void, token: u64, output_fired: *mut u8) -> AbiCallResult,
 >;
 
+/// Polls a signal watch and transfers its argument array when it fires.
+///
+/// Pending calls write `0` to `output_fired` and NIL to `output_arguments`.
+/// Completed calls consume the watch and return an owned ARRAY using the
+/// ordinary Host value-drop protocol, or NIL for an argument-free emission.
+/// Introduced in ABI minor 37.
+pub type AbiPollSignalValuesFn = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        token: u64,
+        output_fired: *mut u8,
+        output_arguments: *mut AbiValueV1,
+    ) -> AbiCallResult,
+>;
+
 /// Disconnects and releases a pending Godot Signal watch.
 pub type AbiCancelSignalFn =
     Option<unsafe extern "C" fn(context: *mut c_void, token: u64) -> AbiStatus>;
@@ -1958,10 +1996,56 @@ pub const HOST_API_SLOT_CALL_GODOT_API: usize = 6;
 pub const HOST_API_SLOT_WATCH_SIGNAL: usize = 7;
 /// Host table slot containing [`AbiPollSignalFn`].
 pub const HOST_API_SLOT_POLL_SIGNAL: usize = 8;
+/// Host table slot containing [`AbiPollSignalValuesFn`] (ABI minor 37).
+pub const HOST_API_SLOT_POLL_SIGNAL_VALUES: usize = 13;
 /// Host table slot containing [`AbiCancelSignalFn`].
 pub const HOST_API_SLOT_CANCEL_SIGNAL: usize = 9;
 /// Host table slot containing [`AbiCallSuperMethodFn`].
 pub const HOST_API_SLOT_CALL_SUPER_METHOD: usize = 10;
+/// Calls a typed member of a Rust ScriptInstance, without Variant dispatch.
+pub const HOST_API_SLOT_CALL_SCRIPT_MEMBER: usize = 11;
+/// Checks the live engine class and optional attached Rust script UID.
+pub const HOST_API_SLOT_VALIDATE_OBJECT: usize = 12;
+
+pub const ABI_SCRIPT_MEMBER_METHOD: u8 = 0;
+pub const ABI_SCRIPT_MEMBER_GET_PROPERTY: u8 = 1;
+pub const ABI_SCRIPT_MEMBER_SET_PROPERTY: u8 = 2;
+
+pub type AbiCallScriptMemberFn = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        receiver: u64,
+        script_uid: i64,
+        member: u64,
+        operation: u8,
+        arguments: *const AbiValueV1,
+        argument_count: u32,
+        output: *mut AbiValueV1,
+    ) -> AbiCallResult,
+>;
+
+pub type AbiValidateObjectFn = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        receiver: u64,
+        class_name: AbiByteSlice,
+        script_uid: i64,
+    ) -> AbiCallResult,
+>;
+
+/// Retains a live RefCounted object and returns a Host-owned object token.
+/// The caller releases the token with the ordinary Host value-drop callback.
+/// Non-RefCounted objects and expired identities are rejected.
+pub type AbiRetainObjectFn = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        object_id: u64,
+        output: *mut AbiValueV1,
+    ) -> AbiCallResult,
+>;
+
+/// Host table slot containing [`AbiRetainObjectFn`] (ABI minor 37).
+pub const HOST_API_SLOT_RETAIN_OBJECT: usize = 14;
 
 /// Adds one project-owned reference to a Host dynamic ownership group.
 pub type AbiRetainDynamicValueFn =
@@ -2322,7 +2406,21 @@ mod tests {
             0,
             b"_ready"
         )));
-        assert!(!validate_callable_value(&callable(2, 7, b"_ready")));
+        let retained = callable(ABI_CALLABLE_RETAIN_TARGET, 0, b"_ready");
+        assert!(validate_callable_value(&retained));
+        assert!(callable_value_retains_target(&retained));
+        assert_eq!(callable_value_ownership_token(&retained), None);
+        assert!(!validate_callable_value(&callable(
+            ABI_CALLABLE_RETAIN_TARGET,
+            7,
+            b"_ready"
+        )));
+        assert!(!validate_callable_value(&callable(
+            ABI_CALLABLE_RETAIN_TARGET,
+            0,
+            b""
+        )));
+        assert!(!validate_callable_value(&callable(4, 0, b"_ready")));
         assert!(!validate_callable_value(&callable(0, 0, b"bad\0method")));
 
         let mut trailing = standard;

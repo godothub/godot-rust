@@ -132,7 +132,10 @@ fn validate_resolved_node(
     Ok(instance_id)
 }
 
-fn class_tag(interface: EngineInterface, class_name: &str) -> Result<*mut c_void, ModuleCallError> {
+pub(crate) fn class_tag(
+    interface: EngineInterface,
+    class_name: &str,
+) -> Result<*mut c_void, ModuleCallError> {
     let class = OwnedStringName::new(interface, class_name).ok_or_else(|| {
         internal_error(format!(
             "could not construct Godot class name `{class_name}` for a node field"

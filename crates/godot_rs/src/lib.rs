@@ -36,7 +36,7 @@ pub mod abi {
 
 /// Imports used by ordinary Rust scripts.
 pub mod prelude {
-    pub use crate::callable::Callable;
+    pub use crate::callable::{Callable, CallableMethod};
     pub use crate::engine::*;
     pub use crate::error::{EngineError, EngineErrorKind, EngineResult, ScriptError, ScriptResult};
     pub use crate::math::{
@@ -51,11 +51,11 @@ pub mod prelude {
     };
     pub use crate::rid::Rid;
     pub use crate::script::ScriptSuper;
-    pub use crate::signal::Signal;
+    pub use crate::signal::{Signal, SignalConnection};
     pub use crate::string_name::StringName;
     pub use crate::task::{
-        BlockingTask, BlockingTaskError, SignalFuture, TaskHandle, Timeout, TimeoutError,
-        next_frame, sleep, spawn, spawn_blocking, timeout,
+        BlockingTask, BlockingTaskError, SignalFuture, TaskHandle, TaskScope, Timeout,
+        TimeoutError, next_frame, sleep, spawn, spawn_blocking, timeout,
     };
     pub use crate::variant::{Array, Dictionary, Variant, VariantKind};
     pub use crate::{godot_debug, godot_error, godot_print, godot_warn};

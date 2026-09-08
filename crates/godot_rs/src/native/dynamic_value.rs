@@ -637,7 +637,7 @@ impl NativeArray {
         self.initialized = true;
     }
 
-    fn from_rust(
+    pub(super) fn from_rust(
         interface: Interface,
         values: &Array,
         typed_element: Option<&str>,
@@ -757,7 +757,7 @@ impl NativeArray {
             .ok_or_else(|| EngineError::invalid_result("Godot returned a null Array element"))
     }
 
-    fn as_const_ptr(&self) -> sys::GDExtensionConstTypePtr {
+    pub(super) fn as_const_ptr(&self) -> sys::GDExtensionConstTypePtr {
         ptr::from_ref(&self.storage).cast()
     }
 

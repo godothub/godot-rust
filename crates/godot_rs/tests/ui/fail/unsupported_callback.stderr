@@ -1,0 +1,5 @@
+error: `_init` is not a Rust script callback; initialize state with `#[init(default = expression)]` and access scene nodes in `_ready`
+ --> tests/ui/fail/unsupported_callback.rs:8:8
+  |
+8 |     fn _init(&mut self) {}
+  |        ^^^^^

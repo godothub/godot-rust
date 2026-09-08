@@ -247,6 +247,7 @@ struct LoadedScript {
     tool: bool,
     fields: Vec<LoadedField>,
     methods: Vec<LoadedMethod>,
+    methods_by_id: HashMap<u64, usize>,
     create_state: unsafe extern "C" fn(*mut *mut c_void) -> AbiCallResult,
     drop_state: unsafe extern "C" fn(*mut c_void),
     lifecycle: AbiLifecycleTableV1,
@@ -493,10 +494,18 @@ impl ModuleGeneration {
             crate::signal_wait::watch_signal_from_module as *const () as usize;
         reserved[HOST_API_SLOT_POLL_SIGNAL] =
             crate::signal_wait::poll_signal_from_module as *const () as usize;
+        reserved[godot_api::abi::HOST_API_SLOT_POLL_SIGNAL_VALUES] =
+            crate::signal_wait::poll_signal_values_from_module as *const () as usize;
+        reserved[godot_api::abi::HOST_API_SLOT_RETAIN_OBJECT] =
+            crate::engine_call::retain_object_from_module as *const () as usize;
         reserved[HOST_API_SLOT_CANCEL_SIGNAL] =
             crate::signal_wait::cancel_signal_from_module as *const () as usize;
         reserved[HOST_API_SLOT_CALL_SUPER_METHOD] =
             call_super_method_from_module as *const () as usize;
+        reserved[godot_api::abi::HOST_API_SLOT_CALL_SCRIPT_MEMBER] =
+            crate::script_instance::call_script_member_from_module as *const () as usize;
+        reserved[godot_api::abi::HOST_API_SLOT_VALIDATE_OBJECT] =
+            crate::script_instance::validate_object_from_module as *const () as usize;
         let host_context = Box::new(crate::engine_call::EngineCallContext::new());
         let host = Box::new(HostApiV1 {
             header: godot_api::abi::AbiHeader::new(HostApiV1::MINIMUM_SIZE),
@@ -1236,6 +1245,38 @@ impl ModuleScript {
 }
 
 impl ModuleState {
+    pub(crate) fn script_uids(&self) -> Vec<i64> {
+        self.states
+            .iter()
+            .map(|state| state.script.resource_uid())
+            .collect()
+    }
+
+    pub(crate) fn typed_method(&self, uid: i64, id: u64) -> Option<ModuleMethod> {
+        let script = &self
+            .states
+            .iter()
+            .find(|state| state.script.resource_uid() == uid)?
+            .script;
+        let index = *script.descriptor().methods_by_id.get(&id)?;
+        Some(ModuleMethod {
+            script: script.clone(),
+            index,
+        })
+    }
+
+    pub(crate) fn typed_field(&self, uid: i64, index: usize) -> Option<ModuleField> {
+        let script = &self
+            .states
+            .iter()
+            .find(|state| state.script.resource_uid() == uid)?
+            .script;
+        (index < script.descriptor().fields.len()).then(|| ModuleField {
+            script: script.clone(),
+            index,
+        })
+    }
+
     pub(crate) fn source_path(&self) -> &str {
         &self.script.descriptor().source_path
     }
@@ -1667,12 +1708,28 @@ impl SuperDispatchContext {
                 .unwrap_or(AbiValueType::VARIANT);
             module_value::validate_input(expected, value)?;
         }
+        let context = self.states[state_index]
+            .script
+            .generation
+            .engine_call_context();
+        let retained = crate::script_instance::active_engine_interface()
+            .map(|interface| {
+                crate::engine_call::ScriptCallArguments::new(context, interface, &call_arguments)
+            })
+            .transpose()
+            .map_err(|error| ModuleCallError {
+                status: error.status(),
+                message: error.message().to_owned(),
+            })?;
+        let call_arguments = retained
+            .as_ref()
+            .map_or(call_arguments.as_slice(), |args| args.as_slice());
         let argument_count = u32::try_from(call_arguments.len()).map_err(|_| ModuleCallError {
             status: AbiStatus::InvalidArgument,
             message: "base method argument count exceeds the ABI limit".into(),
         })?;
         if method.kind() == AbiMethodKind::Lifecycle {
-            return self.invoke_lifecycle_method(state_index, &method, &call_arguments);
+            return self.invoke_lifecycle_method(state_index, &method, call_arguments);
         }
         let callback = method
             .script
@@ -1685,7 +1742,7 @@ impl SuperDispatchContext {
         self.invoke_method(
             state_index,
             &method,
-            &call_arguments,
+            call_arguments,
             callback,
             argument_count,
         )
@@ -1807,13 +1864,14 @@ impl ModuleMethod {
                     let _ = owner.output(*expected, output);
                     return Err(call_result(result).expect_err("non-OK callback result"));
                 }
+                let value = owner.output(*expected, output)?;
                 if *expected == AbiValueType::OBJECT_ID && output.payload[0] != 0 {
                     return Err(ModuleCallError {
                         status: AbiStatus::InvalidArgument,
                         message: "method object defaults must be null".into(),
                     });
                 }
-                owner.output(*expected, output)
+                Ok(value)
             })
             .collect()
     }
@@ -2696,6 +2754,11 @@ fn copy_script(
         base,
         tool: descriptor.tool != 0,
         fields,
+        methods_by_id: methods
+            .iter()
+            .enumerate()
+            .map(|(index, method)| (method.id, index))
+            .collect(),
         methods,
         create_state,
         drop_state,

@@ -67,9 +67,14 @@ impl ModuleValue {
         let mut value = self.value;
         if matches!(
             value.reserved_flags,
-            ABI_VALUE_OWNED_UTF8 | ABI_VALUE_OWNED_BYTES
+            ABI_VALUE_OWNED_UTF8
+                | ABI_VALUE_OWNED_BYTES
+                | godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
         ) {
             value.reserved_flags = 0;
+            if self.value.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
+                value.payload[1] = 0;
+            }
         }
         value
     }
@@ -97,7 +102,9 @@ impl Drop for ModuleValue {
     fn drop(&mut self) {
         if !matches!(
             self.value.reserved_flags,
-            ABI_VALUE_OWNED_UTF8 | ABI_VALUE_OWNED_BYTES
+            ABI_VALUE_OWNED_UTF8
+                | ABI_VALUE_OWNED_BYTES
+                | godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
         ) {
             return;
         }
@@ -128,6 +135,12 @@ pub(crate) fn validate_input(
         return Err(ModuleCallError {
             status: AbiStatus::InvalidArgument,
             message: "Host value does not match the project field or method descriptor".into(),
+        });
+    }
+    if value.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
+        return Err(ModuleCallError {
+            status: AbiStatus::InvalidArgument,
+            message: "module-owned object tokens cannot be supplied as Host inputs".into(),
         });
     }
     if matches!(
@@ -310,8 +323,10 @@ fn valid_payload(value: AbiValueV1, text_ownership: TextOwnership) -> bool {
         }
         AbiValueType::OBJECT_ID => {
             (value.reserved_flags == 0 && value.payload[1] == 0)
-                || (value.reserved_flags == ABI_VALUE_OWNED_OBJECT_REF
-                    && value.payload[0] != 0
+                || (matches!(
+                    value.reserved_flags,
+                    ABI_VALUE_OWNED_OBJECT_REF | godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
+                ) && value.payload[0] != 0
                     && value.payload[1] != 0)
         }
         AbiValueType::VECTOR2 => value.reserved_flags == 0 && value.payload[1] == 0,
@@ -512,6 +527,23 @@ pub(crate) fn utf8(value: &AbiValueV1) -> Result<&str, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_object_return_tokens_are_valid_outputs_but_never_host_inputs() {
+        let value = AbiValueV1 {
+            type_: AbiValueType::OBJECT_ID,
+            reserved_flags: godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF,
+            payload: [42, 7],
+        };
+        assert!(validate_module_output(AbiValueType::OBJECT_ID, value).is_ok());
+        assert!(validate_input(AbiValueType::OBJECT_ID, value).is_err());
+        for payload in [[42, 0], [0, 7]] {
+            assert!(
+                validate_module_output(AbiValueType::OBJECT_ID, AbiValueV1 { payload, ..value })
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn synchronous_inputs_accept_only_borrowed_valid_utf8() {

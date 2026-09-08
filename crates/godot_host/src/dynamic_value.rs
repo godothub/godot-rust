@@ -59,6 +59,28 @@ impl Drop for DynamicCallBacking {
 }
 
 impl NativeDynamic {
+    /// Copies signal arguments before Godot releases its borrowed call frame.
+    pub(crate) fn from_variant_arguments(
+        interface: EngineInterface,
+        arguments: &[GDExtensionConstVariantPtr],
+    ) -> Result<Self, ValueError> {
+        let mut array = OwnedArray::empty(interface)?;
+        array.resize(arguments.len())?;
+        let get = interface
+            .array_operator_index
+            .ok_or_else(|| internal("Godot Array index operation is unavailable"))?;
+        for (index, argument) in arguments.iter().enumerate() {
+            if argument.is_null() {
+                return Err(invalid("Godot signal supplied a null argument"));
+            }
+            // SAFETY: The array was resized to the exact argument count; each
+            // borrowed Godot Variant remains live for this synchronous copy.
+            let slot = unsafe { get(array.as_mut_ptr(), index as i64) };
+            replace_variant(interface, slot, *argument)?;
+        }
+        Ok(Self::Array(array))
+    }
+
     pub(crate) fn from_abi(
         interface: EngineInterface,
         expected: AbiValueType,

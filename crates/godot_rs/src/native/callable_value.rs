@@ -122,6 +122,17 @@ pub(crate) fn retain_rust_callable(token: u64) -> EngineResult<Callable> {
     ))
 }
 
+pub(crate) fn retained_callable_from_bytes(bytes: &[u8]) -> Option<EngineResult<Callable>> {
+    let interface = super::runtime::active_interface()?;
+    Some(
+        NativeCallable::from_argument(
+            interface,
+            AbiValueV1::from_borrowed_bytes(AbiValueType::CALLABLE, bytes),
+        )
+        .and_then(NativeCallable::into_rust),
+    )
+}
+
 impl Drop for NativeCallableToken {
     fn drop(&mut self) {
         with_tokens(|tokens| {
@@ -185,7 +196,62 @@ impl NativeCallable {
         };
         let method = core::str::from_utf8(&bytes[CALLABLE_HEADER_BYTES..])
             .expect("validated Callable UTF-8");
-        Self::from_standard(interface, object, method)
+        let callable = Self::from_standard(interface, object, method)?;
+        if godot_api::abi::callable_value_retains_target(bytes) {
+            callable.retaining_target(object_id, object)
+        } else {
+            Ok(callable)
+        }
+    }
+
+    fn retaining_target(
+        self,
+        object_id: u64,
+        object: sys::GDExtensionObjectPtr,
+    ) -> EngineResult<Self> {
+        let interface = self.interface;
+        super::engine_call::validate_object_class(
+            interface,
+            object,
+            "RefCounted",
+            "Callable target",
+        )?;
+        let values = crate::variant::Array::from(vec![crate::variant::Variant::from(
+            ObjectRef::<Object>::__from_instance_id(object_id),
+        )]);
+        let arguments = super::dynamic_value::NativeArray::from_rust(interface, &values, None, 0)?;
+        let unbind = builtin_method(interface, "unbind", 755_001_590)?
+            .ok_or_else(|| EngineError::unavailable("Callable.unbind is unavailable"))?;
+        let bind = builtin_method(interface, "bindv", 3_564_560_322)?
+            .ok_or_else(|| EngineError::unavailable("Callable.bindv is unavailable"))?;
+        let mut unbound = Self::uninitialized(interface)?;
+        let count = 1_i64;
+        let unbind_args = [ptr::from_ref(&count).cast()];
+        // SAFETY: Authenticated Callable.unbind(int) writes a new Callable.
+        unsafe {
+            unbind(
+                self.as_const_ptr().cast_mut(),
+                unbind_args.as_ptr(),
+                unbound.as_mut_ptr(),
+                1,
+            )
+        };
+        unbound.initialized = true;
+        let mut retained = Self::uninitialized(interface)?;
+        let bind_args = [arguments.as_const_ptr()];
+        // The native bind owns the RefCounted target; unbind removes that
+        // trailing argument before the original method receives the call.
+        // SAFETY: Authenticated Callable.bindv(Array) writes a new Callable.
+        unsafe {
+            bind(
+                unbound.as_const_ptr().cast_mut(),
+                bind_args.as_ptr(),
+                retained.as_mut_ptr(),
+                1,
+            )
+        };
+        retained.initialized = true;
+        Ok(retained)
     }
 
     fn from_standard(

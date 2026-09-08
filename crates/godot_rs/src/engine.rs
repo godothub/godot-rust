@@ -20,12 +20,77 @@ use crate::signal::Signal;
 use crate::string_name::StringName;
 use crate::variant::{Array, Dictionary, Variant, VariantConvert};
 
+mod objects;
+pub use objects::*;
+
+pub(crate) fn validate_object<T: GodotClass>(id: u64) -> EngineResult<()> {
+    if id == 0 {
+        return Err(EngineError::stale_object(
+            "Godot object reference is unresolved",
+        ));
+    }
+    let script_uid = T::__script_resource_uid()?;
+    if crate::native::runtime::active_interface().is_some() {
+        if script_uid.is_some() {
+            return Err(EngineError::unavailable(
+                "Rust script references require Script Mode",
+            ));
+        }
+        let object = ObjectRef::<Object>::__from_instance_id(id);
+        return if object.is_class(T::CLASS_NAME)? {
+            Ok(())
+        } else {
+            Err(EngineError::invalid_argument(format!(
+                "object is not a {}",
+                T::CLASS_NAME
+            )))
+        };
+    }
+    crate::module::validate_object(id, T::CLASS_NAME, script_uid)
+}
+
+pub(crate) fn emit_signal_arguments(
+    object: ObjectRef<Object>,
+    name: &str,
+    arguments: &[AbiValueV1],
+) -> EngineResult<()> {
+    if arguments.len() > 8 {
+        return Err(EngineError::invalid_argument(
+            "a typed signal supports at most eight arguments",
+        ));
+    }
+    let mut values = [AbiValueV1::NIL; 9];
+    values[0] = string_name_argument(name);
+    values[1..1 + arguments.len()].copy_from_slice(arguments);
+    let status: global::Error = invoke_engine_method(
+        object,
+        generated_api::__godot_rs_emit_signal_spec(),
+        &values[..arguments.len() + 1],
+    )?;
+    if status == global::Error::OK {
+        Ok(())
+    } else {
+        Err(EngineError::invalid_argument(format!(
+            "Godot signal `{name}` failed: {status:?}"
+        )))
+    }
+}
+
 const MAX_ENGINE_TEXT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Marker implemented by generated Godot engine class types.
 pub trait GodotClass {
     /// Godot ClassDB name.
     const CLASS_NAME: &'static str;
+
+    /// Rust script identity; engine classes have no attached script contract.
+    #[doc(hidden)]
+    const SCRIPT_ID: Option<&'static str> = None;
+
+    #[doc(hidden)]
+    fn __script_resource_uid() -> EngineResult<Option<i64>> {
+        Ok(None)
+    }
 }
 
 macro_rules! define_engine_classes {
@@ -58,7 +123,7 @@ impl<T: GodotClass> Inherits<T> for T {}
 #[repr(transparent)]
 pub struct ObjectRef<T: GodotClass> {
     raw: u64,
-    marker: PhantomData<fn() -> T>,
+    marker: PhantomData<Rc<T>>,
 }
 
 impl<T: GodotClass> ObjectRef<T> {
@@ -84,6 +149,21 @@ impl<T: GodotClass> ObjectRef<T> {
         self.raw
     }
 
+    /// Checks the live engine class and, for a Rust script, its script identity.
+    pub fn try_cast<U: GodotClass>(self) -> EngineResult<ObjectRef<U>> {
+        validate_object::<U>(self.raw)?;
+        Ok(ObjectRef::__from_instance_id(self.raw))
+    }
+
+    /// Converts a reference to a statically known engine base class.
+    #[must_use]
+    pub const fn upcast<U: GodotClass>(self) -> ObjectRef<U>
+    where
+        T: Inherits<U>,
+    {
+        ObjectRef::__from_instance_id(self.raw)
+    }
+
     #[doc(hidden)]
     #[must_use]
     pub const fn __from_instance_id(raw: u64) -> Self {
@@ -101,6 +181,16 @@ impl<T: GodotClass> Clone for ObjectRef<T> {
 }
 
 impl<T: GodotClass> Copy for ObjectRef<T> {}
+
+impl<T: crate::script::ScriptClass> core::ops::Deref for ObjectRef<T> {
+    type Target = T::Api;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: ScriptApi requires the generated proxy to be a transparent
+        // wrapper around ObjectRef<T>. It contains no script state reference.
+        unsafe { &*core::ptr::from_ref(self).cast::<T::Api>() }
+    }
+}
 
 impl<T: GodotClass> Default for ObjectRef<T> {
     fn default() -> Self {
@@ -174,6 +264,25 @@ impl<T: GodotClass> GodotRef<T> {
         self.object.instance_id()
     }
 
+    /// Checks a narrower type while retaining the same native resource.
+    pub fn try_cast<U: GodotClass>(&self) -> EngineResult<GodotRef<U>> {
+        Ok(GodotRef {
+            object: self.object.try_cast()?,
+            ownership: Rc::clone(&self.ownership),
+        })
+    }
+
+    /// Retains this resource through a statically known base type.
+    pub fn upcast<U: GodotClass>(&self) -> GodotRef<U>
+    where
+        T: Inherits<U>,
+    {
+        GodotRef {
+            object: self.object.upcast(),
+            ownership: Rc::clone(&self.ownership),
+        }
+    }
+
     pub(crate) fn from_owned_parts(
         object_id: u64,
         ownership: crate::module::HostObjectRefToken,
@@ -215,6 +324,14 @@ impl<T: GodotClass> Clone for GodotRef<T> {
     }
 }
 
+impl<T: crate::script::ScriptClass> core::ops::Deref for GodotRef<T> {
+    type Target = T::Api;
+
+    fn deref(&self) -> &Self::Target {
+        &self.object
+    }
+}
+
 impl<T: GodotClass> PartialEq for GodotRef<T> {
     fn eq(&self, other: &Self) -> bool {
         self.object == other.object
@@ -238,24 +355,26 @@ pub type NodeRef<T> = ObjectRef<T>;
 
 /// Current Godot object that owns one Rust script callback.
 ///
-/// The proxy resolves the owner only when a generated method is called, so
-/// creating it is infallible while stale or out-of-scope use remains explicit.
+/// The proxy captures its owner when created. Calls still check object
+/// lifetime and the active engine context.
 pub struct Base<T: GodotClass> {
-    marker: PhantomData<fn() -> T>,
+    object: Option<ObjectRef<T>>,
 }
 
 impl<T: GodotClass> Base<T> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn __current() -> Self {
+    pub fn __current() -> Self {
         Self {
-            marker: PhantomData,
+            object: current_object().ok(),
         }
     }
 
     /// Resolves the current owning object to a reusable typed handle.
     pub fn object_ref(self) -> EngineResult<ObjectRef<T>> {
-        current_object()
+        self.object.ok_or_else(|| {
+            EngineError::unavailable("base access requires an active script callback")
+        })
     }
 }
 
@@ -296,7 +415,7 @@ impl<T: GodotClass> EngineObject for Base<T> {
     type Class = T;
 
     fn __engine_object(&self) -> EngineResult<ObjectRef<Self::Class>> {
-        current_object()
+        self.object_ref()
     }
 }
 
@@ -1444,6 +1563,9 @@ impl<T: GodotClass> EngineReturn for ObjectRef<T> {
                 "Godot returned null for a non-null object result",
             ));
         }
+        if T::SCRIPT_ID.is_some() {
+            validate_object::<T>(value.payload[0])?;
+        }
         Ok(Self::__from_instance_id(value.payload[0]))
     }
 }
@@ -1451,7 +1573,10 @@ impl<T: GodotClass> EngineReturn for ObjectRef<T> {
 impl<T: GodotClass> EngineReturn for Option<ObjectRef<T>> {
     fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::OBJECT_ID)?;
-        Ok((value.payload[0] != 0).then(|| ObjectRef::__from_instance_id(value.payload[0])))
+        if value.payload[0] == 0 {
+            return Ok(None);
+        }
+        ObjectRef::<T>::__from_engine_return(value).map(Some)
     }
 }
 
@@ -1468,6 +1593,9 @@ impl<T: GodotClass> EngineReturn for GodotRef<T> {
                 "Godot returned null for a non-null RefCounted result",
             ));
         };
+        if T::SCRIPT_ID.is_some() {
+            validate_object::<T>(object_id)?;
+        }
         Ok(Self::from_owned_parts(object_id, ownership))
     }
 
@@ -1485,6 +1613,9 @@ impl<T: GodotClass> EngineReturn for GodotRef<T> {
         let ownership = ownership.ok_or_else(|| {
             EngineError::invalid_result("Native RefCounted result omitted ownership")
         })?;
+        if T::SCRIPT_ID.is_some() {
+            validate_object::<T>(abi.payload[0])?;
+        }
         Ok(Self::from_native_parts(abi.payload[0], ownership))
     }
 }
@@ -1497,9 +1628,15 @@ impl<T: GodotClass> EngineReturn for Option<GodotRef<T>> {
     }
 
     fn __from_host_return(value: crate::module::HostMethodValue) -> EngineResult<Self> {
-        Ok(value
+        value
             .into_owned_object_ref()?
-            .map(|(object_id, ownership)| GodotRef::from_owned_parts(object_id, ownership)))
+            .map(|(object_id, ownership)| {
+                if T::SCRIPT_ID.is_some() {
+                    validate_object::<T>(object_id)?;
+                }
+                Ok(GodotRef::from_owned_parts(object_id, ownership))
+            })
+            .transpose()
     }
 
     fn __from_native_return(value: crate::native::NativeEngineValue) -> EngineResult<Self> {
@@ -1519,6 +1656,9 @@ impl<T: GodotClass> EngineReturn for Option<GodotRef<T>> {
         let ownership = ownership.ok_or_else(|| {
             EngineError::invalid_result("Native RefCounted result omitted ownership")
         })?;
+        if T::SCRIPT_ID.is_some() {
+            validate_object::<T>(abi.payload[0])?;
+        }
         Ok(Some(GodotRef::from_native_parts(abi.payload[0], ownership)))
     }
 }

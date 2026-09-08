@@ -26,7 +26,9 @@ pub use class::{
 pub use method::{MethodRegistration, NativeMethod, NativeVirtualContract, NativeVirtualMethod};
 pub use value::GodotValue;
 
-pub(crate) use callable_value::{NativeCallableToken, retain_rust_callable};
+pub(crate) use callable_value::{
+    NativeCallableToken, retain_rust_callable, retained_callable_from_bytes,
+};
 pub(crate) use godot_api::api_snapshot;
 pub use godot_api::native as sys;
 

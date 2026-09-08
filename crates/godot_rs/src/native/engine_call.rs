@@ -219,6 +219,7 @@ impl NativeCallValue {
             ));
         }
         match contract.ptrcall_type {
+            AbiPtrcallType::VOID if value == AbiValueV1::NIL => Ok(Self::Void),
             AbiPtrcallType::BOOL if value.payload[0] <= 1 => Ok(Self::Bool(value.payload[0] as u8)),
             AbiPtrcallType::I8 => narrow_signed::<i8>(value.payload[0])
                 .map(i64::from)
@@ -884,6 +885,13 @@ impl NativeCallValue {
                 interface,
                 ptrcall_variant_type(AbiPtrcallType::OBJECT),
                 ptr::from_ref(&object).cast(),
+            );
+        }
+        if matches!(self, Self::Void) {
+            return super::dynamic_value::NativeVariant::from_rust(
+                interface,
+                &crate::variant::Variant::nil(),
+                0,
             );
         }
         if matches!(ptrcall_type, AbiPtrcallType::VOID | AbiPtrcallType::VARIANT) {
@@ -1603,18 +1611,12 @@ fn invoke_engine_method_inner(
             "Godot did not return the generated Native MethodBind",
         ));
     }
-    let variant_contract = AbiGodotValueSpecV1 {
-        value_type: AbiValueType::VARIANT,
-        ptrcall_type: AbiPtrcallType::VARIANT,
-        class_name: AbiByteSlice::EMPTY,
-        reserved_flags: 0,
-        reserved: [0; 2],
-    };
     let native_arguments = arguments
         .iter()
         .enumerate()
         .map(|(index, value)| {
-            let contract = contracts.get(index).unwrap_or(&variant_contract);
+            let fallback = vararg_contract(value.type_)?;
+            let contract = contracts.get(index).unwrap_or(&fallback);
             NativeCallValue::from_argument(interface, contract, *value).map_err(|error| {
                 EngineError::invalid_argument(format!(
                     "Native engine call `{class_name}.{method_name}` rejected argument \
@@ -1629,7 +1631,8 @@ fn invoke_engine_method_inner(
             .iter()
             .enumerate()
             .map(|(index, value)| {
-                let contract = contracts.get(index).unwrap_or(&variant_contract);
+                let fallback = vararg_contract(arguments[index].type_)?;
+                let contract = contracts.get(index).unwrap_or(&fallback);
                 value.to_native_variant(interface, contract.ptrcall_type)
             })
             .collect::<EngineResult<Vec<_>>>()?;
@@ -1711,7 +1714,7 @@ fn validate_object_contract(
     validate_object_class(interface, object, class_name, "method argument")
 }
 
-fn validate_object_class(
+pub(super) fn validate_object_class(
     interface: Interface,
     object: super::sys::GDExtensionObjectPtr,
     class_name: &str,
@@ -1779,6 +1782,68 @@ fn api_member_name(
 fn api_numeric_i64(value: u64, label: &str) -> EngineResult<i64> {
     i64::try_from(value).map_err(|_| {
         EngineError::invalid_argument(format!("Native generated {label} exceeds the engine ABI"))
+    })
+}
+
+fn vararg_contract(value_type: AbiValueType) -> EngineResult<AbiGodotValueSpecV1> {
+    let ptrcall_type = match value_type {
+        AbiValueType::NIL => AbiPtrcallType::VOID,
+        AbiValueType::OBJECT_ID => AbiPtrcallType::OBJECT,
+        AbiValueType::BOOL => AbiPtrcallType::BOOL,
+        AbiValueType::I64 => AbiPtrcallType::I64,
+        AbiValueType::U64 => AbiPtrcallType::U64,
+        AbiValueType::F64 => AbiPtrcallType::F64,
+        AbiValueType::STRING => AbiPtrcallType::STRING,
+        AbiValueType::STRING_NAME => AbiPtrcallType::STRING_NAME,
+        AbiValueType::NODE_PATH => AbiPtrcallType::NODE_PATH,
+        AbiValueType::VECTOR2 => AbiPtrcallType::VECTOR2,
+        AbiValueType::VECTOR2I => AbiPtrcallType::VECTOR2I,
+        AbiValueType::VECTOR3 => AbiPtrcallType::VECTOR3,
+        AbiValueType::VECTOR3I => AbiPtrcallType::VECTOR3I,
+        AbiValueType::VECTOR4 => AbiPtrcallType::VECTOR4,
+        AbiValueType::VECTOR4I => AbiPtrcallType::VECTOR4I,
+        AbiValueType::RECT2 => AbiPtrcallType::RECT2,
+        AbiValueType::RECT2I => AbiPtrcallType::RECT2I,
+        AbiValueType::QUATERNION => AbiPtrcallType::QUATERNION,
+        AbiValueType::PLANE => AbiPtrcallType::PLANE,
+        AbiValueType::TRANSFORM2D => AbiPtrcallType::TRANSFORM2D,
+        AbiValueType::AABB => AbiPtrcallType::AABB,
+        AbiValueType::BASIS => AbiPtrcallType::BASIS,
+        AbiValueType::TRANSFORM3D => AbiPtrcallType::TRANSFORM3D,
+        AbiValueType::PROJECTION => AbiPtrcallType::PROJECTION,
+        AbiValueType::COLOR => AbiPtrcallType::COLOR,
+        AbiValueType::RID => AbiPtrcallType::RID,
+        AbiValueType::PACKED_BYTE_ARRAY => AbiPtrcallType::PACKED_BYTE_ARRAY,
+        AbiValueType::PACKED_INT32_ARRAY => AbiPtrcallType::PACKED_INT32_ARRAY,
+        AbiValueType::PACKED_INT64_ARRAY => AbiPtrcallType::PACKED_INT64_ARRAY,
+        AbiValueType::PACKED_FLOAT32_ARRAY => AbiPtrcallType::PACKED_FLOAT32_ARRAY,
+        AbiValueType::PACKED_FLOAT64_ARRAY => AbiPtrcallType::PACKED_FLOAT64_ARRAY,
+        AbiValueType::PACKED_STRING_ARRAY => AbiPtrcallType::PACKED_STRING_ARRAY,
+        AbiValueType::PACKED_VECTOR2_ARRAY => AbiPtrcallType::PACKED_VECTOR2_ARRAY,
+        AbiValueType::PACKED_VECTOR3_ARRAY => AbiPtrcallType::PACKED_VECTOR3_ARRAY,
+        AbiValueType::PACKED_COLOR_ARRAY => AbiPtrcallType::PACKED_COLOR_ARRAY,
+        AbiValueType::PACKED_VECTOR4_ARRAY => AbiPtrcallType::PACKED_VECTOR4_ARRAY,
+        AbiValueType::VARIANT => AbiPtrcallType::VARIANT,
+        AbiValueType::ARRAY => AbiPtrcallType::ARRAY,
+        AbiValueType::DICTIONARY => AbiPtrcallType::DICTIONARY,
+        AbiValueType::CALLABLE => AbiPtrcallType::CALLABLE,
+        AbiValueType::SIGNAL => AbiPtrcallType::SIGNAL,
+        _ => {
+            return Err(EngineError::invalid_argument(
+                "unsupported Native variable argument type",
+            ));
+        }
+    };
+    Ok(AbiGodotValueSpecV1 {
+        value_type,
+        ptrcall_type,
+        class_name: if value_type == AbiValueType::OBJECT_ID {
+            AbiByteSlice::from_static("Object")
+        } else {
+            AbiByteSlice::EMPTY
+        },
+        reserved_flags: 0,
+        reserved: [0; 2],
     })
 }
 

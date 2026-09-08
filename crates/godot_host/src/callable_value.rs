@@ -1,6 +1,6 @@
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use godot_api::abi::{
     ABI_CALLABLE_MAGIC, ABI_CALLABLE_OWNED, ABI_CALLABLE_VERSION, ABI_VALUE_OWNED_BYTES, AbiStatus,
@@ -47,24 +47,40 @@ pub(crate) struct NativeCallable {
     get_method: CallableBuiltinMethod,
 }
 
+type CapturedSignalArguments = Result<Option<crate::dynamic_value::NativeDynamic>, ValueError>;
+
 /// Shared state written by Godot's custom Callable and read by the frame
 /// scheduler. It contains no project-module pointers and remains valid while
 /// either Godot or the Host owns a Callable copy.
 pub(crate) struct SignalWaitState {
     fired: AtomicBool,
+    claimed: AtomicBool,
     active: AtomicBool,
+    arguments: Mutex<Option<CapturedSignalArguments>>,
 }
 
 impl SignalWaitState {
     pub(crate) const fn new() -> Self {
         Self {
             fired: AtomicBool::new(false),
+            claimed: AtomicBool::new(false),
             active: AtomicBool::new(true),
+            arguments: Mutex::new(None),
         }
     }
 
     pub(crate) fn fired(&self) -> bool {
         self.fired.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_arguments(
+        &self,
+    ) -> Result<Option<crate::dynamic_value::NativeDynamic>, ValueError> {
+        self.arguments
+            .lock()
+            .map_err(|_| internal("Signal future arguments are unavailable"))?
+            .take()
+            .ok_or_else(|| internal("Signal future completed without arguments"))?
     }
 
     pub(crate) fn deactivate(&self) {
@@ -331,7 +347,80 @@ impl NativeCallable {
         let object = resolve_object(object_id)?;
         let method = OwnedStringName::new(interface, method)
             .ok_or_else(|| invalid("Callable method name could not be encoded"))?;
-        Self::from_standard(interface, object, &method)
+        let callable = Self::from_standard(interface, object, &method)?;
+        if godot_api::abi::callable_value_retains_target(bytes) {
+            callable.retaining_target(object_id, object)
+        } else {
+            Ok(callable)
+        }
+    }
+
+    fn retaining_target(
+        self,
+        object_id: u64,
+        object: GDExtensionObjectPtr,
+    ) -> Result<Self, ValueError> {
+        let interface = self.interface;
+        let class = OwnedStringName::new(interface, "RefCounted")
+            .ok_or_else(|| internal("RefCounted class name could not be encoded"))?;
+        let get_tag = interface
+            .classdb_get_class_tag
+            .ok_or_else(|| internal("Godot class lookup is unavailable"))?;
+        let cast = interface
+            .object_cast_to
+            .ok_or_else(|| internal("Godot object class validation is unavailable"))?;
+        // SAFETY: Both names and pointers belong to the active engine. Only a
+        // RefCounted target can be held alive by the bound Variant below.
+        let tag = unsafe { get_tag(class.as_ptr()) };
+        if tag.is_null() || object.is_null() {
+            return Err(invalid(
+                "retained Callable target must be a RefCounted object",
+            ));
+        }
+        // SAFETY: Both live pointers were obtained from the active engine above.
+        if unsafe { cast(object, tag) }.is_null() {
+            return Err(invalid(
+                "retained Callable target must be a RefCounted object",
+            ));
+        }
+        let codec = VariantCodec::new(interface)
+            .ok_or_else(|| internal("Godot Variant codecs are unavailable"))?;
+        let target = OwnedVariant::from_abi(&codec, AbiValueV1::from_object_id(object_id))
+            .map_err(|_| invalid("Callable target could not be retained"))?;
+        let arguments = crate::dynamic_value::NativeDynamic::from_variant_arguments(
+            interface,
+            &[target.as_ptr()],
+        )?;
+        let unbind = builtin_method(interface, c"unbind", 755_001_590)?;
+        let bind = builtin_method(interface, c"bindv", 3_564_560_322)?;
+        let mut unbound = Self::uninitialized(interface)?;
+        let count = 1_i64;
+        let unbind_args = [ptr::from_ref(&count).cast()];
+        // SAFETY: Authenticated Callable.unbind(int) writes a new Callable.
+        unsafe {
+            unbind(
+                self.as_mut_const_ptr(),
+                unbind_args.as_ptr(),
+                unbound.as_mut_ptr(),
+                1,
+            )
+        };
+        unbound.initialized = true;
+        let mut retained = Self::uninitialized(interface)?;
+        let bind_args = [arguments.as_const_ptr()];
+        // Godot's bind wrapper owns the target. Its matching unbind discards
+        // that extra argument before dispatch, preserving the original method.
+        // SAFETY: Authenticated Callable.bindv(Array) writes a new Callable.
+        unsafe {
+            bind(
+                unbound.as_mut_const_ptr(),
+                bind_args.as_ptr(),
+                retained.as_mut_ptr(),
+                1,
+            )
+        };
+        retained.initialized = true;
+        Ok(retained)
     }
 
     pub(crate) fn as_ptr(&self) -> GDExtensionConstTypePtr {
@@ -361,8 +450,8 @@ impl NativeCallable {
 
 unsafe extern "C" fn signal_wait_call(
     userdata: *mut core::ffi::c_void,
-    _arguments: *const GDExtensionConstVariantPtr,
-    _argument_count: GDExtensionInt,
+    arguments: *const GDExtensionConstVariantPtr,
+    argument_count: GDExtensionInt,
     output: GDExtensionVariantPtr,
     call_error: *mut GDExtensionCallError,
 ) {
@@ -381,7 +470,44 @@ unsafe extern "C" fn signal_wait_call(
     // SAFETY: The custom Callable owns this exact userdata type until
     // `signal_wait_free`.
     let data = unsafe { &*userdata.cast::<SignalWaitCallableData>() };
-    data.state.fired.store(true, Ordering::Release);
+    if data.state.active.load(Ordering::Acquire)
+        && data
+            .state
+            .claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let copied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if !(0..=1_024).contains(&argument_count)
+                || (argument_count != 0 && arguments.is_null())
+            {
+                return Err(ValueError::invalid(
+                    "Godot signal argument count is invalid",
+                ));
+            }
+            let arguments = if argument_count == 0 {
+                &[][..]
+            } else {
+                // SAFETY: Godot retains the validated argument slice through
+                // this callback. Every Variant is copied before returning.
+                unsafe { core::slice::from_raw_parts(arguments, argument_count as usize) }
+            };
+            if arguments.is_empty() {
+                Ok(None)
+            } else {
+                crate::dynamic_value::NativeDynamic::from_variant_arguments(
+                    data.interface,
+                    arguments,
+                )
+                .map(Some)
+            }
+        }))
+        .unwrap_or_else(|_| Err(internal("Godot signal argument capture panicked")));
+        if let Ok(mut arguments) = data.state.arguments.lock() {
+            *arguments = Some(copied);
+        }
+        data.state.fired.store(true, Ordering::Release);
+    }
     if !output.is_null() {
         if let Some(new_nil) = data.interface.variant_new_nil {
             // SAFETY: Godot supplied uninitialized Variant return storage.

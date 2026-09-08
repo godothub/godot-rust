@@ -1,5 +1,6 @@
 mod api_call;
 mod contract;
+mod script_arguments;
 pub(crate) mod value;
 mod vararg;
 
@@ -28,6 +29,7 @@ use crate::signal_value::NativeSignal;
 use crate::string_name::OwnedStringName;
 
 pub(crate) use api_call::call_godot_api_from_module;
+pub(crate) use script_arguments::ScriptCallArguments;
 
 const MAX_CACHED_METHODS: usize = 65_536;
 const MAX_OWNED_RETURN_VALUES: usize = 65_536;
@@ -124,6 +126,20 @@ impl EngineCallContext {
             return Err(ValueError::new(
                 AbiStatus::StaleHandle,
                 "Resource property object no longer exists",
+            ));
+        }
+        let tag = resolve_class_tag(interface, "RefCounted")
+            .map_err(|error| ValueError::new(error.status, error.message))?;
+        let cast = interface.object_cast_to.ok_or_else(|| {
+            ValueError::new(
+                AbiStatus::Internal,
+                "Godot object class validation is unavailable",
+            )
+        })?;
+        // SAFETY: Both the object and class tag came from the active engine.
+        if unsafe { cast(object, tag as *mut c_void) }.is_null() {
+            return Err(ValueError::invalid(
+                "only a RefCounted object can be retained as GodotRef",
             ));
         }
         let ownership = NativeGodotRef::from_object(interface, object)?;
@@ -398,7 +414,7 @@ fn own_returned_packed(value_type: AbiValueType, bytes: Vec<u8>) -> Result<AbiVa
     retain_returned_bytes(value_type, bytes.into_boxed_slice(), ABI_VALUE_OWNED_BYTES)
 }
 
-fn own_returned_dynamic(
+pub(crate) fn own_returned_dynamic(
     context: &EngineCallContext,
     value_type: AbiValueType,
     value: NativeDynamic,
@@ -462,6 +478,70 @@ fn own_returned_signal(value: NativeSignal) -> Result<AbiValueV1, ValueError> {
         value.to_bytes()?.into_boxed_slice(),
         ABI_VALUE_OWNED_BYTES,
     )
+}
+
+pub(crate) fn copy_script_result(
+    context: &EngineCallContext,
+    interface: EngineInterface,
+    value: &crate::module_value::ModuleValue,
+) -> Result<AbiValueV1, ValueError> {
+    let raw = value.abi();
+    let borrowed = value.borrowed_abi();
+    if raw.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
+        return context.retain_refcounted_object(interface, raw.payload[0]);
+    }
+    if matches!(
+        raw.type_,
+        AbiValueType::VARIANT | AbiValueType::ARRAY | AbiValueType::DICTIONARY
+    ) {
+        let native = NativeDynamic::from_abi(
+            interface,
+            raw.type_,
+            borrowed,
+            None,
+            Some(value.engine_call_context()),
+        )?;
+        return own_returned_dynamic(context, raw.type_, native);
+    }
+    if raw.type_ == AbiValueType::CALLABLE {
+        return copy_script_callable(context, interface, borrowed, value.engine_call_context());
+    }
+    if matches!(
+        raw.reserved_flags,
+        ABI_VALUE_OWNED_UTF8 | ABI_VALUE_OWNED_BYTES
+    ) {
+        let (pointer, length) = borrowed.byte_range(raw.type_).ok_or_else(|| {
+            ValueError::new(AbiStatus::Internal, "invalid script result byte range")
+        })?;
+        // SAFETY: ModuleValue has validated and retains this complete allocation.
+        let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
+        return retain_returned_bytes(raw.type_, bytes.into(), raw.reserved_flags);
+    }
+    Ok(borrowed)
+}
+
+fn copy_script_callable(
+    context: &EngineCallContext,
+    interface: EngineInterface,
+    value: AbiValueV1,
+    source: &EngineCallContext,
+) -> Result<AbiValueV1, ValueError> {
+    let callable = NativeCallable::from_abi(interface, value, Some(source), |id| {
+        let lookup = interface
+            .object_get_instance_from_id
+            .ok_or_else(|| ValueError::new(AbiStatus::Internal, "object lookup unavailable"))?;
+        // SAFETY: Godot validates opaque ObjectDB identities.
+        let object = unsafe { lookup(id) };
+        if object.is_null() {
+            Err(ValueError::new(
+                AbiStatus::StaleHandle,
+                "Callable target no longer exists",
+            ))
+        } else {
+            Ok(object)
+        }
+    })?;
+    own_returned_callable(context, callable)
 }
 
 fn retain_returned_bytes(
@@ -539,6 +619,40 @@ pub(crate) unsafe extern "C" fn retain_dynamic_value_from_module(
     })) {
         Ok(status) => status,
         Err(_) => AbiStatus::Panic,
+    }
+}
+
+pub(crate) unsafe extern "C" fn retain_object_from_module(
+    context: *mut c_void,
+    object_id: u64,
+    output: *mut AbiValueV1,
+) -> AbiCallResult {
+    if context.is_null() || output.is_null() || object_id == 0 {
+        return AbiCallResult::failure(
+            AbiStatus::InvalidArgument,
+            "invalid GodotRef retention arguments",
+        );
+    }
+    // SAFETY: The module provides one writable output for this call.
+    unsafe { output.write(AbiValueV1::NIL) };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let interface = crate::script_instance::active_engine_interface().ok_or_else(|| {
+            ValueError::new(
+                AbiStatus::Unsupported,
+                "GodotRef retention requires a main-thread callback",
+            )
+        })?;
+        // SAFETY: The Host table owns this exact context for the live module generation.
+        let context = unsafe { &*context.cast::<EngineCallContext>() };
+        context.retain_refcounted_object(interface, object_id)
+    })) {
+        Ok(Ok(value)) => {
+            // SAFETY: The module output remains writable until this callback returns.
+            unsafe { output.write(value) };
+            AbiCallResult::OK
+        }
+        Ok(Err(error)) => AbiCallResult::failure(error.status(), error.message()),
+        Err(_) => AbiCallResult::failure(AbiStatus::Panic, "GodotRef retention panicked"),
     }
 }
 

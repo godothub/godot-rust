@@ -1,0 +1,15 @@
+error[E0277]: the trait bound `Resource: Inherits<godot_rs::engine::Node>` is not satisfied
+ --> tests/ui/fail/lifecycle_wrong_base.rs:7:6
+  |
+7 | impl Settings {
+  |      ^^^^^^^^ the trait `Inherits<godot_rs::engine::Node>` is not implemented for `Resource`
+  |
+  = help: the following other types implement trait `Inherits<Base>`:
+            `Resource` implements `Inherits<RefCounted>`
+            `Resource` implements `Inherits<godot_rs::engine::Object>`
+note: required by a bound in `assert_node_callback`
+ --> tests/ui/fail/lifecycle_wrong_base.rs:6:1
+  |
+6 | #[script]
+  | ^^^^^^^^^ required by this bound in `assert_node_callback`
+  = note: this error originates in the attribute macro `script` (in Nightly builds, run with -Z macro-backtrace for more info)

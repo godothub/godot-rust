@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::{EngineError, EngineResult};
-use crate::signal::Signal;
+use crate::signal::{Signal, SignalResult};
 
 thread_local! {
     static TASKS: RefCell<Vec<Task>> = const { RefCell::new(Vec::new()) };
@@ -30,6 +30,7 @@ static BLOCKING_WORKERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
 struct Task {
     id: u64,
     cancelled: Rc<AtomicBool>,
+    scope_cancelled: Option<Rc<AtomicBool>>,
     future: Option<Pin<Box<dyn Future<Output = ()>>>>,
 }
 
@@ -38,6 +39,7 @@ struct Task {
 pub struct TaskHandle {
     id: u64,
     cancelled: Rc<AtomicBool>,
+    scope_cancelled: Option<Rc<AtomicBool>>,
 }
 
 impl TaskHandle {
@@ -50,6 +52,10 @@ impl TaskHandle {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .scope_cancelled
+                .as_ref()
+                .is_some_and(|scope| scope.load(Ordering::Acquire))
     }
 
     /// Stable identity within this loaded project-module generation.
@@ -59,11 +65,52 @@ impl TaskHandle {
     }
 }
 
+/// Owns cooperative tasks that must stop when their script instance is dropped.
+///
+/// A task never borrows the script across an await point. Move data or checked
+/// object handles into it; the scope prevents any later poll after its owner
+/// has been destroyed. Cancelling does not stop an already-running worker.
+#[derive(Debug, Default)]
+pub struct TaskScope {
+    cancelled: Rc<AtomicBool>,
+}
+
+impl TaskScope {
+    /// Creates an independent task lifetime.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Schedules a main-thread future belonging to this lifetime.
+    pub fn spawn(&self, future: impl Future<Output = ()> + 'static) -> TaskHandle {
+        spawn_in_scope(future, Some(self.cancelled.clone()))
+    }
+
+    /// Permanently cancels this scope and every task spawned through it.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for TaskScope {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 /// Schedules a `!Send` future on the Godot main thread.
 ///
 /// Newly spawned tasks are first polled on the next engine frame. Panicking
 /// tasks are isolated and removed without unwinding across the module ABI.
 pub fn spawn(future: impl Future<Output = ()> + 'static) -> TaskHandle {
+    spawn_in_scope(future, None)
+}
+
+fn spawn_in_scope(
+    future: impl Future<Output = ()> + 'static,
+    scope_cancelled: Option<Rc<AtomicBool>>,
+) -> TaskHandle {
     let id = NEXT_TASK_ID.with(|next| {
         let id = next.get();
         next.set(id.checked_add(1).unwrap_or(1));
@@ -73,15 +120,24 @@ pub fn spawn(future: impl Future<Output = ()> + 'static) -> TaskHandle {
     let mut task = Task {
         id,
         cancelled: cancelled.clone(),
+        scope_cancelled: scope_cancelled.clone(),
         future: Some(Box::pin(future)),
     };
-    if CANCELLING_TASKS.get() {
+    if CANCELLING_TASKS.get()
+        || scope_cancelled
+            .as_ref()
+            .is_some_and(|scope| scope.load(Ordering::Acquire))
+    {
         cancelled.store(true, Ordering::Release);
         drop_task_future(&mut task);
     } else {
         TASKS.with(|tasks| tasks.borrow_mut().push(task));
     }
-    TaskHandle { id, cancelled }
+    TaskHandle {
+        id,
+        cancelled,
+        scope_cancelled,
+    }
 }
 
 /// Yields until the next Godot frame.
@@ -314,11 +370,13 @@ enum SignalFutureState {
 /// The Host installs an ordinary one-shot Godot connection. Dropping or
 /// cancelling the containing task disconnects it deterministically.
 #[must_use]
-pub struct SignalFuture {
+pub struct SignalFuture<Args = ()> {
     state: SignalFutureState,
+    typed: bool,
+    marker: core::marker::PhantomData<fn() -> Args>,
 }
 
-impl SignalFuture {
+impl<Args> SignalFuture<Args> {
     pub(crate) fn new<T>(signal: &Signal<T>) -> Self {
         let encoded = signal
             .__bytes()
@@ -326,12 +384,22 @@ impl SignalFuture {
             .map_err(|error| EngineError::invalid_argument(error.message()));
         Self {
             state: SignalFutureState::New(encoded),
+            typed: true,
+            marker: core::marker::PhantomData,
         }
     }
 }
 
-impl Future for SignalFuture {
-    type Output = EngineResult<()>;
+impl SignalFuture {
+    pub(crate) fn new_untyped<T>(signal: &Signal<T>) -> Self {
+        let mut future = Self::new(signal);
+        future.typed = false;
+        future
+    }
+}
+
+impl<Args: SignalResult> Future for SignalFuture<Args> {
+    type Output = EngineResult<Args>;
 
     fn poll(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
         if matches!(self.state, SignalFutureState::New(_)) {
@@ -360,13 +428,19 @@ impl Future for SignalFuture {
         let SignalFutureState::Watching(token) = self.state else {
             panic!("SignalFuture polled after completion");
         };
-        match crate::module::poll_signal(token) {
-            Ok(false) => Poll::Pending,
-            Ok(true) => {
+        let result = if self.typed {
+            crate::module::poll_signal_values(token)
+        } else {
+            crate::module::poll_signal(token).map(|fired| fired.then(Vec::new))
+        };
+        match result {
+            Ok(None) => Poll::Pending,
+            Ok(Some(arguments)) => {
                 self.state = SignalFutureState::Done;
-                Poll::Ready(Ok(()))
+                Poll::Ready(Args::from_signal_arguments(arguments))
             }
             Err(error) => {
+                crate::module::cancel_signal(token);
                 self.state = SignalFutureState::Done;
                 Poll::Ready(Err(error))
             }
@@ -374,7 +448,7 @@ impl Future for SignalFuture {
     }
 }
 
-impl Drop for SignalFuture {
+impl<Args> Drop for SignalFuture<Args> {
     fn drop(&mut self) {
         if let SignalFutureState::Watching(token) = self.state {
             crate::module::cancel_signal(token);
@@ -388,7 +462,12 @@ pub fn poll_frame() {
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     for mut task in active.drain(..) {
-        if task.cancelled.load(Ordering::Acquire) {
+        if task.cancelled.load(Ordering::Acquire)
+            || task
+                .scope_cancelled
+                .as_ref()
+                .is_some_and(|scope| scope.load(Ordering::Acquire))
+        {
             drop_task_future(&mut task);
             continue;
         }
@@ -460,6 +539,53 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::Duration;
+
+    #[test]
+    fn dropping_scope_cancels_only_its_tasks_before_another_poll() {
+        cancel_all();
+        let scope = TaskScope::new();
+        let scoped_runs = Rc::new(Cell::new(0));
+        let output = scoped_runs.clone();
+        let handle = scope.spawn(async move {
+            output.set(1);
+            next_frame().await;
+            output.set(2);
+        });
+        let unscoped_ran = Rc::new(Cell::new(false));
+        let output = unscoped_ran.clone();
+        spawn(async move {
+            next_frame().await;
+            output.set(true);
+        });
+        poll_frame();
+        assert_eq!(scoped_runs.get(), 1);
+        drop(scope);
+        assert!(handle.is_cancelled());
+        poll_frame();
+        assert_eq!(scoped_runs.get(), 1);
+        assert!(unscoped_ran.get());
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+    }
+
+    #[test]
+    fn cancelled_scope_drops_new_futures_without_polling_them() {
+        struct MarkDrop(Rc<Cell<bool>>);
+        impl Drop for MarkDrop {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = Rc::new(Cell::new(false));
+        let guard = MarkDrop(dropped.clone());
+        let scope = TaskScope::new();
+        scope.cancel();
+        let handle = scope.spawn(async move {
+            let _guard = guard;
+            panic!("cancelled scope must not poll futures");
+        });
+        assert!(handle.is_cancelled());
+        assert!(dropped.get());
+    }
 
     #[test]
     fn tasks_yield_and_can_be_cancelled() {

@@ -1,4 +1,5 @@
 use core::ffi::c_void;
+mod typed;
 use core::mem::size_of;
 use core::ptr;
 use godot_api::abi::{
@@ -19,6 +20,7 @@ use std::collections::HashSet;
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+pub(crate) use typed::{call_script_member_from_module, validate_object_from_module};
 
 use crate::godot_metadata::{
     PROPERTY_USAGE_DEFAULT, method_flags, property_variant_type, variant_type,
@@ -58,6 +60,7 @@ struct RustScriptInstance {
     script: usize,
     language: usize,
     source_path: String,
+    script_uids: Vec<i64>,
     godot_instance: AtomicUsize,
     faults: InstanceFaults,
     names: LifecycleMethodNames,
@@ -627,7 +630,7 @@ pub(crate) fn create(
             if default_arguments
                 .push(
                     &codec,
-                    value.abi(),
+                    value.borrowed_abi(),
                     typed_array_element,
                     Some(value_owner.engine_call_context()),
                 )
@@ -686,6 +689,7 @@ pub(crate) fn create(
         script: script as usize,
         language: language as usize,
         source_path,
+        script_uids: state.script_uids(),
         godot_instance: AtomicUsize::new(0),
         faults: InstanceFaults::default(),
         names: LifecycleMethodNames {
@@ -903,99 +907,104 @@ fn migrate_state(
     let codec = instance.codec.as_ref().ok_or_else(|| {
         GenerationReloadError::Rejected("Godot Variant codec is unavailable".into())
     })?;
-    for index in 0..current.field_count() {
-        let Some(field) = current.field(index) else {
-            continue;
-        };
-        let persist = field.reload_policy() == godot_api::abi::AbiReloadPolicy::Persist
-            || (field.reload_policy() == godot_api::abi::AbiReloadPolicy::Default
-                && field
-                    .property_usage()
-                    .is_some_and(|usage| usage & ABI_PROPERTY_USAGE_STORAGE != 0));
-        if !persist {
-            continue;
-        }
-        let Some(expected) = field.value_type() else {
-            return Err(GenerationReloadError::Rejected(format!(
-                "persistent field `{}` has no migration value contract",
-                field.name()
-            )));
-        };
-        let next_field = candidate.field(index).ok_or_else(|| {
-            GenerationReloadError::Rejected(format!(
-                "candidate field `{}` is missing",
-                field.name()
-            ))
-        })?;
-        let value = current.get_field(&field).map_err(|error| {
-            GenerationReloadError::Rejected(format!(
-                "could not capture `{}`: {:?}: {}",
-                field.name(),
-                error.status,
-                error.message
-            ))
-        })?;
-        let property_bag_value = OwnedVariant::from_abi_with_context(
-            codec,
-            value.abi(),
-            field.typed_array_element(),
-            Some(value.engine_call_context()),
-        )
-        .map_err(|_| {
-            GenerationReloadError::Rejected(format!(
-                "could not store `{}` in the Host property bag",
-                field.name()
-            ))
-        })?;
-        let mut strings = Vec::new();
-        let mut math = Vec::new();
-        let mut packed = Vec::new();
-        let mut dynamic = Vec::new();
-        let mut callable = Vec::new();
-        let next_owner = candidate.value_owner();
-        let mut decoded = codec
-            .decode(
-                property_bag_value.as_ptr(),
-                expected,
-                VariantDecodeBacking {
-                    strings: &mut strings,
-                    math: &mut math,
-                    packed: &mut packed,
-                    dynamic: &mut dynamic,
-                    callable: &mut callable,
-                    dynamic_context: Some(next_owner.engine_call_context()),
-                },
-            )
-            .map_err(|_| {
+    let interface = instance
+        .interface
+        .ok_or_else(|| GenerationReloadError::Rejected("Godot interface is unavailable".into()))?;
+    with_engine_interface(interface, || {
+        for index in 0..current.field_count() {
+            let Some(field) = current.field(index) else {
+                continue;
+            };
+            let persist = field.reload_policy() == godot_api::abi::AbiReloadPolicy::Persist
+                || (field.reload_policy() == godot_api::abi::AbiReloadPolicy::Default
+                    && field
+                        .property_usage()
+                        .is_some_and(|usage| usage & ABI_PROPERTY_USAGE_STORAGE != 0));
+            if !persist {
+                continue;
+            }
+            let Some(expected) = field.value_type() else {
+                return Err(GenerationReloadError::Rejected(format!(
+                    "persistent field `{}` has no migration value contract",
+                    field.name()
+                )));
+            };
+            let next_field = candidate.field(index).ok_or_else(|| {
                 GenerationReloadError::Rejected(format!(
-                    "candidate field `{}` rejected the stored Godot value type",
+                    "candidate field `{}` is missing",
                     field.name()
                 ))
             })?;
-        if expected == AbiValueType::OBJECT_ID && next_field.owns_property_object() {
-            let interface = instance.interface.ok_or_else(|| {
-                GenerationReloadError::Rejected("Godot interface is unavailable".into())
+            let value = current.get_field(&field).map_err(|error| {
+                GenerationReloadError::Rejected(format!(
+                    "could not capture `{}`: {:?}: {}",
+                    field.name(),
+                    error.status,
+                    error.message
+                ))
             })?;
-            decoded = next_owner
-                .engine_call_context()
-                .retain_refcounted_object(interface, decoded.payload[0])
-                .map_err(|error| {
+            let property_bag_value = OwnedVariant::from_abi_with_context(
+                codec,
+                value.borrowed_abi(),
+                field.typed_array_element(),
+                Some(value.engine_call_context()),
+            )
+            .map_err(|_| {
+                GenerationReloadError::Rejected(format!(
+                    "could not store `{}` in the Host property bag",
+                    field.name()
+                ))
+            })?;
+            let mut strings = Vec::new();
+            let mut math = Vec::new();
+            let mut packed = Vec::new();
+            let mut dynamic = Vec::new();
+            let mut callable = Vec::new();
+            let next_owner = candidate.value_owner();
+            let mut decoded = codec
+                .decode(
+                    property_bag_value.as_ptr(),
+                    expected,
+                    VariantDecodeBacking {
+                        strings: &mut strings,
+                        math: &mut math,
+                        packed: &mut packed,
+                        dynamic: &mut dynamic,
+                        callable: &mut callable,
+                        dynamic_context: Some(next_owner.engine_call_context()),
+                    },
+                )
+                .map_err(|_| {
                     GenerationReloadError::Rejected(format!(
-                        "could not retain `{}` for the candidate generation: {error:?}",
+                        "candidate field `{}` rejected the stored Godot value type",
                         field.name()
                     ))
                 })?;
+            if expected == AbiValueType::OBJECT_ID && next_field.owns_property_object() {
+                let interface = instance.interface.ok_or_else(|| {
+                    GenerationReloadError::Rejected("Godot interface is unavailable".into())
+                })?;
+                decoded = next_owner
+                    .engine_call_context()
+                    .retain_refcounted_object(interface, decoded.payload[0])
+                    .map_err(|error| {
+                        GenerationReloadError::Rejected(format!(
+                            "could not retain `{}` for the candidate generation: {error:?}",
+                            field.name()
+                        ))
+                    })?;
+            }
+            candidate.set_field(&next_field, decoded).map_err(|error| {
+                GenerationReloadError::Rejected(format!(
+                    "could not restore `{}`: {:?}: {}",
+                    field.name(),
+                    error.status,
+                    error.message
+                ))
+            })?;
         }
-        candidate.set_field(&next_field, decoded).map_err(|error| {
-            GenerationReloadError::Rejected(format!(
-                "could not restore `{}`: {:?}: {}",
-                field.name(),
-                error.status,
-                error.message
-            ))
-        })?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 unsafe extern "C" fn set(
@@ -1006,6 +1015,7 @@ unsafe extern "C" fn set(
     let Some(instance) = data(instance) else {
         return 0;
     };
+    let _scope = ActiveScriptScope::enter(&instance);
     if instance.faults.is_fused() {
         return 0;
     }
@@ -1094,6 +1104,7 @@ unsafe extern "C" fn get(
     let Some(instance) = data(instance) else {
         return 0;
     };
+    let _scope = ActiveScriptScope::enter(&instance);
     if instance.faults.is_fused() {
         return 0;
     }
@@ -1132,7 +1143,7 @@ unsafe extern "C" fn get(
     };
     if codec
         .encode_with_context(
-            value.abi(),
+            value.borrowed_abi(),
             result,
             field.typed_array_element(),
             Some(value.engine_call_context()),
@@ -1234,6 +1245,7 @@ unsafe extern "C" fn get_property_state(
     let (Some(instance), Some(add)) = (data(instance), add) else {
         return;
     };
+    let _scope = ActiveScriptScope::enter(&instance);
     if instance.faults.is_fused() {
         return;
     }
@@ -1262,7 +1274,7 @@ unsafe extern "C" fn get_property_state(
             .and_then(ModuleField::typed_array_element);
         let Ok(value) = OwnedVariant::from_abi_with_context(
             codec,
-            value.abi(),
+            value.borrowed_abi(),
             typed_array_element,
             Some(value.engine_call_context()),
         ) else {
@@ -1510,7 +1522,7 @@ unsafe extern "C" fn call(
             let encoded = instance.codec.as_ref().is_some_and(|codec| {
                 codec
                     .encode_with_context(
-                        value.abi(),
+                        value.borrowed_abi(),
                         result,
                         returned_array_type.as_deref(),
                         Some(value.engine_call_context()),
@@ -1629,6 +1641,7 @@ pub(crate) fn write_debug_members(instance_address: usize, result: GDExtensionTy
     let Some(instance) = retained_live_instance(instance_address) else {
         return false;
     };
+    let _scope = ActiveScriptScope::enter(&instance);
     let (Some(interface), Some(codec), Some(state)) = (
         instance.interface,
         instance.codec.as_ref(),
@@ -1653,7 +1666,7 @@ pub(crate) fn write_debug_members(instance_address: usize, result: GDExtensionTy
             OwnedVariant::from_abi(codec, AbiValueV1::from_borrowed_utf8(field.name())),
             OwnedVariant::from_abi_with_context(
                 codec,
-                value.abi(),
+                value.borrowed_abi(),
                 field.typed_array_element(),
                 Some(value.engine_call_context()),
             ),
@@ -1669,6 +1682,7 @@ pub(crate) fn write_debug_members(instance_address: usize, result: GDExtensionTy
 
 pub(crate) fn debug_member_expression(instance_address: usize, expression: &str) -> Option<String> {
     let instance = retained_live_instance(instance_address)?;
+    let _scope = ActiveScriptScope::enter(&instance);
     let state = instance.state.as_ref()?.try_lock().ok()?;
     for index in 0..state.field_count() {
         let field = state.field(index)?;
@@ -1676,7 +1690,7 @@ pub(crate) fn debug_member_expression(instance_address: usize, expression: &str)
             continue;
         }
         let value = state.get_field(&field).ok()?;
-        return debug_value_text(value.abi());
+        return debug_value_text(value.borrowed_abi());
     }
     None
 }
@@ -1868,40 +1882,48 @@ impl RustScriptInstance {
                 "signal value owner is unavailable",
             );
         };
-        let values = arguments
-            .iter()
-            .copied()
-            .zip(signal.argument_types.iter().copied())
-            .map(|(value, expected)| value_owner.signal(expected, value))
-            .collect::<Result<Vec<_>, _>>();
-        let values = match values {
-            Ok(values) => values,
-            Err(error) => {
-                host_eprintln!("godot-rust rejected a signal argument: {}", error.message);
-                return AbiCallResult::failure(
-                    error.status,
-                    "signal argument violates its declared value contract",
-                );
-            }
-        };
         let Ok(name) = OwnedVariant::from_string_name(codec, &signal.name) else {
             return AbiCallResult::failure(AbiStatus::Internal, "could not encode the signal name");
         };
-        let mut variants = Vec::with_capacity(arguments.len() + 1);
-        variants.push(name);
-        for argument in &values {
-            let Ok(argument) = OwnedVariant::from_abi(codec, argument.abi()) else {
+        let mut variants: [Option<OwnedVariant>; MAX_SIGNAL_ARGUMENTS + 1] =
+            core::array::from_fn(|_| None);
+        variants[0] = Some(name);
+        for (index, (value, expected)) in arguments
+            .iter()
+            .copied()
+            .zip(signal.argument_types.iter().copied())
+            .enumerate()
+        {
+            let argument = match value_owner.signal(expected, value) {
+                Ok(value) => value,
+                Err(error) => {
+                    return AbiCallResult::failure(
+                        error.status,
+                        "signal argument violates its declared value contract",
+                    );
+                }
+            };
+            let Ok(variant) = OwnedVariant::from_abi_with_context(
+                codec,
+                argument.borrowed_abi(),
+                None,
+                Some(argument.engine_call_context()),
+            ) else {
                 return AbiCallResult::failure(
                     AbiStatus::InvalidArgument,
                     "signal argument has an invalid payload",
                 );
             };
-            variants.push(argument);
+            variants[index + 1] = Some(variant);
         }
-        let argument_pointers = variants
-            .iter()
-            .map(OwnedVariant::as_ptr)
-            .collect::<Vec<_>>();
+        let count = arguments.len() + 1;
+        let mut argument_pointers = [ptr::null(); MAX_SIGNAL_ARGUMENTS + 1];
+        for (pointer, variant) in argument_pointers.iter_mut().zip(&variants).take(count) {
+            *pointer = variant
+                .as_ref()
+                .expect("initialized signal argument")
+                .as_ptr();
+        }
         let Some(call) = interface.object_method_bind_call else {
             return AbiCallResult::failure(
                 AbiStatus::Internal,
@@ -1933,7 +1955,7 @@ impl RustScriptInstance {
                 self.emit_signal_method as GDExtensionMethodBindPtr,
                 owner,
                 argument_pointers.as_ptr(),
-                argument_pointers.len() as GDExtensionInt,
+                count as GDExtensionInt,
                 result.as_mut_ptr(),
                 &mut error,
             );
@@ -2518,6 +2540,7 @@ mod tests {
             script: 2,
             language: 3,
             source_path: "res://minimal.rs".into(),
+            script_uids: Vec::new(),
             godot_instance: AtomicUsize::new(0),
             faults: InstanceFaults::default(),
             names: LifecycleMethodNames {
@@ -2599,6 +2622,7 @@ mod tests {
             script: 2,
             language: 3,
             source_path: "res://unknown.rs".into(),
+            script_uids: Vec::new(),
             godot_instance: AtomicUsize::new(0),
             faults: InstanceFaults::default(),
             names: LifecycleMethodNames {

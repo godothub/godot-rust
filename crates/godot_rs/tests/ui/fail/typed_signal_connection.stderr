@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/typed_signal_connection.rs:17:37
+   |
+17 |         self.damaged.connect_method(&self.callbacks()?.display())
+   |                      -------------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `&CallableMethod<(i64,)>`, found `&CallableMethod<(String,)>`
+   |                      |
+   |                      arguments to this method are incorrect
+   |
+   = note: expected reference `&CallableMethod<(i64,)>`
+              found reference `&CallableMethod<(std::string::String,)>`
+note: method defined here
+  --> src/signal.rs
+   |
+   |     pub fn connect_method(&self, method: &CallableMethod<T::Arguments>) -> EngineResult<()>
+   |            ^^^^^^^^^^^^^^

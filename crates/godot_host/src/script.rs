@@ -54,6 +54,10 @@ pub(crate) fn set_language_object(object: *mut c_void) {
     LANGUAGE_OBJECT.store(object as usize, Ordering::Release);
 }
 
+pub(crate) fn language_object() -> *mut c_void {
+    LANGUAGE_OBJECT.load(Ordering::Acquire) as *mut c_void
+}
+
 pub(crate) fn clear_language_object() {
     LANGUAGE_OBJECT.store(0, Ordering::Release);
 }

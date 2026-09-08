@@ -1,5 +1,9 @@
 extern crate alloc;
 
+mod typed;
+#[doc(hidden)]
+pub use typed::*;
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -9,7 +13,7 @@ use core::ptr;
 
 use crate::callable::Callable;
 use crate::engine::{GodotClass, GodotRef, Inherits, Node, NodeRef, ObjectRef, Resource};
-use crate::error::{EngineResult, ScriptResult, engine_error_callback_message};
+use crate::error::{EngineResult, ScriptResult};
 use crate::math::{
     Aabb, Basis, Color, Plane, Projection, Quaternion, Rect2, Rect2i, Transform2D, Transform3D,
     Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
@@ -208,8 +212,11 @@ pub struct ScriptDescriptor {
 }
 
 /// Implemented by the struct form of `#[script]`.
-pub trait ScriptClass: Sized + 'static {
+pub trait ScriptClass: GodotClass + Sized + 'static {
     const DESCRIPTOR: ScriptDescriptor;
+
+    #[doc(hidden)]
+    type Api: ScriptApi<Self>;
 
     /// Creates native Rust state before Inspector values are applied.
     #[doc(hidden)]
@@ -318,9 +325,14 @@ impl SuperArgumentBuffer {
         let mut borrowed = encoded;
         if matches!(
             encoded.reserved_flags,
-            godot_api::abi::ABI_VALUE_OWNED_UTF8 | godot_api::abi::ABI_VALUE_OWNED_BYTES
+            godot_api::abi::ABI_VALUE_OWNED_UTF8
+                | godot_api::abi::ABI_VALUE_OWNED_BYTES
+                | godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF
         ) {
             borrowed.reserved_flags = 0;
+            if encoded.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
+                borrowed.payload[1] = 0;
+            }
             self.owned.push(encoded);
         }
         self.values.push(borrowed);
@@ -458,20 +470,22 @@ pub struct RpcConfig {
 }
 
 /// Result returned by a statically dispatched lifecycle callback.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CallbackStatus {
     Ok,
     Error(&'static str),
+    EngineError(crate::error::EngineError),
 }
 
 impl CallbackStatus {
     /// Converts an SDK callback result to the stable project-module ABI.
     #[doc(hidden)]
     #[must_use]
-    pub const fn into_abi(self) -> AbiCallResult {
+    pub fn into_abi(self) -> AbiCallResult {
         match self {
             Self::Ok => AbiCallResult::OK,
             Self::Error(message) => AbiCallResult::callback_failed(message),
+            Self::EngineError(error) => crate::error::engine_error_abi(error),
         }
     }
 }
@@ -501,7 +515,7 @@ impl IntoCallbackStatus for EngineResult<()> {
     fn into_callback_status(self) -> CallbackStatus {
         match self {
             Ok(()) => CallbackStatus::Ok,
-            Err(error) => CallbackStatus::Error(engine_error_callback_message(error.kind())),
+            Err(error) => CallbackStatus::EngineError(error),
         }
     }
 }
@@ -921,44 +935,59 @@ impl FromAbiValue for NodePath {
 
 impl<T: GodotClass> FromAbiValue for ObjectRef<T> {
     fn from_abi(value: AbiValueV1) -> Option<Self> {
-        (value.type_ == AbiValueType::OBJECT_ID
-            && value.reserved_flags == 0
-            && value.payload[0] != 0
-            && value.payload[1] == 0)
-            .then(|| ObjectRef::__from_instance_id(value.payload[0]))
+        if value.type_ != AbiValueType::OBJECT_ID
+            || value.reserved_flags != 0
+            || value.payload[0] == 0
+            || value.payload[1] != 0
+        {
+            return None;
+        }
+        if T::SCRIPT_ID.is_some() {
+            crate::engine::validate_object::<T>(value.payload[0]).ok()?;
+        }
+        Some(ObjectRef::__from_instance_id(value.payload[0]))
     }
 }
 
 impl<T: GodotClass> FromAbiValue for Option<ObjectRef<T>> {
     fn from_abi(value: AbiValueV1) -> Option<Self> {
-        if value.type_ != AbiValueType::OBJECT_ID
-            || value.reserved_flags != 0
-            || value.payload[1] != 0
-        {
-            return None;
+        if value == AbiValueV1::from_object_id(0) {
+            Some(None)
+        } else {
+            ObjectRef::from_abi(value).map(Some)
         }
-        Some((value.payload[0] != 0).then(|| ObjectRef::__from_instance_id(value.payload[0])))
     }
 }
 
 impl<T: GodotClass> FromAbiValue for GodotRef<T> {
     fn from_abi(value: AbiValueV1) -> Option<Self> {
-        let (object_id, ownership) = crate::module::take_owned_object_ref(value)??;
-        Some(Self::from_owned_parts(object_id, ownership))
+        let object = if value.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
+            crate::module::clone_module_object_ref(value)?
+        } else if value.type_ == AbiValueType::OBJECT_ID
+            && value.reserved_flags == 0
+            && value.payload[0] != 0
+            && value.payload[1] == 0
+        {
+            let ownership = crate::module::retain_object_ref(value.payload[0]).ok()?;
+            Self::from_owned_parts(value.payload[0], ownership)
+        } else {
+            let (object_id, ownership) = crate::module::take_owned_object_ref(value)??;
+            Self::from_owned_parts(object_id, ownership)
+        };
+        if T::SCRIPT_ID.is_some() {
+            crate::engine::validate_object::<T>(object.instance_id()).ok()?;
+        }
+        Some(object)
     }
 }
 
 impl<T: GodotClass> FromAbiValue for Option<GodotRef<T>> {
     fn from_abi(value: AbiValueV1) -> Option<Self> {
-        if value.type_ == AbiValueType::OBJECT_ID
-            && value.reserved_flags == 0
-            && value.payload == [0, 0]
-        {
-            return Some(None);
+        if value == AbiValueV1::from_object_id(0) {
+            Some(None)
+        } else {
+            GodotRef::from_abi(value).map(Some)
         }
-        crate::module::take_owned_object_ref(value).map(|value| {
-            value.map(|(object_id, ownership)| GodotRef::from_owned_parts(object_id, ownership))
-        })
     }
 }
 
@@ -979,13 +1008,25 @@ impl<T: GodotClass> IntoMethodResult for Option<ObjectRef<T>> {
 
 impl<T: GodotClass> IntoMethodResult for GodotRef<T> {
     fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        self.object_ref().write_result(output)
+        if output.is_null() {
+            return AbiCallResult::failure(
+                AbiStatus::InvalidArgument,
+                "reflected method output pointer is null",
+            );
+        }
+        match crate::module::owned_object_ref(self) {
+            Ok(value) => write_method_value(output, value),
+            Err(error) => error,
+        }
     }
 }
 
 impl<T: GodotClass> IntoMethodResult for Option<GodotRef<T>> {
     fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        self.as_ref().map(GodotRef::object_ref).write_result(output)
+        match self {
+            Some(value) => value.write_result(output),
+            None => write_method_value(output, AbiValueV1::from_object_id(0)),
+        }
     }
 }
 
@@ -1431,20 +1472,24 @@ impl FromAbiValue for Variant {
 
 impl IntoMethodResult for Variant {
     fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        match self.__bytes() {
-            Ok(bytes) => {
-                if let Err(error) = crate::module::retain_dynamic_callables_for_transfer(bytes) {
-                    return AbiCallResult::callback_failed(engine_error_callback_message(
-                        error.kind(),
-                    ));
-                }
-                write_method_value(
-                    output,
-                    crate::module::owned_bytes(AbiValueType::VARIANT, bytes.to_vec()),
-                )
-            }
-            Err(error) => AbiCallResult::callback_failed(error.message()),
-        }
+        write_dynamic_result(output, AbiValueType::VARIANT, self)
+    }
+}
+
+fn write_dynamic_result(
+    output: *mut AbiValueV1,
+    value_type: AbiValueType,
+    value: Variant,
+) -> AbiCallResult {
+    if output.is_null() {
+        return AbiCallResult::failure(
+            AbiStatus::InvalidArgument,
+            "reflected method output pointer is null",
+        );
+    }
+    match crate::module::owned_dynamic_value(value_type, value) {
+        Ok(value) => write_method_value(output, value),
+        Err(error) => error,
     }
 }
 
@@ -1466,20 +1511,7 @@ impl<T: VariantConvert> FromAbiValue for Array<T> {
 
 impl<T: VariantConvert> IntoMethodResult for Array<T> {
     fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        match self.__bytes() {
-            Ok(bytes) => {
-                if let Err(error) = crate::module::retain_dynamic_callables_for_transfer(bytes) {
-                    return AbiCallResult::callback_failed(engine_error_callback_message(
-                        error.kind(),
-                    ));
-                }
-                write_method_value(
-                    output,
-                    crate::module::owned_bytes(AbiValueType::ARRAY, bytes.to_vec()),
-                )
-            }
-            Err(error) => AbiCallResult::callback_failed(error.message()),
-        }
+        write_dynamic_result(output, AbiValueType::ARRAY, Variant::from(self))
     }
 }
 
@@ -1501,20 +1533,7 @@ impl FromAbiValue for Dictionary {
 
 impl IntoMethodResult for Dictionary {
     fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        match self.__bytes() {
-            Ok(bytes) => {
-                if let Err(error) = crate::module::retain_dynamic_callables_for_transfer(bytes) {
-                    return AbiCallResult::callback_failed(engine_error_callback_message(
-                        error.kind(),
-                    ));
-                }
-                write_method_value(
-                    output,
-                    crate::module::owned_bytes(AbiValueType::DICTIONARY, bytes.to_vec()),
-                )
-            }
-            Err(error) => AbiCallResult::callback_failed(error.message()),
-        }
+        write_dynamic_result(output, AbiValueType::DICTIONARY, Variant::from(self))
     }
 }
 
@@ -1546,19 +1565,16 @@ impl FromAbiValue for Callable {
 
 impl IntoMethodResult for Callable {
     fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        let bytes = match self.__bytes() {
-            Ok(bytes) => bytes.to_vec(),
-            Err(error) => return AbiCallResult::callback_failed(error.message()),
-        };
-        if let Some(token) = godot_api::abi::callable_value_ownership_token(&bytes) {
-            if let Err(error) = crate::module::retain_callable_for_transfer(token) {
-                return AbiCallResult::callback_failed(engine_error_callback_message(error.kind()));
-            }
+        if output.is_null() {
+            return AbiCallResult::failure(
+                AbiStatus::InvalidArgument,
+                "reflected method output pointer is null",
+            );
         }
-        write_method_value(
-            output,
-            crate::module::owned_bytes(AbiValueType::CALLABLE, bytes),
-        )
+        match crate::module::owned_callable_value(self) {
+            Ok(value) => write_method_value(output, value),
+            Err(error) => error,
+        }
     }
 }
 
@@ -1669,6 +1685,15 @@ impl IntoMethodResult for ScriptResult<()> {
     }
 }
 
+impl<T: IntoMethodResult> IntoMethodResult for EngineResult<T> {
+    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+        match self {
+            Ok(value) => value.write_result(output),
+            Err(error) => crate::error::engine_error_abi(error),
+        }
+    }
+}
+
 /// Reads one generated argument after validating count and type.
 ///
 /// # Safety
@@ -1707,6 +1732,7 @@ pub fn encode_method_result<T: IntoMethodResult>(
 
 fn write_method_value(output: *mut AbiValueV1, value: AbiValueV1) -> AbiCallResult {
     if output.is_null() {
+        crate::module::release_module_output(value);
         return AbiCallResult::failure(
             AbiStatus::InvalidArgument,
             "reflected method output pointer is null",
@@ -2221,6 +2247,9 @@ pub fn abi_script_descriptor<T: ScriptMethods>(
     let methods = registered_methods::<T>();
     let method_count = u32::try_from(methods.len()).unwrap_or(u32::MAX);
     let uid_words = parse_resource_uid_text(resource_uid).and_then(encode_resource_uid_words);
+    if let (Some(identity), Some(uid)) = (T::SCRIPT_ID, parse_resource_uid_text(resource_uid)) {
+        typed::register_script_uid(identity, uid);
+    }
     let uid_flag = if uid_words.is_some() {
         ABI_SCRIPT_EXTENSION_RESOURCE_UID
     } else {

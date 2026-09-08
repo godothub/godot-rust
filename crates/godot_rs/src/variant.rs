@@ -826,7 +826,29 @@ impl<T: GodotClass> VariantConvert for ObjectRef<T> {
         let VariantValue::Object(value) = value.value else {
             return None;
         };
-        Some(ObjectRef::__from_instance_id(value.object.instance_id()))
+        let object_id = value.object.instance_id();
+        crate::engine::validate_object::<T>(object_id).ok()?;
+        Some(ObjectRef::__from_instance_id(object_id))
+    }
+}
+
+impl<T: GodotClass> From<Option<ObjectRef<T>>> for Variant {
+    fn from(value: Option<ObjectRef<T>>) -> Self {
+        Variant::from(value.unwrap_or_else(ObjectRef::unresolved))
+    }
+}
+
+impl<T: GodotClass> VariantConvert for Option<ObjectRef<T>> {
+    fn to_variant(&self) -> Variant {
+        Variant::from(*self)
+    }
+
+    fn from_variant(value: Variant) -> Option<Self> {
+        match &value.value {
+            VariantValue::Nil => Some(None),
+            VariantValue::Object(object) if !object.object.is_resolved() => Some(None),
+            _ => ObjectRef::from_variant(value).map(Some),
+        }
     }
 }
 
@@ -851,10 +873,9 @@ impl<T: GodotClass> VariantConvert for GodotRef<T> {
         let VariantValue::Object(value) = value.value else {
             return None;
         };
-        Some(GodotRef::from_dynamic_parts(
-            value.object.instance_id(),
-            value.ownership?,
-        ))
+        let object_id = value.object.instance_id();
+        crate::engine::validate_object::<T>(object_id).ok()?;
+        Some(GodotRef::from_dynamic_parts(object_id, value.ownership?))
     }
 }
 
@@ -876,16 +897,11 @@ impl<T: GodotClass> VariantConvert for Option<GodotRef<T>> {
     }
 
     fn from_variant(value: Variant) -> Option<Self> {
-        let VariantValue::Object(value) = value.value else {
-            return None;
-        };
-        if !value.object.is_resolved() {
-            return Some(None);
+        match &value.value {
+            VariantValue::Nil => Some(None),
+            VariantValue::Object(object) if !object.object.is_resolved() => Some(None),
+            _ => GodotRef::from_variant(value).map(Some),
         }
-        Some(Some(GodotRef::from_dynamic_parts(
-            value.object.instance_id(),
-            value.ownership?,
-        )))
     }
 }
 
@@ -1424,6 +1440,26 @@ fn read_f32_array<const N: usize>(bytes: &[u8]) -> Result<[f32; N], VariantError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nullable_object_conversions_accept_nil_and_reject_unvalidated_handles() {
+        use crate::engine::{Node, Resource};
+        assert_eq!(
+            Option::<ObjectRef<Node>>::from_variant(Variant::nil()),
+            Some(None)
+        );
+        assert_eq!(
+            Option::<GodotRef<Resource>>::from_variant(Variant::nil()),
+            Some(None)
+        );
+        let null = Variant::from(Option::<ObjectRef<Node>>::None);
+        assert_eq!(Option::<ObjectRef<Node>>::from_variant(null), Some(None));
+        let unresolved = Variant::from(ObjectRef::<Node>::__from_instance_id(42));
+        assert!(
+            ObjectRef::<Node>::from_variant(unresolved).is_none(),
+            "dynamic objects need a live engine for class validation"
+        );
+    }
 
     #[test]
     fn nested_dynamic_values_round_trip_canonically() {

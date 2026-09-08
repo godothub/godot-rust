@@ -44,10 +44,10 @@ pub(super) fn call(
             )?;
             contract.typed_array_element.as_deref()
         } else {
-            if value.type_ != AbiValueType::VARIANT || value.reserved_flags != 0 {
+            if value.reserved_flags != 0 {
                 return Err(EngineCallError::new(
                     AbiStatus::InvalidArgument,
-                    "Godot variable argument is not a Variant",
+                    "Godot variable argument carries ownership flags",
                 ));
             }
             None

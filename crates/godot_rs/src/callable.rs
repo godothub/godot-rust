@@ -5,8 +5,8 @@ use core::fmt;
 use std::rc::Rc;
 
 use godot_api::abi::{
-    ABI_CALLABLE_MAGIC, ABI_CALLABLE_OWNED, ABI_CALLABLE_VERSION, callable_value_ownership_token,
-    validate_callable_value,
+    ABI_CALLABLE_MAGIC, ABI_CALLABLE_OWNED, ABI_CALLABLE_RETAIN_TARGET, ABI_CALLABLE_VERSION,
+    callable_value_ownership_token, validate_callable_value,
 };
 
 use crate::engine::{GodotClass, GodotRef, Object, ObjectRef, SharedGodotRefOwnership};
@@ -28,6 +28,53 @@ pub struct Callable {
     native_ownership: Option<Rc<crate::native::NativeCallableToken>>,
     target_ownership: Option<SharedGodotRefOwnership>,
     encoded: OnceCell<Result<Box<[u8]>, CallableError>>,
+}
+
+/// A generated Godot method whose parameter tuple is checked at compile time.
+///
+/// It stores an object identity and method name, so a signal connection does
+/// not retain a pointer into a reloadable Rust module.
+pub struct CallableMethod<Args> {
+    callable: Callable,
+    marker: core::marker::PhantomData<fn(Args)>,
+}
+
+impl<Args> Clone for CallableMethod<Args> {
+    fn clone(&self) -> Self {
+        Self::__new(self.callable.clone())
+    }
+}
+
+impl<Args> fmt::Debug for CallableMethod<Args> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CallableMethod")
+            .field(&self.callable)
+            .finish()
+    }
+}
+
+impl<Args> CallableMethod<Args> {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __new(callable: Callable) -> Self {
+        Self {
+            callable,
+            marker: core::marker::PhantomData,
+        }
+    }
+
+    /// Accesses the underlying Callable for dynamic Godot APIs.
+    #[must_use]
+    pub const fn as_callable(&self) -> &Callable {
+        &self.callable
+    }
+
+    /// Converts this typed method target into an ordinary Callable.
+    #[must_use]
+    pub fn into_callable(self) -> Callable {
+        self.callable
+    }
 }
 
 /// Failure while encoding a Callable for the Host ABI.
@@ -86,7 +133,8 @@ impl Callable {
         )
     }
 
-    /// Creates a standard Callable and keeps a RefCounted target alive.
+    /// Creates a Callable that keeps its RefCounted target alive, including
+    /// copies stored by Godot or passed to another script.
     #[must_use]
     pub fn from_godot_ref_method<T: GodotClass>(
         object: &GodotRef<T>,
@@ -249,10 +297,12 @@ fn encode(value: &Callable) -> Result<Vec<u8>, CallableError> {
         .as_ref()
         .map_or(value.host_token, |value| value.id());
     output.extend_from_slice(
-        &if ownership_token == 0 {
-            0_u16
-        } else {
+        &if ownership_token != 0 {
             ABI_CALLABLE_OWNED
+        } else if value.target_ownership.is_some() {
+            ABI_CALLABLE_RETAIN_TARGET
+        } else {
+            0_u16
         }
         .to_le_bytes(),
     );
@@ -278,13 +328,25 @@ fn decode(
     let token = callable_value_ownership_token(bytes).unwrap_or(0);
     let object = u64::from_le_bytes(bytes.get(20..28)?.try_into().ok()?);
     let method = core::str::from_utf8(bytes.get(CALLABLE_HEADER_BYTES..)?).ok()?;
+    let target_ownership = if godot_api::abi::callable_value_retains_target(bytes) {
+        if let Some(callable) = crate::native::retained_callable_from_bytes(bytes) {
+            return callable.ok();
+        }
+        let ownership = crate::module::retain_object_ref(object).ok()?;
+        Some(
+            GodotRef::<crate::engine::RefCounted>::from_owned_parts(object, ownership)
+                .dynamic_ownership(),
+        )
+    } else {
+        None
+    };
     Some(Callable::from_parts(
         ObjectRef::__from_instance_id(object),
         StringName::from(method),
         token,
         ownership,
         None,
-        None,
+        target_ownership,
     ))
 }
 

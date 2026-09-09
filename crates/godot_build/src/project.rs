@@ -471,7 +471,9 @@ mod tests {
         let output = Command::new("cargo")
             .args(["test", "--offline", "--lib"])
             .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
             .env_remove("RUSTDOCFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTDOCFLAGS")
             .current_dir(&project.0)
             .output()
             .expect("direct Cargo test");

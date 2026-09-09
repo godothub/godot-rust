@@ -364,6 +364,12 @@ mod tests {
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let output = std::process::Command::new(cargo)
             .args(["build", "--offline", "--lib", "--message-format=json"])
+            // This fixture only generates dep-info. It does not rebuild std with
+            // the sanitizer settings used by the outer test process.
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTDOCFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTDOCFLAGS")
             .arg("--target-dir")
             .arg(&target)
             .current_dir(&root)
@@ -371,8 +377,9 @@ mod tests {
             .expect("run Cargo for a dependency-free library");
         assert!(
             output.status.success(),
-            "Cargo failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "Cargo failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
         );
         let artifact = String::from_utf8(output.stdout)
             .expect("Cargo JSON")

@@ -3,7 +3,7 @@
   "godot": "4.7",
   "godot_patch": 1,
   "godot_tag": "4.7-stable",
-  "generator_version": "0.9.1",
+  "generator_version": "0.9.2",
   "gdextension_interface_sha256": "640b48188708ba0016f8d7ace9e0e1d3279a41fa1226c59ff3193b15538bd254",
   "gdextension_interface_json_sha256": "7d8c0a039d9743eb8ebf88681ae0c641d8d3aa5ffca11081745a84da803e09a1",
   "extension_api_sha256": "c5dbd0c117e67f96bd9fef2c2e2023913e1d750d072ad2417a559e698211800b",

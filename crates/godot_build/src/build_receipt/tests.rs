@@ -301,12 +301,7 @@ fn receipt_cannot_resnapshot_edits_made_after_the_build() {
         validator_stdout: String::new(),
         validator_stderr: String::new(),
     };
-    let escaped_source = project
-        .source
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace(' ', "\\ ")
-        .replace('#', "\\#");
+    let escaped_source = project.source.to_string_lossy().replace(' ', "\\ ");
     std::fs::write(
         project.module.with_extension("d"),
         format!("module: {escaped_source}\n"),

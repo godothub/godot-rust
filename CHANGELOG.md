@@ -1,3 +1,7 @@
+## 0.9.2
+
+- Fix build failures caused by file paths on Windows.
+
 ## 0.9.1
 
 - Simplify singleton calls, default arguments, node bindings, and script imports.

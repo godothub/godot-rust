@@ -459,7 +459,9 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
     with tempfile.TemporaryDirectory(
         prefix=f"godot-rust-editor-{scenario}-"
     ) as temporary:
-        project = Path(temporary) / "project"
+        # Exercise Cargo dep-info escaping and Windows path separators during
+        # real builds, publication, hot reload, and Build Receipt reuse.
+        project = Path(temporary) / "project with spaces" / "#项目"
         prepare_test_project(project, scenario)
         environment = {
             **os.environ,
@@ -481,6 +483,7 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=EDITOR_FLOW_TIMEOUT_SECONDS,
         )
         if scenario == "flow" and completed.returncode == 0:
@@ -498,6 +501,7 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=120,
             )
             runtime_returncode = runtime.returncode
@@ -572,6 +576,7 @@ def run_component_test(godot: str) -> str:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=60,
         )
     output = completed.stdout + completed.stderr
@@ -625,4 +630,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Windows redirects test logs using the system code page by default.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     raise SystemExit(main())

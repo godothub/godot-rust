@@ -1,5 +1,5 @@
 use core::ffi::c_void;
-use core::fmt::{self, Write};
+use core::fmt;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::RwLock;
@@ -587,18 +587,14 @@ pub(crate) fn write_log(level: Level, arguments: fmt::Arguments<'_>) {
     }
     // Display implementations are user code and may log or initiate shutdown.
     // Format before retaining the Host log callback to permit that re-entry.
-    let mut message = StackMessage::new();
-    let _ = message.write_fmt(arguments);
+    let message = arguments.to_string();
     let logs = HOST_LOG_ACCESS
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let host = HOST_API.load(Ordering::Acquire);
     if host.is_null() {
         drop(logs);
-        write_fallback_log(
-            level,
-            format_args!("{}", String::from_utf8_lossy(&message.bytes[..message.len])),
-        );
+        write_fallback_log(level, format_args!("{message}"));
         return;
     }
     // SAFETY: The read guard prevents shutdown from clearing this table and
@@ -620,7 +616,10 @@ pub(crate) fn write_log(level: Level, arguments: fmt::Arguments<'_>) {
             host.context,
             level,
             AbiByteSlice::from_static("godot_rs"),
-            message.as_abi(),
+            AbiByteSlice {
+                ptr: message.as_ptr(),
+                len: message.len(),
+            },
         )
     };
 }
@@ -1301,37 +1300,6 @@ fn engine_host_api(unavailable: &'static str) -> EngineResult<&'static HostApiV1
         return Err(EngineError::unavailable(unavailable));
     }
     Ok(host)
-}
-
-struct StackMessage {
-    bytes: [u8; 1024],
-    len: usize,
-}
-
-impl StackMessage {
-    const fn new() -> Self {
-        Self {
-            bytes: [0; 1024],
-            len: 0,
-        }
-    }
-
-    fn as_abi(&self) -> AbiByteSlice {
-        AbiByteSlice {
-            ptr: self.bytes.as_ptr(),
-            len: self.len,
-        }
-    }
-}
-
-impl Write for StackMessage {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        let remaining = self.bytes.len().saturating_sub(self.len);
-        let count = remaining.min(value.len());
-        self.bytes[self.len..self.len + count].copy_from_slice(&value.as_bytes()[..count]);
-        self.len += count;
-        Ok(())
-    }
 }
 
 /// Internal function shape used by generated script indexes.

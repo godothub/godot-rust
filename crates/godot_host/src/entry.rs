@@ -26,9 +26,16 @@ unsafe extern "C" fn initialize(_userdata: *mut c_void, level: GDExtensionInitia
                 return;
             };
             if runtime.is_none() {
+                if let Err(error) = crate::logging::initialize(interface) {
+                    host_eprintln!("godot-rust: {error}");
+                    return;
+                }
                 match HostRuntime::start(interface) {
                     Ok(started) => *runtime = Some(started),
-                    Err(error) => host_eprintln!("godot-rust: {error}"),
+                    Err(error) => {
+                        host_eprintln!("godot-rust: {error}");
+                        crate::logging::shutdown();
+                    }
                 }
             }
         }
@@ -43,6 +50,7 @@ unsafe extern "C" fn deinitialize(_userdata: *mut c_void, level: GDExtensionInit
                     running.shutdown();
                 }
             }
+            crate::logging::shutdown();
         }
     }));
 }

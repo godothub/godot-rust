@@ -1334,6 +1334,7 @@ unsafe extern "C" fn frame(
         return;
     };
     crate::profiler::next_frame();
+    crate::logging::flush();
     if let Some(generation) = crate::module_loader::active_generation() {
         let result = crate::script_instance::with_engine_interface(language.interface, || {
             generation.poll_tasks()

@@ -1195,33 +1195,28 @@ pub(crate) struct PlaceholderExports {
 }
 
 impl PlaceholderExports {
-    pub(crate) fn new(interface: EngineInterface, script: Option<&ModuleScript>) -> Option<Self> {
+    pub(crate) fn new(interface: EngineInterface, script: &ModuleScript) -> Option<Self> {
         let codec = MetadataCodec::new(interface)?;
-        let properties = match script {
-            Some(script) => property_list(interface, script)?,
-            None => OwnedArray::new(codec)?,
-        };
+        let properties = property_list(interface, script)?;
         let mut values = OwnedDictionary::new(codec)?;
         let variants = VariantCodec::new(interface)?;
-        if let Some(script) = script {
-            for index in 0..script.field_count() {
-                let field = script.field(index)?;
-                if field.property_type().is_none() {
-                    continue;
-                }
-                let Some(value) = field.property_default_value() else {
-                    continue;
-                };
-                let value = EncodedVariant::from_abi_with_context(
-                    &variants,
-                    value.abi(),
-                    field.typed_array_element(),
-                    None,
-                )
-                .ok()?;
-                if !values.insert_encoded_variant(field.name(), &value) {
-                    return None;
-                }
+        for index in 0..script.field_count() {
+            let field = script.field(index)?;
+            if field.property_type().is_none() {
+                continue;
+            }
+            let Some(value) = field.property_default_value() else {
+                continue;
+            };
+            let value = EncodedVariant::from_abi_with_context(
+                &variants,
+                value.abi(),
+                field.typed_array_element(),
+                None,
+            )
+            .ok()?;
+            if !values.insert_encoded_variant(field.name(), &value) {
+                return None;
             }
         }
         Some(Self { properties, values })

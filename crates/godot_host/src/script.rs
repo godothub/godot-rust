@@ -356,7 +356,10 @@ pub(crate) fn prepare_exports(
         } else {
             script_path(&script).and_then(|path| generation.script(&path))
         };
-        let exports = godot_metadata::PlaceholderExports::new(script.interface, compiled.as_ref())
+        let Some(compiled) = compiled else {
+            continue;
+        };
+        let exports = godot_metadata::PlaceholderExports::new(script.interface, &compiled)
             .ok_or_else(|| {
                 format!(
                     "could not prepare Inspector properties for {}",
@@ -785,10 +788,12 @@ unsafe extern "C" fn update_exports(
     let Some(script) = script(instance) else {
         return;
     };
-    let compiled = compiled_script(script);
-    if let Some(exports) =
-        godot_metadata::PlaceholderExports::new(script.interface, compiled.as_ref())
-    {
+    let Some(compiled) = compiled_script(script) else {
+        // Without compiled fields, Godot's fallback properties are the only
+        // record of saved scene values; an empty update would erase them.
+        return;
+    };
+    if let Some(exports) = godot_metadata::PlaceholderExports::new(script.interface, &compiled) {
         update_placeholders(script, &exports);
     }
 }
@@ -1209,10 +1214,9 @@ unsafe extern "C" fn placeholder_instance_create(
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .push(placeholder as usize);
-        let compiled = compiled_script(script);
-        if let Some(exports) =
-            godot_metadata::PlaceholderExports::new(script.interface, compiled.as_ref())
-        {
+        if let Some(exports) = compiled_script(script).and_then(|compiled| {
+            godot_metadata::PlaceholderExports::new(script.interface, &compiled)
+        }) {
             // SAFETY: Godot just created this placeholder and has not returned it to its owner yet.
             unsafe { exports.update(script.interface, placeholder) };
         }

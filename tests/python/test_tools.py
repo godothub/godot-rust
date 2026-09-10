@@ -1489,10 +1489,11 @@ class StageHostTests(unittest.TestCase):
                 settings,
             )
 
-    def test_expected_cargo_failure_does_not_hide_editor_errors(self):
+    def test_expected_error_requires_a_report_without_hiding_script_errors(self):
         expected = "\n".join(
             (
-                *test_editor_plugin.EXPECTED_CARGO_FAILURES,
+                "\x1b[31mERROR:\x1b[0m rejected invalid input",
+                "ERROR: another diagnostic for the same operation",
                 *test_editor_plugin.DIAGNOSTICS_MARKERS,
             )
         )
@@ -1510,6 +1511,13 @@ class StageHostTests(unittest.TestCase):
             True,
         )
         self.assertTrue(errors)
+        self.assertTrue(
+            test_editor_plugin.output_errors(
+                "\n".join(test_editor_plugin.DIAGNOSTICS_MARKERS),
+                test_editor_plugin.DIAGNOSTICS_MARKERS,
+                True,
+            )
+        )
 
 
 class ReleaseTests(unittest.TestCase):

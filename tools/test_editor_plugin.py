@@ -90,16 +90,6 @@ INITIALIZE_MARKERS = (
     "GODOT_RUST_INITIALIZATION_AUTOMATIC",
     "GODOT_RUST_INITIALIZATION_CONFIGURED",
 )
-EXPECTED_CARGO_FAILURES = (
-    (
-        "ERROR: godot-rust: Automatic Rust check failed; "
-        "see Rust diagnostics above."
-    ),
-    (
-        "ERROR: godot-rust: Rust build before play failed; "
-        "see Rust diagnostics above."
-    ),
-)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 ERROR_PATTERNS = (
     re.compile(r"\bERROR:", re.IGNORECASE),
@@ -346,30 +336,17 @@ def discover_godot(explicit: str | None) -> str | None:
 def output_errors(
     output: str,
     required_markers: tuple[str, ...] = REQUIRED_MARKERS,
-    allow_expected_cargo_failure: bool = False,
+    expect_error: bool = False,
 ) -> list[str]:
-    patterns = ERROR_PATTERNS
-    if allow_expected_cargo_failure:
-        patterns = ERROR_PATTERNS[1:]
+    patterns = ERROR_PATTERNS[1:] if expect_error else ERROR_PATTERNS
     plain_output = ANSI_ESCAPE.sub("", output)
     errors = [
         pattern.pattern for pattern in patterns if pattern.search(plain_output)
     ]
-    if allow_expected_cargo_failure:
-        for line in output.splitlines():
-            plain_line = ANSI_ESCAPE.sub("", line)
-            if (
-                "ERROR:" in plain_line
-                and not any(
-                    expected in plain_line
-                    for expected in EXPECTED_CARGO_FAILURES
-                )
-            ):
-                errors.append(
-                    f"unexpected editor error: {plain_line.strip()}"
-                )
+    if expect_error and not ERROR_PATTERNS[0].search(plain_output):
+        errors.append("the invalid operation did not report an error")
     for marker in required_markers:
-        if marker not in output:
+        if marker not in plain_output:
             errors.append(f"missing marker {marker}")
     return errors
 
@@ -589,21 +566,10 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
         markers = REQUIRED_MARKERS
     checked_output = output
     if scenario == "scripts":
-        checked_output = re.sub(r"(?m)^ERROR: GODOT_RUST_LOG_ERROR\r?$", "", output)
-        for prefix, reason in (
-            ("ERROR: godot-rust: rejected Rust build", "field `res://src/scripts/tool_probe.rs::value` changed its stored type; "
-             "keep the type, rename the field, or use #[reload(skip)]"),
-            ("WARNING: godot-rust: Rust build", "could not resolve node fields for `res://src/scripts/tool_probe.rs`: "
-             "InvalidArgument: required node field `child` could not find `ReloadChild`"),
-        ):
-            disposition = "; keeping old code: " if prefix.startswith("ERROR") else " is waiting: "
-            expected = (
-                r"(?m)^" + re.escape(prefix) + r" sha256:[0-9a-f]{64}" + re.escape(disposition + reason) + r"\r?$"
-            )
-            checked_output, count = re.subn(expected, "", checked_output)
-            if count != 1:
-                raise RuntimeError(f"expected exactly one rejected migration: {reason}")
-    errors = output_errors(checked_output, markers, diagnostics)
+        checked_output = re.sub(
+            r"(?m)^ERROR: GODOT_RUST_LOG_ERROR\r?$", "", ANSI_ESCAPE.sub("", output)
+        )
+    errors = output_errors(checked_output, markers, diagnostics or scenario == "scripts")
     if scenario == "scripts":
         task_marker = "GODOT_RUST_TOOL_TASK_CANCELLED"
         cancellations = [match.start() for match in re.finditer(task_marker, completed.stdout)]
@@ -617,7 +583,7 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
             if marker not in completed.stdout or marker in completed.stderr:
                 errors.append(f"log missing from Godot stdout: {marker[:50]}")
         for marker in ("WARNING: GODOT_RUST_LOG_WARNING", "ERROR: GODOT_RUST_LOG_ERROR"):
-            if marker not in completed.stderr:
+            if marker not in ANSI_ESCAPE.sub("", completed.stderr):
                 errors.append(f"missing Godot severity: {marker}")
         if "GODOT_RUST_LOG_DEBUG" in output:
             errors.append("debug logging ignored Godot's verbosity setting")

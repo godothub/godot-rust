@@ -556,14 +556,11 @@ fn is_godot_identifier(value: &str) -> bool {
 }
 
 fn is_identifier(value: &str) -> bool {
-    let Some(first) = value.as_bytes().first().copied() else {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
         return false;
     };
-    is_identifier_start(first)
-        && value
-            .bytes()
-            .skip(1)
-            .all(|byte| is_identifier_start(byte) || byte.is_ascii_digit())
+    is_identifier_start(first) && characters.all(is_identifier_continue)
 }
 
 /// Finds the Rust type declared by the attachable `#[script(...)]` struct.
@@ -585,12 +582,7 @@ pub(crate) fn find_script_type(source: &str) -> Option<&str> {
             if token.text == "struct" {
                 let name = scanner.next_token()?.text;
                 let name = name.strip_prefix("r#").unwrap_or(name);
-                return name
-                    .as_bytes()
-                    .first()
-                    .copied()
-                    .filter(|byte| is_identifier_start(*byte))
-                    .map(|_| name);
+                return is_identifier(name).then_some(name);
             }
             if matches!(token.text, "#" | "impl" | "enum" | "trait") {
                 break;
@@ -629,8 +621,14 @@ pub(crate) fn auto_indent(source: &str, from_line: i64, to_line: i64) -> String 
             output.push('\n');
         }
 
+        let inside_literal = matches!(
+            state,
+            LexicalState::String { .. }
+                | LexicalState::RawString { .. }
+                | LexicalState::Character { .. }
+        );
         let analysis = analyze_line(line, &mut state);
-        if (from..=to).contains(&line_index) && !line.trim().is_empty() {
+        if !inside_literal && (from..=to).contains(&line_index) && !line.trim().is_empty() {
             let content = line.trim_start_matches([' ', '\t']);
             let line_depth = depth.saturating_sub(analysis.leading_closing_braces);
             for _ in 0..line_depth {
@@ -786,13 +784,11 @@ fn analyze_line(line: &str, state: &mut LexicalState) -> LineAnalysis {
         }
     }
 
-    if matches!(
-        state,
-        LexicalState::String { .. } | LexicalState::Character { .. }
-    ) {
-        // Ordinary Rust string and character literals cannot span an unescaped
-        // newline. Resetting makes recovery from incomplete editor input local.
+    if matches!(state, LexicalState::Character { .. }) {
         *state = LexicalState::Normal;
+    }
+    if let LexicalState::String { escaped } = state {
+        *escaped = false;
     }
     result
 }
@@ -905,25 +901,28 @@ impl<'a> Scanner<'a> {
             let start = self.offset;
             let token_line = self.line;
             if bytes[self.offset..].starts_with(b"r#")
-                && bytes
-                    .get(self.offset + 2)
-                    .is_some_and(|byte| is_identifier_start(*byte))
+                && self.source[self.offset + 2..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_identifier_start)
             {
                 self.offset += 2;
             }
-            if bytes
-                .get(self.offset)
-                .is_some_and(|byte| is_identifier_start(*byte))
+            if self.source[self.offset..]
+                .chars()
+                .next()
+                .is_some_and(is_identifier_start)
             {
-                self.offset += 1;
-                while bytes
-                    .get(self.offset)
-                    .is_some_and(|byte| is_identifier_continue(*byte))
+                self.bump();
+                while self.source[self.offset..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_identifier_continue)
                 {
-                    self.offset += 1;
+                    self.bump();
                 }
             } else {
-                self.offset += 1;
+                self.bump();
             }
             return Some(Token {
                 text: &self.source[start..self.offset],
@@ -943,7 +942,7 @@ impl<'a> Scanner<'a> {
                 escaped = false;
             } else if byte == b'\\' {
                 escaped = true;
-            } else if byte == delimiter || byte == b'\n' {
+            } else if byte == delimiter || (delimiter == b'\'' && byte == b'\n') {
                 break;
             }
         }
@@ -965,24 +964,61 @@ impl<'a> Scanner<'a> {
     }
 
     fn bump(&mut self) {
-        if self.source.as_bytes()[self.offset] == b'\n' {
+        let character = self.source[self.offset..]
+            .chars()
+            .next()
+            .expect("scanner is inside its source");
+        if character == '\n' {
             self.line += 1;
         }
-        self.offset += 1;
+        self.offset += character.len_utf8();
     }
 }
 
-fn is_identifier_start(byte: u8) -> bool {
-    byte == b'_' || byte.is_ascii_alphabetic()
+fn is_identifier_start(character: char) -> bool {
+    character == '_' || unicode_ident::is_xid_start(character)
 }
 
-fn is_identifier_continue(byte: u8) -> bool {
-    is_identifier_start(byte) || byte.is_ascii_digit()
+fn is_identifier_continue(character: char) -> bool {
+    unicode_ident::is_xid_continue(character)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_scanning_accepts_unicode_and_every_incomplete_prefix() {
+        let source = "#[script(base = Node)]\nstruct 玩家 {}\nimpl 玩家 { fn 移动(&self) { let café = \"中文\"; } }\nfn r#类型() {}\n🙂";
+        assert_eq!(find_script_type(source), Some("玩家"));
+        assert_eq!(find_function_line(source, "移动"), Some(2));
+        assert_eq!(find_declaration_line(source, "玩家"), Some(1));
+        assert!(identifiers(source).contains(&"café".to_owned()));
+        assert!(
+            function_declarations(source)
+                .iter()
+                .any(|(name, _)| name == "类型")
+        );
+        for end in source
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([source.len()])
+        {
+            let prefix = &source[..end];
+            function_declarations(prefix);
+            identifiers(prefix);
+            find_script_type(prefix);
+            find_declaration_line(prefix, "玩家");
+        }
+    }
+
+    #[test]
+    fn multiline_literals_keep_their_contents_and_hide_declarations() {
+        let source = "fn real() {\nlet text = \"first\nfn fake() { 中文\nlast\";\nlet raw = r#\"first\nfn hidden() {}\nlast\"#;\n}";
+        assert_eq!(function_declarations(source), [("real".to_owned(), 0)]);
+        let expected = "fn real() {\n\tlet text = \"first\nfn fake() { 中文\nlast\";\n\tlet raw = r#\"first\nfn hidden() {}\nlast\"#;\n}";
+        assert_eq!(auto_indent(source, 0, 99), expected);
+    }
 
     #[test]
     fn highlight_words_are_unique_and_control_flow_words_are_sorted() {

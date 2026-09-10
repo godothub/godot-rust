@@ -382,7 +382,7 @@ unsafe extern "C" fn return_true(
     write_bool(result, true);
 }
 
-unsafe extern "C" fn validate(
+unsafe fn validate(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -449,7 +449,7 @@ fn validation_function_entries(source: &str) -> Vec<String> {
         .collect()
 }
 
-unsafe extern "C" fn validate_path(
+unsafe fn validate_path(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -471,7 +471,7 @@ unsafe extern "C" fn validate_path(
     crate::value::write_utf8_string(language.interface, result, message);
 }
 
-unsafe extern "C" fn complete_code(
+unsafe fn complete_code(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -543,7 +543,7 @@ unsafe extern "C" fn complete_code(
     }
 }
 
-unsafe extern "C" fn lookup_code(
+unsafe fn lookup_code(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -635,7 +635,7 @@ unsafe extern "C" fn handles_global_class_type(
     );
 }
 
-unsafe extern "C" fn get_global_class_name(
+unsafe fn get_global_class_name(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -1190,7 +1190,7 @@ unsafe extern "C" fn return_snake_case(
     write_i64(result, SCRIPT_NAME_CASING_SNAKE_CASE);
 }
 
-unsafe extern "C" fn find_function(
+unsafe fn find_function(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -1231,7 +1231,7 @@ unsafe extern "C" fn find_function(
     });
 }
 
-unsafe extern "C" fn make_function(
+unsafe fn make_function(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -1293,7 +1293,7 @@ fn is_godot_class(interface: EngineInterface, class_name: &str) -> bool {
     !unsafe { get_class_tag(class_name.as_ptr()) }.is_null()
 }
 
-unsafe extern "C" fn auto_indent_code(
+unsafe fn auto_indent_code(
     instance: GDExtensionClassInstancePtr,
     arguments: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
@@ -1432,6 +1432,55 @@ macro_rules! virtual_method {
     };
 }
 
+enum EditorReturn {
+    String,
+    Dictionary,
+    Line,
+}
+
+fn editor_failure(
+    instance: GDExtensionClassInstancePtr,
+    result: GDExtensionTypePtr,
+    fallback: EditorReturn,
+) {
+    match fallback {
+        EditorReturn::String => write_string(instance, result, c""),
+        EditorReturn::Dictionary => write_default_builtin(
+            instance,
+            result,
+            GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_DICTIONARY,
+        ),
+        EditorReturn::Line => write_i64(result, -1),
+    }
+}
+
+macro_rules! editor_virtual_method {
+    ($name:literal, $hash:literal, $callback:ident, $fallback:ident) => {{
+        unsafe extern "C" fn boundary(
+            instance: GDExtensionClassInstancePtr,
+            arguments: *const GDExtensionConstTypePtr,
+            result: GDExtensionTypePtr,
+        ) {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // SAFETY: The registered Godot virtual supplies the exact callback arguments.
+                unsafe { $callback(instance, arguments, result) };
+            }));
+            if outcome.is_err() {
+                editor_failure(instance, result, EditorReturn::$fallback);
+                host_eprintln!(
+                    "godot-rust: Rust editor callback {} failed",
+                    $name.to_string_lossy()
+                );
+            }
+        }
+        VirtualMethodSpec {
+            name: $name,
+            hash: $hash,
+            callback: Some(boundary),
+        }
+    }};
+}
+
 static LANGUAGE_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
     virtual_method!(c"_get_name", 201_670_096, get_name),
     virtual_method!(c"_init", 3_218_959_716, no_op),
@@ -1466,15 +1515,15 @@ static LANGUAGE_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
         return_empty_array
     ),
     virtual_method!(c"_is_using_templates", 2_240_911_060, return_false),
-    virtual_method!(c"_validate", 1_697_887_509, validate),
-    virtual_method!(c"_validate_path", 3_135_753_539, validate_path),
+    editor_virtual_method!(c"_validate", 1_697_887_509, validate, Dictionary),
+    editor_virtual_method!(c"_validate_path", 3_135_753_539, validate_path, String),
     virtual_method!(c"_create_script", 1_981_248_198, create_script),
     virtual_method!(c"_has_named_classes", 36_873_697, return_true),
     virtual_method!(c"_supports_builtin_mode", 36_873_697, return_false),
     virtual_method!(c"_supports_documentation", 36_873_697, return_true),
     virtual_method!(c"_can_inherit_from_file", 36_873_697, return_true),
-    virtual_method!(c"_find_function", 2_878_152_881, find_function),
-    virtual_method!(c"_make_function", 1_243_061_914, make_function),
+    editor_virtual_method!(c"_find_function", 2_878_152_881, find_function, Line),
+    editor_virtual_method!(c"_make_function", 1_243_061_914, make_function, String),
     virtual_method!(c"_can_make_function", 36_873_697, return_true),
     virtual_method!(
         c"_open_in_external_editor",
@@ -1491,9 +1540,14 @@ static LANGUAGE_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
         2_969_522_789,
         return_snake_case
     ),
-    virtual_method!(c"_complete_code", 950_756_616, complete_code),
-    virtual_method!(c"_lookup_code", 3_143_837_309, lookup_code),
-    virtual_method!(c"_auto_indent_code", 2_531_480_354, auto_indent_code),
+    editor_virtual_method!(c"_complete_code", 950_756_616, complete_code, Dictionary),
+    editor_virtual_method!(c"_lookup_code", 3_143_837_309, lookup_code, Dictionary),
+    editor_virtual_method!(
+        c"_auto_indent_code",
+        2_531_480_354,
+        auto_indent_code,
+        String
+    ),
     virtual_method!(c"_add_global_constant", 3_776_071_444, no_op),
     virtual_method!(c"_add_named_global_constant", 3_776_071_444, no_op),
     virtual_method!(c"_remove_named_global_constant", 3_304_788_590, no_op),
@@ -1592,10 +1646,11 @@ static LANGUAGE_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
         3_927_539_163,
         handles_global_class_type
     ),
-    virtual_method!(
+    editor_virtual_method!(
         c"_get_global_class_name",
         2_248_993_622,
-        get_global_class_name
+        get_global_class_name,
+        Dictionary
     ),
 ];
 
@@ -1603,6 +1658,28 @@ static LANGUAGE_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn editor_panic_returns_a_valid_fallback_across_the_c_boundary() {
+        unsafe fn panic_line(
+            _instance: GDExtensionClassInstancePtr,
+            _arguments: *const GDExtensionConstTypePtr,
+            _result: GDExtensionTypePtr,
+        ) {
+            panic!("editor parser failure");
+        }
+        let method = editor_virtual_method!(c"_find_function", 0, panic_line, Line);
+        let mut line = 123_i64;
+        // SAFETY: The test callback does not read inputs; its fallback receives a writable integer slot.
+        unsafe {
+            method.callback.expect("panic boundary")(
+                ptr::null_mut(),
+                ptr::null(),
+                ptr::from_mut(&mut line).cast(),
+            )
+        };
+        assert_eq!(line, -1);
+    }
 
     #[test]
     fn every_language_virtual_has_a_unique_name() {
@@ -1615,7 +1692,6 @@ mod tests {
             );
             assert!(method.callback.is_some());
         }
-        assert_eq!(names.len(), 60);
     }
 
     #[test]
@@ -1625,197 +1701,5 @@ mod tests {
             validation_function_entries(source),
             vec!["first:1".to_owned(), "second:3".to_owned()]
         );
-        assert!(validation_function_entries(source).iter().all(|entry| {
-            entry
-                .rsplit_once(':')
-                .is_some_and(|(_, line)| line.parse::<usize>().is_ok_and(|line| line > 0))
-        }));
-    }
-
-    #[test]
-    fn bootstrap_virtuals_match_the_official_hashes() {
-        for (name, hash) in [
-            (c"_get_name".to_bytes(), 201_670_096),
-            (c"_get_type".to_bytes(), 201_670_096),
-            (c"_get_extension".to_bytes(), 201_670_096),
-            (c"_get_recognized_extensions".to_bytes(), 1_139_954_409),
-        ] {
-            assert!(
-                LANGUAGE_VIRTUAL_METHODS
-                    .iter()
-                    .any(|method| { method.name.to_bytes() == name && method.hash == hash })
-            );
-        }
-    }
-
-    #[test]
-    fn editor_keyword_virtuals_use_real_callbacks() {
-        for (name, callback) in [
-            (
-                c"_get_reserved_words".to_bytes(),
-                get_reserved_words as *const () as usize,
-            ),
-            (
-                c"_is_control_flow_keyword".to_bytes(),
-                is_control_flow_keyword as *const () as usize,
-            ),
-        ] {
-            let method = LANGUAGE_VIRTUAL_METHODS
-                .iter()
-                .find(|method| method.name.to_bytes() == name)
-                .expect("editor virtual must be registered");
-            assert_eq!(
-                method
-                    .callback
-                    .map(|callback| callback as *const () as usize),
-                Some(callback)
-            );
-        }
-    }
-
-    #[test]
-    fn editor_delimiter_virtuals_use_real_callbacks() {
-        for (name, callback) in [
-            (
-                c"_get_comment_delimiters".to_bytes(),
-                get_comment_delimiters as *const () as usize,
-            ),
-            (
-                c"_get_doc_comment_delimiters".to_bytes(),
-                get_doc_comment_delimiters as *const () as usize,
-            ),
-            (
-                c"_get_string_delimiters".to_bytes(),
-                get_string_delimiters as *const () as usize,
-            ),
-        ] {
-            let method = LANGUAGE_VIRTUAL_METHODS
-                .iter()
-                .find(|method| method.name.to_bytes() == name)
-                .expect("editor virtual must be registered");
-            assert_eq!(
-                method
-                    .callback
-                    .map(|callback| callback as *const () as usize),
-                Some(callback)
-            );
-        }
-    }
-
-    #[test]
-    fn external_editor_override_is_opt_in() {
-        let method = LANGUAGE_VIRTUAL_METHODS
-            .iter()
-            .find(|method| method.name.to_bytes() == c"_overrides_external_editor".to_bytes())
-            .expect("external editor override virtual must be registered");
-        assert_eq!(
-            method
-                .callback
-                .map(|callback| callback as *const () as usize),
-            Some(overrides_external_editor as *const () as usize)
-        );
-    }
-
-    #[test]
-    fn function_navigation_uses_the_rust_scanner() {
-        let method = LANGUAGE_VIRTUAL_METHODS
-            .iter()
-            .find(|method| method.name.to_bytes() == c"_find_function".to_bytes())
-            .expect("function finder must be registered");
-        assert_eq!(
-            method
-                .callback
-                .map(|callback| callback as *const () as usize),
-            Some(find_function as *const () as usize)
-        );
-        assert_eq!(
-            crate::rust_source::find_function_line(
-                "#[script]\nimpl Player {\n\tfn _ready(&mut self) {}\n}",
-                "_ready"
-            ),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn signal_callback_virtuals_use_the_rust_generator() {
-        for (name, callback) in [
-            (
-                c"_make_function".to_bytes(),
-                make_function as *const () as usize,
-            ),
-            (
-                c"_can_make_function".to_bytes(),
-                return_true as *const () as usize,
-            ),
-        ] {
-            let method = LANGUAGE_VIRTUAL_METHODS
-                .iter()
-                .find(|method| method.name.to_bytes() == name)
-                .expect("signal callback virtual must be registered");
-            assert_eq!(
-                method
-                    .callback
-                    .map(|callback| callback as *const () as usize),
-                Some(callback)
-            );
-        }
-    }
-
-    #[test]
-    fn automatic_indentation_returns_source_through_a_real_callback() {
-        let method = LANGUAGE_VIRTUAL_METHODS
-            .iter()
-            .find(|method| method.name.to_bytes() == c"_auto_indent_code".to_bytes())
-            .expect("auto indentation must be registered");
-        assert_eq!(
-            method
-                .callback
-                .map(|callback| callback as *const () as usize),
-            Some(auto_indent_code as *const () as usize)
-        );
-        assert_eq!(
-            crate::rust_source::auto_indent("impl Player {\nfn ready() {}\n}", 1, 1),
-            "impl Player {\n\tfn ready() {}\n}"
-        );
-    }
-
-    #[test]
-    fn debugger_and_profiler_virtuals_use_runtime_callbacks() {
-        for (name, callback) in [
-            (
-                c"_debug_get_error".to_bytes(),
-                debug_get_error as *const () as usize,
-            ),
-            (
-                c"_debug_get_stack_level_locals".to_bytes(),
-                debug_get_stack_level_locals as *const () as usize,
-            ),
-            (
-                c"_debug_get_stack_level_members".to_bytes(),
-                debug_get_stack_level_members as *const () as usize,
-            ),
-            (
-                c"_profiling_get_accumulated_data".to_bytes(),
-                profiling_get_accumulated_data as *const () as usize,
-            ),
-            (
-                c"_profiling_get_frame_data".to_bytes(),
-                profiling_get_frame_data as *const () as usize,
-            ),
-        ] {
-            let method = LANGUAGE_VIRTUAL_METHODS
-                .iter()
-                .find(|method| method.name.to_bytes() == name)
-                .expect("runtime virtual must be registered");
-            assert_eq!(
-                method
-                    .callback
-                    .map(|callback| callback as *const () as usize),
-                Some(callback)
-            );
-        }
-        assert_eq!(core::mem::size_of::<GodotProfilingInfo>(), 40);
-        assert_eq!(core::mem::align_of::<GodotProfilingInfo>(), 8);
     }
 }

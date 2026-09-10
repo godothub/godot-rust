@@ -35,6 +35,7 @@ sha2 = "0.10"
 syn = { version = "2", features = ["full", "extra-traits"] }
 toml = "1.1.3"
 toml_edit = "0.25.13"
+unicode-ident = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

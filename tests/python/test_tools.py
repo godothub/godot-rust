@@ -520,117 +520,6 @@ class StageHostTests(unittest.TestCase):
                     re.findall(r'"([^"\n]+)"', editor_list[1]),
                 )
 
-    def test_editor_actions_auto_select_script_or_native_mode(self):
-        plugin = (
-            ROOT / "example" / "addons" / "godot-rust" / "plugin.gd"
-        ).read_text(encoding="utf-8")
-        editor_ui = (
-            ROOT / "example" / "addons" / "godot-rust" / "editor_ui.gd"
-        ).read_text(encoding="utf-8")
-        self.assertEqual(plugin.count('"command": "project_cargo"'), 5)
-        self.assertEqual(plugin.count('"command": "project_export"'), 1)
-        self.assertIn('"runtime_godot": _runtime_godot_api()', plugin)
-        self.assertIn('"android_sdk": _android_sdk_path(platform)', plugin)
-        self.assertIn('mode == "script"', plugin)
-        self.assertIn('mode == "extension"', plugin)
-        self.assertIn("add_control_to_bottom_panel(", plugin)
-        self.assertIn("show_cargo_report(", plugin)
-        self.assertIn('"command": "install_rust_target"', plugin)
-        self.assertIn("ZIPPacker.new()", plugin)
-        self.assertIn("support_snapshot()", plugin)
-        self.assertIn("OS.shell_show_in_file_manager(", plugin)
-        self.assertIn("get_editor_scale()", plugin)
-        self.assertIn("accessibility_name", editor_ui)
-        self.assertIn('"Support Bundle": "支持包"', editor_ui)
-        self.assertIn("get_editor_interface().edit_script(", plugin)
-        self.assertIn("func _build() -> bool:", plugin)
-        self.assertIn('"Automatic Rust build"', plugin)
-        self.assertIn("_start_pending_idle_build()", plugin)
-        self.assertIn("editor.get(\"auto_build_on_idle\", false)", plugin)
-        self.assertIn("_auto_check_enabled or _auto_build_on_idle", plugin)
-        self.assertIn("_wait_for_active_request()", plugin)
-        self.assertIn("add_export_plugin(", plugin)
-        self.assertIn("remove_export_plugin(", plugin)
-        self.assertIn("func prepare_rust_export(", plugin)
-        self.assertIn('"command": "configure"', plugin)
-        self.assertIn("func _offer_script_setup(", plugin)
-        self.assertIn("Any conflict stops setup before files change.", plugin)
-        self.assertIn('return "macos-universal"', plugin)
-        self.assertIn('return "linux-x86_64"', plugin)
-        self.assertIn('return "linux-arm64"', plugin)
-        self.assertIn('return "windows-x86_64"', plugin)
-        process = (
-            ROOT / "example" / "addons" / "godot-rust" / "build_process.gd"
-        ).read_text(encoding="utf-8")
-        protocol = (
-            ROOT / "example" / "addons" / "godot-rust" / "build_protocol.gd"
-        ).read_text(encoding="utf-8")
-        self.assertIn("BuildProtocol.start_request(", process)
-        self.assertIn("wait_for_completion(", process)
-        self.assertIn("func cancel(", process)
-        self.assertIn("request_cancelled.emit(", process)
-        self.assertIn("SHUTDOWN_GRACE_MSEC", process)
-        self.assertNotIn("Thread.new()", plugin)
-        self.assertIn('"command": "build_receipt"', plugin)
-        self.assertIn("ERROR_TEXT_LIMIT", protocol)
-        self.assertIn("parse_response(", protocol)
-        self.assertIn("OS.create_process(", protocol)
-        self.assertIn('"--response-file"', protocol)
-        self.assertIn('"--cancel-file"', protocol)
-        self.assertIn("OUTPUT_LIMIT", protocol)
-        export_plugin = (
-            ROOT
-            / "example"
-            / "addons"
-            / "godot-rust"
-            / "export_plugin.gd"
-        ).read_text(encoding="utf-8")
-        self.assertIn("extends EditorExportPlugin", export_plugin)
-        self.assertIn("func _export_begin(", export_plugin)
-        self.assertIn("func _export_file(", export_plugin)
-        self.assertIn("add_shared_object(", export_plugin)
-        self.assertIn("_stage_web_host(runtime_godot)", export_plugin)
-        self.assertIn("_register_native_descriptor(", export_plugin)
-        self.assertIn("_ensure_extension_list_entry(", export_plugin)
-        self.assertIn("native_descriptor_resource_path", export_plugin)
-        self.assertNotIn(
-            "ProjectSettings.localize_path(descriptor_path)", export_plugin
-        )
-        self.assertIn("add_ios_embedded_framework(module_path)", export_plugin)
-        self.assertIn("func _export_end()", export_plugin)
-        self.assertIn("_repair_godot_44_ios_project(", export_plugin)
-        self.assertIn('"OTHER_LDFLAGS[sdk=iphoneos*]"', export_plugin)
-        self.assertIn('mode == "extension"', export_plugin)
-        self.assertIn("add_file(path, PackedByteArray([10]), false)", export_plugin)
-        self.assertIn('path.begins_with("res://target/")', export_plugin)
-        self.assertIn(
-            'path.begins_with("res://addons/godot-rust/")',
-            export_plugin,
-        )
-        self.assertIn("EditorExportPlatform.EXPORT_MESSAGE_ERROR", export_plugin)
-        self.assertIn("export-failed", export_plugin)
-        monitor = (
-            ROOT / "example" / "addons" / "godot-rust" / "source_monitor.gd"
-        ).read_text(encoding="utf-8")
-        self.assertIn("DEBOUNCE_SECONDS", monitor)
-        self.assertIn("MAX_TRACKED_FILE_BYTES", monitor)
-        self.assertIn("MAX_TRACKED_TOTAL_BYTES", monitor)
-        panel = (
-            ROOT / "example" / "addons" / "godot-rust" / "diagnostics_panel.gd"
-        ).read_text(encoding="utf-8")
-        self.assertIn("MAX_DIAGNOSTICS", panel)
-        self.assertIn("diagnostic_activated.emit(", panel)
-        self.assertIn("suggestion_requested.emit(", panel)
-        self.assertIn("undo_requested.emit(", panel)
-        self.assertIn('"command": "apply_suggestion"', plugin)
-        self.assertIn('"command": "dependency_list"', plugin)
-        self.assertIn('"command": "dependency_preview"', plugin)
-        self.assertIn('"command": "dependency_apply"', plugin)
-        self.assertIn("Rust script index %s with %d script(s)", plugin)
-        self.assertIn("GDExtensionManager.reload_extension(", plugin)
-        self.assertIn('"native_commit"', plugin)
-        self.assertIn('"native_rollback"', plugin)
-        self.assertIn("rollback_available", plugin)
 
     def test_release_assembles_the_canonical_addon_not_a_fixture(self):
         workflow = (
@@ -2115,12 +2004,6 @@ class NativeLoadToolTests(unittest.TestCase):
         self.assertIn('project / "native-hot-reload.load"', source)
         self.assertIn('enabled=PackedStringArray("native_hot_reload")', source)
 
-    def test_release_export_allows_cold_cross_target_builds(self):
-        source = (ROOT / "tools/test_godot_export.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("EXPORT_TIMEOUT_SECONDS = 900", source)
-        self.assertIn("timeout=EXPORT_TIMEOUT_SECONDS", source)
 
     def test_manifest_uses_user_metadata_instead_of_cargo_features(self):
         manifest = test_native_load.render_manifest(

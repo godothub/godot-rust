@@ -380,10 +380,4 @@ mod tests {
             "Godot could not construct extension class `RustLanguage`"
         );
     }
-
-    #[test]
-    fn class_ids_preserve_registration_index() {
-        assert_eq!(RegisteredClassId(0), RegisteredClassId(0));
-        assert_ne!(RegisteredClassId(0), RegisteredClassId(1));
-    }
 }

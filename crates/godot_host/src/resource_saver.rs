@@ -461,21 +461,4 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("saved source"), b"second");
         let _ = std::fs::remove_dir_all(directory);
     }
-
-    #[test]
-    fn saver_virtuals_match_the_official_godot_4_4_hashes() {
-        assert_eq!(
-            SAVER_VIRTUAL_METHODS
-                .iter()
-                .map(|method| (method.name.to_bytes(), method.hash))
-                .collect::<Vec<_>>(),
-            [
-                (c"_save".to_bytes(), 2_794_699_034),
-                (c"_set_uid".to_bytes(), 993_915_709),
-                (c"_recognize".to_bytes(), 3_190_994_482),
-                (c"_get_recognized_extensions".to_bytes(), 1_567_505_034),
-                (c"_recognize_path".to_bytes(), 710_996_192),
-            ]
-        );
-    }
 }

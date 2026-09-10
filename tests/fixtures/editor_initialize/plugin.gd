@@ -22,21 +22,17 @@ func _verify_automatic_initialization() -> void:
 		return
 
 	var deadline := Time.get_ticks_msec() + 30_000
-	while Time.get_ticks_msec() < deadline:
+	while not godot_rust_plugin.is_workflow_configured() and Time.get_ticks_msec() < deadline:
 		if _has_visible_initialization_confirmation(
 			get_editor_interface().get_base_control()
 		):
 			_fail("Automatic Cargo initialization displayed a confirmation dialog")
 			return
-		if (
-			FileAccess.file_exists(MANIFEST_PATH)
-			and FileAccess.file_exists(CRATE_ROOT_PATH)
-			and FileAccess.file_exists(INDEX_PATH)
-			and FileAccess.file_exists(CARGO_CONFIG_PATH)
-		):
-			break
 		await get_tree().process_frame
 
+	if not godot_rust_plugin.is_workflow_configured() or not godot_rust_plugin.is_auto_check_enabled():
+		_fail("Automatic Cargo initialization did not configure the Rust editor workflow")
+		return
 	if not FileAccess.file_exists(MANIFEST_PATH):
 		_fail("godot-rust did not initialize Cargo automatically")
 		return

@@ -378,19 +378,27 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(core::iter::once(0))
         .collect::<Vec<_>>();
-    // SAFETY: Both paths are nul-terminated UTF-16 buffers retained for the
-    // synchronous Win32 call.
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        // SAFETY: Both paths are terminated UTF-16 buffers retained for the call.
+        let moved = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // Readers and antivirus scanners can briefly deny deletion or sharing.
+        if !matches!(error.raw_os_error(), Some(5 | 32 | 33))
+            || std::time::Instant::now() >= deadline
+        {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -457,7 +465,23 @@ mod tests {
         std::fs::create_dir(&directory).expect("test directory");
         let path = directory.join("player.rs");
         atomic_write(&path, b"first").expect("first save");
-        atomic_write(&path, b"second").expect("replacement save");
+        #[cfg(windows)]
+        let reader = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let file = OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(&path)
+                .expect("reader without delete sharing");
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                drop(file);
+            })
+        };
+        let saved = atomic_write(&path, b"second");
+        #[cfg(windows)]
+        reader.join().expect("reader closed");
+        saved.expect("replacement save");
         assert_eq!(std::fs::read(&path).expect("saved source"), b"second");
         let _ = std::fs::remove_dir_all(directory);
     }

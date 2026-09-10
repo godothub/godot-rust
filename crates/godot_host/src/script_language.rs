@@ -1027,13 +1027,9 @@ fn write_profiling_data(
         write_i64(result, 0);
         return;
     }
-    // Native pointer arguments are transported as their target address, not
-    // as pointer-to-pointer storage (Godot `GDExtensionPtr<T>` semantics).
-    // SAFETY: The first official argument points to `info_max` writable
-    // ScriptLanguage::ProfilingInfo records.
-    let output = unsafe { *arguments }
-        .cast_mut()
-        .cast::<GodotProfilingInfo>();
+    // SAFETY: The virtual's first argument stores a pointer to `info_max`
+    // default-constructed ScriptLanguage::ProfilingInfo records.
+    let output = unsafe { (*arguments).cast::<*mut GodotProfilingInfo>().read() };
     // SAFETY: The second official argument is an integer ptrcall slot.
     let maximum = unsafe { (*arguments.add(1)).cast::<i64>().read() };
     let maximum = usize::try_from(maximum.max(0)).unwrap_or(usize::MAX);

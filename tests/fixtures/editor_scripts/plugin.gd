@@ -77,7 +77,7 @@ func _run() -> void:
 	if not await _edit_unicode(rust):
 		return
 
-	var original := FileAccess.get_file_as_string(SCRIPT_PATH)
+	var original := FileAccess.get_file_as_string(SCRIPT_PATH).replace("\r\n", "\n")
 	var added := original.replace("    ticks: i64,", "    ticks: i64,\n    #[export(default = 42)]\n    added: i64,")
 	added = added.replace("impl EditorProbe {", "impl EditorProbe {\n    #[func]\n    fn new_method(&self) -> i64 { 9 }\n")
 	_write(SCRIPT_PATH, added)
@@ -96,9 +96,9 @@ func _run() -> void:
 		return
 	print("GODOT_RUST_EXPORT_ADDITION_PRESERVED")
 
-	var tool_original := FileAccess.get_file_as_string(TOOL_PATH)
+	var tool_original := FileAccess.get_file_as_string(TOOL_PATH).replace("\r\n", "\n")
 	var base_path := "res://src/scripts/tool_base.rs"
-	var base_original := FileAccess.get_file_as_string(base_path)
+	var base_original := FileAccess.get_file_as_string(base_path).replace("\r\n", "\n")
 	var tool_added := tool_original.replace("    #[export(default = 7)]", "    #[export(default = 19)]\n    added: i64,\n    #[node(\"ReloadChild\")]\n    child: NodeRef<Node>,\n    #[signal]\n    fresh: Signal<fn(value: i64)>,\n    #[export(default = 7)]")
 	var callbacks := "    fn _process(&mut self, _delta: f64) { self.ticks += 1; }\n    fn _physics_process(&mut self, _delta: f64) {}\n    fn _input(&mut self, _event: InputEventRef) {}\n    fn _unhandled_input(&mut self, _event: InputEventRef) {}\n"
 	tool_added = tool_added.replace("impl ToolProbe {", "impl ToolProbe {\n" + callbacks + "    #[func]\n    fn new_method(&self, #[default(9)] value: i64) -> i64 { value }\n    #[func]\n    fn child_id(&self) -> EngineResult<u64> { self.child.get_instance_id() }\n")

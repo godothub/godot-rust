@@ -92,6 +92,7 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8], purpose: &str) -> Resul
         file.write_all(contents)?;
         file.sync_all()
     })();
+    drop(file);
     if let Err(error) = written {
         let _ = std::fs::remove_file(&temporary);
         return Err(format!(
@@ -140,19 +141,27 @@ pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> 
         .encode_wide()
         .chain(iter::once(0))
         .collect::<Vec<_>>();
-    // SAFETY: Both paths are valid, terminated UTF-16 buffers retained for the
-    // duration of the Windows API call.
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        // SAFETY: Both paths are terminated UTF-16 buffers retained for the call.
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                destination.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        // Readers and antivirus scanners can briefly deny deletion or sharing.
+        if !matches!(error.raw_os_error(), Some(5 | 32 | 33))
+            || std::time::Instant::now() >= deadline
+        {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
@@ -188,6 +197,41 @@ mod tests {
             header
         ));
         assert!(!has_managed_header(b" // @generated\n", header));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replacement_waits_for_readers_and_preserves_locked_files() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
+
+        let directory =
+            super::create_temporary_directory(&std::env::temp_dir(), "godot-rust-managed-sharing")
+                .expect("temporary directory");
+        let path = directory.join("Cargo.toml");
+        std::fs::write(&path, b"original").expect("original manifest");
+        let reader = super::OpenOptions::new()
+            .read(true)
+            .share_mode(3) // Allow reads and writes, but keep the file name locked.
+            .open(&path)
+            .expect("reader");
+        let started = Instant::now();
+        let blocked = super::atomic_write(&path, b"rejected", "manifest");
+        assert!(blocked.is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(reader);
+        });
+        let saved = super::atomic_write(&path, b"updated", "manifest");
+        release.join().expect("reader closed");
+        saved.expect("save after reader closes");
+        assert_eq!(std::fs::read(&path).unwrap(), b"updated");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).expect("cleanup");
     }
 
     #[cfg(unix)]

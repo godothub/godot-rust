@@ -1161,38 +1161,82 @@ pub(crate) fn write_property_list(
     script: &ModuleScript,
     output: GDExtensionTypePtr,
 ) -> bool {
-    let Some(codec) = MetadataCodec::new(interface) else {
-        return false;
-    };
-    let Some(mut properties) = OwnedArray::new(codec) else {
-        return false;
-    };
+    property_list(interface, script).is_some_and(|properties| properties.write_array(output))
+}
+
+fn property_list(interface: EngineInterface, script: &ModuleScript) -> Option<OwnedArray> {
+    let codec = MetadataCodec::new(interface)?;
+    let mut properties = OwnedArray::new(codec)?;
     let mut current_group: Option<String> = None;
     for index in 0..script.field_count() {
-        let Some(field) = script.field(index) else {
-            return false;
-        };
+        let field = script.field(index)?;
         if field.property_type().is_none() {
             continue;
         }
         let next_group = field.property_group();
         if current_group.as_deref() != next_group {
-            let Some(group) = property_group_dictionary(codec, next_group.unwrap_or("")) else {
-                return false;
-            };
+            let group = property_group_dictionary(codec, next_group.unwrap_or(""))?;
             if !properties.push_dictionary(&group) {
-                return false;
+                return None;
             }
             current_group = next_group.map(str::to_owned);
         }
-        let Some(property) = inspector_property_dictionary(codec, &field) else {
-            return false;
-        };
+        let property = inspector_property_dictionary(codec, &field)?;
         if !properties.push_dictionary(&property) {
-            return false;
+            return None;
         }
     }
-    properties.write_array(output)
+    Some(properties)
+}
+
+pub(crate) struct PlaceholderExports {
+    properties: OwnedArray,
+    values: OwnedDictionary,
+}
+
+impl PlaceholderExports {
+    pub(crate) fn new(interface: EngineInterface, script: Option<&ModuleScript>) -> Option<Self> {
+        let codec = MetadataCodec::new(interface)?;
+        let properties = match script {
+            Some(script) => property_list(interface, script)?,
+            None => OwnedArray::new(codec)?,
+        };
+        let mut values = OwnedDictionary::new(codec)?;
+        let variants = VariantCodec::new(interface)?;
+        if let Some(script) = script {
+            for index in 0..script.field_count() {
+                let field = script.field(index)?;
+                if field.property_type().is_none() {
+                    continue;
+                }
+                let Some(value) = field.property_default_value() else {
+                    continue;
+                };
+                let value = EncodedVariant::from_abi_with_context(
+                    &variants,
+                    value.abi(),
+                    field.typed_array_element(),
+                    None,
+                )
+                .ok()?;
+                if !values.insert_encoded_variant(field.name(), &value) {
+                    return None;
+                }
+            }
+        }
+        Some(Self { properties, values })
+    }
+
+    pub(crate) unsafe fn update(
+        &self,
+        interface: EngineInterface,
+        placeholder: godot_api::GDExtensionScriptInstancePtr,
+    ) {
+        if let Some(update) = interface.placeholder_script_instance_update {
+            // SAFETY: The caller retains a registered live placeholder; both builtin arguments remain owned here.
+            unsafe { update(placeholder, self.properties.as_ptr(), self.values.as_ptr()) };
+        }
+    }
 }
 
 pub(crate) fn write_signal_list(

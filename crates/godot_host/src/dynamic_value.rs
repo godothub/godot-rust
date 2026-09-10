@@ -462,7 +462,7 @@ impl OwnedArray {
         replace_variant(self.interface, slot, value.as_ptr())
     }
 
-    fn len(&self) -> Result<usize, ValueError> {
+    pub(crate) fn len(&self) -> Result<usize, ValueError> {
         builtin_size(
             self.size,
             self.as_ptr(),
@@ -470,7 +470,7 @@ impl OwnedArray {
         )
     }
 
-    fn get(&self, index: usize) -> Result<GDExtensionConstVariantPtr, ValueError> {
+    pub(crate) fn get(&self, index: usize) -> Result<GDExtensionConstVariantPtr, ValueError> {
         let get = self
             .interface
             .array_operator_index_const

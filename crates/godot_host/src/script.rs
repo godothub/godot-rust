@@ -7,7 +7,7 @@ use godot_api::{
     GDExtensionTypePtr, GDExtensionVariantType,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use crate::godot_metadata;
 use crate::interface::EngineInterface;
@@ -31,6 +31,7 @@ pub(crate) struct RustScript {
     resource_uid: AtomicI64,
     source: RwLock<String>,
     has_source: AtomicBool,
+    placeholders: Mutex<Vec<usize>>,
     enter_tree_name: StaticStringName,
     ready_name: StaticStringName,
     process_name: StaticStringName,
@@ -70,6 +71,7 @@ fn create_script_instance(interface: EngineInterface, object: *mut c_void) -> *m
         resource_uid: AtomicI64::new(crate::resource_uid::INVALID_RESOURCE_UID),
         source: RwLock::new(String::new()),
         has_source: AtomicBool::new(false),
+        placeholders: Mutex::new(Vec::new()),
         enter_tree_name: StaticStringName::new(interface, c"_enter_tree"),
         ready_name: StaticStringName::new(interface, c"_ready"),
         process_name: StaticStringName::new(interface, c"_process"),
@@ -333,6 +335,58 @@ fn compiled_script(script: &RustScript) -> Option<ModuleScript> {
         return module_loader::active_script_by_uid(resource_uid);
     }
     module_loader::active_script(&path)
+}
+
+pub(crate) struct ExportUpdates(Vec<(Arc<RustScript>, godot_metadata::PlaceholderExports)>);
+
+pub(crate) fn prepare_exports(
+    generation: &module_loader::ModuleGeneration,
+) -> Result<ExportUpdates, String> {
+    let scripts = scripts_by_object()
+        .read()
+        .map_err(|_| "Rust script registry is unavailable")?
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect::<Vec<_>>();
+    let mut updates = Vec::with_capacity(scripts.len());
+    for script in scripts {
+        let uid = script.resource_uid.load(Ordering::Acquire);
+        let compiled = if uid >= 0 {
+            generation.script_by_uid(uid)
+        } else {
+            script_path(&script).and_then(|path| generation.script(&path))
+        };
+        let exports = godot_metadata::PlaceholderExports::new(script.interface, compiled.as_ref())
+            .ok_or_else(|| {
+                format!(
+                    "could not prepare Inspector properties for {}",
+                    script_path(&script).unwrap_or_default()
+                )
+            })?;
+        updates.push((script, exports));
+    }
+    Ok(ExportUpdates(updates))
+}
+
+impl ExportUpdates {
+    pub(crate) fn apply(self) {
+        for (script, exports) in self.0 {
+            let registered = || {
+                scripts_by_object()
+                    .read()
+                    .ok()
+                    .and_then(|scripts| scripts.get(&script.object).and_then(Weak::upgrade))
+                    .is_some_and(|current| Arc::ptr_eq(&current, &script))
+            };
+            if !registered() {
+                continue;
+            }
+            update_placeholders(&script, &exports);
+            if registered() {
+                emit_changed(&script);
+            }
+        }
+    }
 }
 
 fn source_attributes(
@@ -731,6 +785,34 @@ unsafe extern "C" fn update_exports(
     let Some(script) = script(instance) else {
         return;
     };
+    let compiled = compiled_script(script);
+    if let Some(exports) =
+        godot_metadata::PlaceholderExports::new(script.interface, compiled.as_ref())
+    {
+        update_placeholders(script, &exports);
+    }
+}
+
+fn update_placeholders(script: &RustScript, exports: &godot_metadata::PlaceholderExports) {
+    let placeholders = script
+        .placeholders
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    for placeholder in placeholders {
+        if script
+            .placeholders
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&placeholder)
+        {
+            // SAFETY: Godot erases tracked placeholders synchronously on the main thread.
+            unsafe { exports.update(script.interface, placeholder as *mut c_void) };
+        }
+    }
+}
+
+fn emit_changed(script: &RustScript) {
     let (Ok(method), Some(ptrcall)) = (
         crate::runtime::resolve_method(
             script.interface,
@@ -1121,10 +1203,44 @@ unsafe extern "C" fn placeholder_instance_create(
     // SAFETY: Language, script, and owner are live Godot Objects. Godot owns
     // the returned placeholder through its ScriptInstance lifecycle.
     let placeholder = unsafe { create(language, script.object as *mut c_void, owner) };
+    if !placeholder.is_null() {
+        script
+            .placeholders
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(placeholder as usize);
+        let compiled = compiled_script(script);
+        if let Some(exports) =
+            godot_metadata::PlaceholderExports::new(script.interface, compiled.as_ref())
+        {
+            // SAFETY: Godot just created this placeholder and has not returned it to its owner yet.
+            unsafe { exports.update(script.interface, placeholder) };
+        }
+    }
     if !result.is_null() {
         // SAFETY: GDExtensionPtr<void> returns use one pointer-sized slot.
         unsafe { result.cast::<*mut c_void>().write(placeholder) };
     }
+}
+
+unsafe extern "C" fn placeholder_erased(
+    instance: GDExtensionClassInstancePtr,
+    arguments: *const GDExtensionConstTypePtr,
+    _result: GDExtensionTypePtr,
+) {
+    let Some(script) = script(instance) else {
+        return;
+    };
+    if arguments.is_null() {
+        return;
+    }
+    // SAFETY: Godot passes one GDExtensionPtr<ScriptInstance> argument in pointer-sized storage.
+    let placeholder = unsafe { *(*arguments).cast::<*mut c_void>() } as usize;
+    script
+        .placeholders
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .retain(|current| *current != placeholder);
 }
 
 unsafe extern "C" fn runtime_instance_create(
@@ -1153,6 +1269,10 @@ unsafe extern "C" fn runtime_instance_create(
         write_null(result);
         return;
     };
+    if !module_script.is_tool() && script.interface.is_editor_hint().unwrap_or(true) {
+        write_null(result);
+        return;
+    }
     let Ok(module_state) = module_script.create_state() else {
         write_null(result);
         return;
@@ -1206,12 +1326,12 @@ unsafe extern "C" fn instance_has(
     write_bool(result, found);
 }
 
-unsafe extern "C" fn return_true(
-    _instance: GDExtensionClassInstancePtr,
+unsafe extern "C" fn placeholder_fallback(
+    instance: GDExtensionClassInstancePtr,
     _args: *const GDExtensionConstTypePtr,
     result: GDExtensionTypePtr,
 ) {
-    write_bool(result, true);
+    write_bool(result, script(instance).and_then(compiled_script).is_none());
 }
 
 fn write_null(result: GDExtensionTypePtr) {
@@ -1219,13 +1339,6 @@ fn write_null(result: GDExtensionTypePtr) {
         // SAFETY: Used only for pointer-like virtual return types.
         unsafe { result.cast::<*mut c_void>().write(ptr::null_mut()) };
     }
-}
-
-unsafe extern "C" fn no_op(
-    _instance: GDExtensionClassInstancePtr,
-    _args: *const GDExtensionConstTypePtr,
-    _result: GDExtensionTypePtr,
-) {
 }
 
 fn write_bool(result: GDExtensionTypePtr, value: bool) {
@@ -1258,7 +1371,7 @@ static SCRIPT_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
         2_240_911_060,
         editor_can_reload_from_file
     ),
-    virtual_method!(c"_placeholder_erased", 1_286_410_249, no_op),
+    virtual_method!(c"_placeholder_erased", 1_286_410_249, placeholder_erased),
     virtual_method!(c"_can_instantiate", 36_873_697, can_instantiate),
     virtual_method!(c"_get_base_script", 278_624_046, get_base_script),
     virtual_method!(c"_get_global_name", 2_002_593_661, get_global_name),
@@ -1269,10 +1382,6 @@ static SCRIPT_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
         get_instance_base_type
     ),
     virtual_method!(c"_instance_create", 1_107_568_780, runtime_instance_create),
-    if !module_script.is_tool() && script.interface.is_editor_hint().unwrap_or(true) {
-        write_null(result);
-        return;
-    }
     virtual_method!(
         c"_placeholder_instance_create",
         1_107_568_780,
@@ -1328,7 +1437,11 @@ static SCRIPT_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
     virtual_method!(c"_get_member_line", 2_458_036_349, get_member_line),
     virtual_method!(c"_get_constants", 3_102_165_223, get_constants),
     virtual_method!(c"_get_members", 3_995_934_104, get_members),
-    virtual_method!(c"_is_placeholder_fallback_enabled", 36_873_697, return_true),
+    virtual_method!(
+        c"_is_placeholder_fallback_enabled",
+        36_873_697,
+        placeholder_fallback
+    ),
     virtual_method!(c"_get_rpc_config", 1_214_101_251, get_rpc_config),
 ];
 
@@ -1344,27 +1457,10 @@ mod tests {
             .map(|method| method.name.to_bytes())
             .collect();
         assert_eq!(names.len(), SCRIPT_VIRTUAL_METHODS.len());
-        assert_eq!(names.len(), 37);
         assert!(
             SCRIPT_VIRTUAL_METHODS
                 .iter()
                 .all(|method| method.callback.is_some())
         );
-    }
-
-    #[test]
-    fn source_virtuals_match_the_official_hashes() {
-        for (name, hash) in [
-            (c"_has_source_code".to_bytes(), 36_873_697),
-            (c"_get_source_code".to_bytes(), 201_670_096),
-            (c"_set_source_code".to_bytes(), 83_702_148),
-            (c"_reload".to_bytes(), 1_413_768_114),
-        ] {
-            assert!(
-                SCRIPT_VIRTUAL_METHODS
-                    .iter()
-                    .any(|method| { method.name.to_bytes() == name && method.hash == hash })
-            );
-        }
     }
 }

@@ -1,4 +1,6 @@
 use core::ffi::c_void;
+mod connections;
+mod reload;
 mod typed;
 use core::mem::size_of;
 use core::ptr;
@@ -52,6 +54,20 @@ thread_local! {
         const { Cell::new(None) };
 }
 
+#[derive(Default)]
+struct InstanceIdentity {
+    address: AtomicUsize,
+    godot_instance: AtomicUsize,
+}
+
+// Godot retains this wrapper across reloads. Each callback owns a snapshot of
+// one complete generation, including every pointer returned in its metadata.
+struct InstanceSlot {
+    current: Mutex<Arc<RustScriptInstance>>,
+    property_lists: Mutex<Vec<Arc<RustScriptInstance>>>,
+    method_lists: Mutex<Vec<Arc<RustScriptInstance>>>,
+}
+
 struct RustScriptInstance {
     interface: Option<EngineInterface>,
     codec: Option<VariantCodec>,
@@ -61,7 +77,7 @@ struct RustScriptInstance {
     language: usize,
     source_path: String,
     script_uids: Vec<i64>,
-    godot_instance: AtomicUsize,
+    identity: Arc<InstanceIdentity>,
     faults: InstanceFaults,
     names: LifecycleMethodNames,
     available: LifecycleAvailability,
@@ -286,10 +302,6 @@ impl InstanceFaults {
             }
         }
     }
-
-    fn reset(&self) {
-        self.state.store(0, Ordering::Release);
-    }
 }
 
 impl ActiveScriptScope {
@@ -415,27 +427,61 @@ pub(crate) fn create(
     let Some(create) = interface.script_instance_create3 else {
         return ptr::null_mut();
     };
-    let Some(codec) = VariantCodec::new(interface) else {
+    let Some(instance) = prepare_instance(
+        interface,
+        script,
+        owner,
+        language,
+        state,
+        Arc::new(InstanceIdentity::default()),
+    ) else {
         return ptr::null_mut();
     };
-    let Some(get_instance_id) = interface.object_get_instance_id else {
-        return ptr::null_mut();
-    };
+    let data = into_instance_data(instance);
+    // SAFETY: `INSTANCE_INFO` has static storage, `data` owns a strong reference,
+    // and Godot will release it exactly once through `free_func`.
+    let instance = unsafe { create(&INSTANCE_INFO, data) };
+    if instance.is_null() {
+        // SAFETY: Godot did not accept ownership when creation failed.
+        unsafe { drop(Arc::from_raw(data.cast::<InstanceSlot>())) };
+    } else if let Ok(mut instances) = LIVE_INSTANCES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+    {
+        // The new Godot ScriptInstance owns this stable wrapper.
+        if let Some(payload) = self::data(data) {
+            payload
+                .identity
+                .godot_instance
+                .store(instance as usize, Ordering::Release);
+        }
+        instances.insert(data as usize);
+    }
+    instance
+}
+
+fn prepare_instance(
+    interface: EngineInterface,
+    script: GDExtensionObjectPtr,
+    owner: GDExtensionObjectPtr,
+    language: GDExtensionScriptLanguagePtr,
+    state: ModuleState,
+    identity: Arc<InstanceIdentity>,
+) -> Option<RustScriptInstance> {
+    let codec = VariantCodec::new(interface)?;
+    let get_instance_id = interface.object_get_instance_id?;
     // SAFETY: Godot passes the live owner while creating its script instance.
     let owner_id = unsafe { get_instance_id(owner) };
-    let Ok(script_ref) = crate::engine_call::value::NativeGodotRef::from_object(interface, script)
-    else {
-        return ptr::null_mut();
-    };
+    let script_ref =
+        crate::engine_call::value::NativeGodotRef::from_object(interface, script).ok()?;
     let source_path = state.source_path().to_owned();
-    let Ok(emit_signal_method) = crate::runtime::resolve_method(
+    let emit_signal_method = crate::runtime::resolve_method(
         interface,
         c"Object",
         c"emit_signal",
         OBJECT_EMIT_SIGNAL_HASH,
-    ) else {
-        return ptr::null_mut();
-    };
+    )
+    .ok()?;
     let available = LifecycleAvailability {
         enter_tree: state.has_enter_tree(),
         ready: state.has_ready() || state.has_node_fields(),
@@ -445,24 +491,16 @@ pub(crate) fn create(
         unhandled_input: state.has_unhandled_input(),
         exit_tree: state.has_exit_tree(),
     };
-    let Some(empty_metadata_name) = OwnedStringName::new(interface, "").map(Box::new) else {
-        return ptr::null_mut();
-    };
-    let Some(empty_metadata_hint) = LocalGodotString::new(interface, c"").map(Box::new) else {
-        return ptr::null_mut();
-    };
+    let empty_metadata_name = OwnedStringName::new(interface, "").map(Box::new)?;
+    let empty_metadata_hint = LocalGodotString::new(interface, c"").map(Box::new)?;
     let value_owner = state.value_owner();
     let mut signals = Vec::new();
     for index in 0..state.field_count() {
-        let Some(field) = state.field(index) else {
-            return ptr::null_mut();
-        };
+        let field = state.field(index)?;
         if !field.is_signal() {
             continue;
         }
-        let Some(name) = OwnedStringName::new(interface, field.name()) else {
-            return ptr::null_mut();
-        };
+        let name = OwnedStringName::new(interface, field.name())?;
         signals.push(ReflectedSignal {
             script_resource_uid: field.script_resource_uid(),
             field_index: field.index(),
@@ -473,9 +511,7 @@ pub(crate) fn create(
     let mut properties = Vec::with_capacity(state.field_count().saturating_mul(2));
     let mut current_group: Option<String> = None;
     for index in 0..state.field_count() {
-        let Some(field) = state.field(index) else {
-            return ptr::null_mut();
-        };
+        let field = state.field(index)?;
         let (Some(type_), Some(hint), Some(hint_string), Some(usage)) = (
             field.property_type().and_then(property_variant_type),
             field.property_hint(),
@@ -486,12 +522,8 @@ pub(crate) fn create(
         };
         let next_group = field.property_group();
         if current_group.as_deref() != next_group {
-            let Some(name) = OwnedStringName::new(interface, next_group.unwrap_or("")) else {
-                return ptr::null_mut();
-            };
-            let Some(hint_string) = LocalGodotString::new_utf8(interface, "") else {
-                return ptr::null_mut();
-            };
+            let name = OwnedStringName::new(interface, next_group.unwrap_or(""))?;
+            let hint_string = LocalGodotString::new_utf8(interface, "")?;
             properties.push(ReflectedProperty {
                 name,
                 hint_string,
@@ -502,12 +534,8 @@ pub(crate) fn create(
             });
             current_group = next_group.map(str::to_owned);
         }
-        let Some(name) = OwnedStringName::new(interface, field.name()) else {
-            return ptr::null_mut();
-        };
-        let Some(hint_string) = LocalGodotString::new_utf8(interface, hint_string) else {
-            return ptr::null_mut();
-        };
+        let name = OwnedStringName::new(interface, field.name())?;
+        let hint_string = LocalGodotString::new_utf8(interface, hint_string)?;
         properties.push(ReflectedProperty {
             name,
             hint_string,
@@ -531,54 +559,35 @@ pub(crate) fn create(
     let mut methods = Vec::with_capacity(state.method_count());
     let mut default_variant_stride = None;
     for index in 0..state.method_count() {
-        let Some(method) = state.method(index) else {
-            return ptr::null_mut();
-        };
+        let method = state.method(index)?;
         if method.kind() == AbiMethodKind::Lifecycle {
             continue;
         }
-        let Some(name) = OwnedStringName::new(interface, method.name()) else {
-            return ptr::null_mut();
-        };
-        let Some(argument_names) = method
+        let name = OwnedStringName::new(interface, method.name())?;
+        let argument_names = method
             .arguments()
             .map(|(name, _)| OwnedStringName::new(interface, name))
-            .collect::<Option<Vec<_>>>()
-        else {
-            return ptr::null_mut();
-        };
-        let Some(argument_type_names) = (0..method.argument_types().len())
+            .collect::<Option<Vec<_>>>()?;
+        let argument_type_names = (0..method.argument_types().len())
             .map(|index| {
                 OwnedStringName::new(
                     interface,
                     method.argument_class_name(index).unwrap_or_default(),
                 )
             })
-            .collect::<Option<Vec<_>>>()
-        else {
-            return ptr::null_mut();
-        };
-        let Some(argument_type_hints) = (0..method.argument_types().len())
+            .collect::<Option<Vec<_>>>()?;
+        let argument_type_hints = (0..method.argument_types().len())
             .map(|index| {
                 LocalGodotString::new_utf8(
                     interface,
                     method.argument_class_name(index).unwrap_or_default(),
                 )
             })
-            .collect::<Option<Vec<_>>>()
-        else {
-            return ptr::null_mut();
-        };
-        let Some(return_type_name) =
-            OwnedStringName::new(interface, method.return_class_name().unwrap_or_default())
-        else {
-            return ptr::null_mut();
-        };
-        let Some(return_type_hint) =
-            LocalGodotString::new_utf8(interface, method.return_class_name().unwrap_or_default())
-        else {
-            return ptr::null_mut();
-        };
+            .collect::<Option<Vec<_>>>()?;
+        let return_type_name =
+            OwnedStringName::new(interface, method.return_class_name().unwrap_or_default())?;
+        let return_type_hint =
+            LocalGodotString::new_utf8(interface, method.return_class_name().unwrap_or_default())?;
         let argument_infos = method
             .arguments()
             .zip(&argument_names)
@@ -598,28 +607,19 @@ pub(crate) fn create(
             })
             .collect();
         let default_start = method.minimum_argument_count();
-        let Ok(default_values) = method.default_values() else {
-            return ptr::null_mut();
-        };
+        let default_values = method.default_values().ok()?;
         let mut default_arguments = if default_values.is_empty() {
             ContiguousVariants::empty(interface)
         } else {
             let stride = match default_variant_stride {
                 Some(stride) => stride,
                 None => {
-                    let Some(stride) = variant_storage_stride(interface) else {
-                        return ptr::null_mut();
-                    };
+                    let stride = variant_storage_stride(interface)?;
                     default_variant_stride = Some(stride);
                     stride
                 }
             };
-            let Some(arguments) =
-                ContiguousVariants::with_capacity(interface, stride, default_values.len())
-            else {
-                return ptr::null_mut();
-            };
-            arguments
+            ContiguousVariants::with_capacity(interface, stride, default_values.len())?
         };
         for (offset, value) in default_values.iter().enumerate() {
             let argument_index = default_start + offset;
@@ -636,7 +636,7 @@ pub(crate) fn create(
                 )
                 .is_err()
             {
-                return ptr::null_mut();
+                return None;
             }
         }
         methods.push(ReflectedMethod {
@@ -681,7 +681,7 @@ pub(crate) fn create(
             },
         })
         .collect();
-    let data = into_instance_data(RustScriptInstance {
+    Some(RustScriptInstance {
         interface: Some(interface),
         codec: Some(codec),
         owner: owner as usize,
@@ -690,7 +690,7 @@ pub(crate) fn create(
         language: language as usize,
         source_path,
         script_uids: state.script_uids(),
-        godot_instance: AtomicUsize::new(0),
+        identity,
         faults: InstanceFaults::default(),
         names: LifecycleMethodNames {
             enter_tree: Some(StaticStringName::new(interface, c"_enter_tree")),
@@ -712,49 +712,41 @@ pub(crate) fn create(
         _empty_metadata_hint: Some(empty_metadata_hint),
         state: Some(Mutex::new(state)),
         _script_ref: Some(script_ref),
-    });
-    // SAFETY: `INSTANCE_INFO` has static storage, `data` owns a strong reference,
-    // and Godot will release it exactly once through `free_func`.
-    let instance = unsafe { create(&INSTANCE_INFO, data) };
-    if instance.is_null() {
-        // SAFETY: Godot did not accept ownership when creation failed.
-        unsafe { drop(Arc::from_raw(data.cast::<RustScriptInstance>())) };
-    } else if let Ok(mut instances) = LIVE_INSTANCES
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-    {
-        // SAFETY: `data` remains the unique live allocation owned by the
-        // newly created Godot ScriptInstance.
-        unsafe {
-            (*data.cast::<RustScriptInstance>())
-                .godot_instance
-                .store(instance as usize, Ordering::Release);
-        }
-        instances.insert(data as usize);
-    }
-    instance
+    })
 }
 
 fn into_instance_data(instance: RustScriptInstance) -> GDExtensionScriptInstanceDataPtr {
-    // Ownership crosses Godot's opaque callback boundary. This does not make
-    // the engine handles Send or Sync; only their lifetime is shared.
+    let identity = instance.identity.clone();
+    // Arc shares lifetime across reentrant engine callbacks, not thread access
+    // to Godot values.
     #[allow(clippy::arc_with_non_send_sync)]
-    let instance = Arc::new(instance);
-    Arc::into_raw(instance).cast_mut().cast()
+    let slot = Arc::new(InstanceSlot {
+        current: Mutex::new(Arc::new(instance)),
+        property_lists: Mutex::new(Vec::new()),
+        method_lists: Mutex::new(Vec::new()),
+    });
+    let pointer = Arc::into_raw(slot).cast_mut().cast();
+    identity.address.store(pointer as usize, Ordering::Release);
+    pointer
 }
 
-fn data(instance: GDExtensionScriptInstanceDataPtr) -> Option<Arc<RustScriptInstance>> {
+fn slot(instance: GDExtensionScriptInstanceDataPtr) -> Option<Arc<InstanceSlot>> {
     if instance.is_null() {
         return None;
     }
-    let pointer = instance.cast::<RustScriptInstance>();
-    // SAFETY: Godot owns one strong reference when it enters a callback.
-    // Retain another until the callback returns: user code may synchronously
-    // remove its own script and invoke `free_func` during that callback.
+    let pointer = instance.cast::<InstanceSlot>();
+    // SAFETY: Godot owns a strong reference throughout callback entry. Retain
+    // the stable wrapper even if user code removes its script during this call.
     Some(unsafe {
         Arc::increment_strong_count(pointer);
         Arc::from_raw(pointer)
     })
+}
+
+fn data(instance: GDExtensionScriptInstanceDataPtr) -> Option<Arc<RustScriptInstance>> {
+    let slot = slot(instance)?;
+    let current = slot.current.lock().ok()?;
+    Some(current.clone())
 }
 
 pub(crate) fn belongs_to_script(
@@ -769,6 +761,7 @@ pub(crate) fn belongs_to_script(
 #[derive(Debug)]
 pub(crate) enum GenerationReloadError {
     Busy,
+    Incompatible(String),
     Rejected(String),
 }
 
@@ -778,234 +771,12 @@ impl core::fmt::Display for GenerationReloadError {
             Self::Busy => {
                 formatter.write_str("a Rust script callback or background task is still active")
             }
-            Self::Rejected(message) => formatter.write_str(message),
+            Self::Incompatible(message) | Self::Rejected(message) => formatter.write_str(message),
         }
     }
 }
 
-/// Migrates every live ScriptInstance before publishing a candidate module.
-///
-/// Retained instance references keep state alive without holding the registry
-/// lock across user code. All state locks remain held until every candidate
-/// state has been prepared. Consequently, failure
-/// drops only candidate states and cannot partially modify the active
-/// generation.
-pub(crate) fn install_generation(
-    candidate: ModuleGeneration,
-) -> Result<usize, GenerationReloadError> {
-    let Some(current) = crate::module_loader::active_generation() else {
-        crate::module_loader::set_active_generation(candidate);
-        return Ok(0);
-    };
-    current
-        .ensure_reload_compatible(&candidate)
-        .map_err(GenerationReloadError::Rejected)?;
-    // Cancel before retaining the live-instance registry lock. Dropping a
-    // future is user code and may release a Godot object whose ScriptInstance
-    // `free_func` needs the same registry, so doing this under the lock could
-    // deadlock the editor.
-    current.cancel_tasks().map_err(|error| {
-        if error.status == AbiStatus::Unsupported {
-            GenerationReloadError::Busy
-        } else {
-            GenerationReloadError::Rejected(format!(
-                "could not cancel tasks from the active generation: {:?}: {}",
-                error.status, error.message
-            ))
-        }
-    })?;
-    let instances = {
-        let registry = LIVE_INSTANCES
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .map_err(|_| {
-                GenerationReloadError::Rejected("live instance registry is poisoned".into())
-            })?;
-        registry
-            .iter()
-            .filter_map(|address| data(*address as GDExtensionScriptInstanceDataPtr))
-            .collect::<Vec<_>>()
-    };
-    let mut prepared = Vec::with_capacity(instances.len());
-    for instance in &instances {
-        let Some(state) = &instance.state else {
-            continue;
-        };
-        let guard = state.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => GenerationReloadError::Busy,
-            TryLockError::Poisoned(_) => {
-                GenerationReloadError::Rejected("a live script state lock is poisoned".into())
-            }
-        })?;
-        let Some(script) = candidate.script_by_uid(guard.resource_uid()) else {
-            return Err(GenerationReloadError::Rejected(format!(
-                "candidate module has no script UID {} for `{}`",
-                guard.resource_uid(),
-                guard.source_path()
-            )));
-        };
-        let mut next = script.create_state().map_err(|error| {
-            GenerationReloadError::Rejected(format!(
-                "could not create candidate state for `{}`: {:?}: {}",
-                guard.source_path(),
-                error.status,
-                error.message
-            ))
-        })?;
-        migrate_state(instance, &guard, &mut next)?;
-        ensure_instance_attached(instance)?;
-        if next.has_node_fields() {
-            let interface = instance.interface.ok_or_else(|| {
-                GenerationReloadError::Rejected("Godot interface is unavailable".into())
-            })?;
-            crate::node_resolver::inject_node_fields(
-                interface,
-                instance.owner as GDExtensionObjectPtr,
-                &mut next,
-            )
-            .map_err(|error| {
-                GenerationReloadError::Rejected(format!(
-                    "could not resolve node fields for `{}`: {:?}: {}",
-                    guard.source_path(),
-                    error.status,
-                    error.message
-                ))
-            })?;
-        }
-        prepared.push((instance, guard, Some(next)));
-    }
-    let count = prepared.len();
-    for instance in &instances {
-        ensure_instance_attached(instance)?;
-    }
-    for (instance, current, next) in &mut prepared {
-        **current = next
-            .take()
-            .expect("prepared candidate state is committed exactly once");
-        instance.faults.reset();
-    }
-    crate::module_loader::set_active_generation(candidate);
-    drop(prepared);
-    Ok(count)
-}
-
-fn ensure_instance_attached(instance: &RustScriptInstance) -> Result<(), GenerationReloadError> {
-    if instance.godot_instance.load(Ordering::Acquire) == 0 {
-        return Err(GenerationReloadError::Rejected(format!(
-            "script `{}` was removed while preparing its replacement",
-            instance.source_path
-        )));
-    }
-    Ok(())
-}
-
-fn migrate_state(
-    instance: &RustScriptInstance,
-    current: &ModuleState,
-    candidate: &mut ModuleState,
-) -> Result<(), GenerationReloadError> {
-    let codec = instance.codec.as_ref().ok_or_else(|| {
-        GenerationReloadError::Rejected("Godot Variant codec is unavailable".into())
-    })?;
-    let interface = instance
-        .interface
-        .ok_or_else(|| GenerationReloadError::Rejected("Godot interface is unavailable".into()))?;
-    with_engine_interface(interface, || {
-        for index in 0..current.field_count() {
-            let Some(field) = current.field(index) else {
-                continue;
-            };
-            let persist = field.reload_policy() == godot_api::abi::AbiReloadPolicy::Persist
-                || (field.reload_policy() == godot_api::abi::AbiReloadPolicy::Default
-                    && field
-                        .property_usage()
-                        .is_some_and(|usage| usage & ABI_PROPERTY_USAGE_STORAGE != 0));
-            if !persist {
-                continue;
-            }
-            let Some(expected) = field.value_type() else {
-                return Err(GenerationReloadError::Rejected(format!(
-                    "persistent field `{}` has no migration value contract",
-                    field.name()
-                )));
-            };
-            let next_field = candidate.field(index).ok_or_else(|| {
-                GenerationReloadError::Rejected(format!(
-                    "candidate field `{}` is missing",
-                    field.name()
-                ))
-            })?;
-            let value = current.get_field(&field).map_err(|error| {
-                GenerationReloadError::Rejected(format!(
-                    "could not capture `{}`: {:?}: {}",
-                    field.name(),
-                    error.status,
-                    error.message
-                ))
-            })?;
-            let property_bag_value = OwnedVariant::from_abi_with_context(
-                codec,
-                value.borrowed_abi(),
-                field.typed_array_element(),
-                Some(value.engine_call_context()),
-            )
-            .map_err(|_| {
-                GenerationReloadError::Rejected(format!(
-                    "could not store `{}` in the Host property bag",
-                    field.name()
-                ))
-            })?;
-            let mut strings = Vec::new();
-            let mut math = Vec::new();
-            let mut packed = Vec::new();
-            let mut dynamic = Vec::new();
-            let mut callable = Vec::new();
-            let next_owner = candidate.value_owner();
-            let mut decoded = codec
-                .decode(
-                    property_bag_value.as_ptr(),
-                    expected,
-                    VariantDecodeBacking {
-                        strings: &mut strings,
-                        math: &mut math,
-                        packed: &mut packed,
-                        dynamic: &mut dynamic,
-                        callable: &mut callable,
-                        dynamic_context: Some(next_owner.engine_call_context()),
-                    },
-                )
-                .map_err(|_| {
-                    GenerationReloadError::Rejected(format!(
-                        "candidate field `{}` rejected the stored Godot value type",
-                        field.name()
-                    ))
-                })?;
-            if expected == AbiValueType::OBJECT_ID && next_field.owns_property_object() {
-                let interface = instance.interface.ok_or_else(|| {
-                    GenerationReloadError::Rejected("Godot interface is unavailable".into())
-                })?;
-                decoded = next_owner
-                    .engine_call_context()
-                    .retain_refcounted_object(interface, decoded.payload[0])
-                    .map_err(|error| {
-                        GenerationReloadError::Rejected(format!(
-                            "could not retain `{}` for the candidate generation: {error:?}",
-                            field.name()
-                        ))
-                    })?;
-            }
-            candidate.set_field(&next_field, decoded).map_err(|error| {
-                GenerationReloadError::Rejected(format!(
-                    "could not restore `{}`: {:?}: {}",
-                    field.name(),
-                    error.status,
-                    error.message
-                ))
-            })?;
-        }
-        Ok(())
-    })
-}
+pub(crate) use reload::install_generation;
 
 unsafe extern "C" fn set(
     instance: GDExtensionScriptInstanceDataPtr,
@@ -1160,32 +931,48 @@ unsafe extern "C" fn get_property_list(
     instance: GDExtensionScriptInstanceDataPtr,
     count: *mut u32,
 ) -> *const GDExtensionPropertyInfo {
-    let Some(instance) = data(instance) else {
-        if !count.is_null() {
-            // SAFETY: Godot supplies a writable count output.
-            unsafe { count.write(0) };
-        }
-        return ptr::null();
-    };
-    let property_count = u32::try_from(instance.property_infos.len()).unwrap_or(u32::MAX);
     if !count.is_null() {
         // SAFETY: Godot supplies a writable count output.
-        unsafe { count.write(property_count) };
+        unsafe { count.write(0) };
     }
-    if instance.property_infos.is_empty() {
-        ptr::null()
-    } else {
-        instance.property_infos.as_ptr()
+    let Some(slot) = slot(instance) else {
+        return ptr::null();
+    };
+    let Ok(current) = slot.current.lock() else {
+        return ptr::null();
+    };
+    if current.property_infos.is_empty() {
+        return ptr::null();
     }
+    let Ok(mut lists) = slot.property_lists.lock() else {
+        return ptr::null();
+    };
+    if !count.is_null() {
+        // SAFETY: The metadata count is bounded when the module is loaded.
+        unsafe { count.write(current.property_infos.len() as u32) };
+    }
+    let pointer = current.property_infos.as_ptr();
+    lists.push(current.clone());
+    pointer
 }
 
 unsafe extern "C" fn free_property_list(
-    _instance: GDExtensionScriptInstanceDataPtr,
-    _list: *const GDExtensionPropertyInfo,
+    instance: GDExtensionScriptInstanceDataPtr,
+    list: *const GDExtensionPropertyInfo,
     _count: u32,
 ) {
-    // The immutable list is owned by RustScriptInstance and remains live until
-    // `free_func`; Godot copies each PropertyInfo before this callback.
+    let Some(slot) = slot(instance) else { return };
+    let released = {
+        let Ok(mut lists) = slot.property_lists.lock() else {
+            return;
+        };
+        lists
+            .iter()
+            .position(|payload| payload.property_infos.as_ptr() == list)
+            .map(|index| lists.swap_remove(index))
+    };
+    // State destructors may call Godot; release them outside the lease lock.
+    drop(released);
 }
 
 unsafe extern "C" fn get_class_category(
@@ -1290,33 +1077,48 @@ unsafe extern "C" fn get_method_list(
     instance: GDExtensionScriptInstanceDataPtr,
     count: *mut u32,
 ) -> *const GDExtensionMethodInfo {
-    let Some(instance) = data(instance) else {
-        if !count.is_null() {
-            // SAFETY: Godot supplies a writable count output.
-            unsafe { count.write(0) };
-        }
-        return ptr::null();
-    };
-    let method_count = u32::try_from(instance.method_infos.len()).unwrap_or(u32::MAX);
     if !count.is_null() {
         // SAFETY: Godot supplies a writable count output.
-        unsafe { count.write(method_count) };
+        unsafe { count.write(0) };
     }
-    if instance.method_infos.is_empty() {
-        ptr::null()
-    } else {
-        instance.method_infos.as_ptr()
+    let Some(slot) = slot(instance) else {
+        return ptr::null();
+    };
+    let Ok(current) = slot.current.lock() else {
+        return ptr::null();
+    };
+    if current.method_infos.is_empty() {
+        return ptr::null();
     }
+    let Ok(mut lists) = slot.method_lists.lock() else {
+        return ptr::null();
+    };
+    if !count.is_null() {
+        // SAFETY: The metadata count is bounded when the module is loaded.
+        unsafe { count.write(current.method_infos.len() as u32) };
+    }
+    let pointer = current.method_infos.as_ptr();
+    lists.push(current.clone());
+    pointer
 }
 
 unsafe extern "C" fn free_method_list(
-    _instance: GDExtensionScriptInstanceDataPtr,
-    _list: *const GDExtensionMethodInfo,
+    instance: GDExtensionScriptInstanceDataPtr,
+    list: *const GDExtensionMethodInfo,
     _count: u32,
 ) {
-    // The immutable list is owned by RustScriptInstance. Godot copies every
-    // MethodInfo before this callback and the backing storage remains live
-    // until `free_func`, so no per-query allocation needs releasing.
+    let Some(slot) = slot(instance) else { return };
+    let released = {
+        let Ok(mut lists) = slot.method_lists.lock() else {
+            return;
+        };
+        lists
+            .iter()
+            .position(|payload| payload.method_infos.as_ptr() == list)
+            .map(|index| lists.swap_remove(index))
+    };
+    // State destructors may call Godot; release them outside the lease lock.
+    drop(released);
 }
 
 unsafe extern "C" fn get_property_type(
@@ -1472,7 +1274,7 @@ unsafe extern "C" fn call(
     let _debug_scope = crate::debugger::CallbackScope::enter(
         &instance.source_path,
         callback_name,
-        Arc::as_ptr(&instance) as usize,
+        instance.identity.address.load(Ordering::Acquire),
         debug_locals,
     );
     let _profile_scope = crate::profiler::ProfileScope::enter(&instance.source_path, callback_name);
@@ -1705,10 +1507,12 @@ pub(crate) fn debug_script_instance(instance_address: usize) -> GDExtensionScrip
     if !instances.contains(&instance_address) {
         return ptr::null_mut();
     }
-    // SAFETY: The registry lock retains the allocation until the pointer is
-    // copied for Godot's synchronous debugger query.
-    let instance = unsafe { &*(instance_address as *const RustScriptInstance) };
-    instance.godot_instance.load(Ordering::Acquire) as GDExtensionScriptInstancePtr
+    // The registry lock keeps the wrapper alive during this debugger query.
+    data(instance_address as GDExtensionScriptInstanceDataPtr)
+        .map(|instance| {
+            instance.identity.godot_instance.load(Ordering::Acquire) as GDExtensionScriptInstancePtr
+        })
+        .unwrap_or(ptr::null_mut())
 }
 
 fn debug_value_text(value: AbiValueV1) -> Option<String> {
@@ -2033,9 +1837,14 @@ unsafe extern "C" fn free(instance: GDExtensionScriptInstanceDataPtr) {
         // SAFETY: Godot releases the reference created by `into_instance_data`
         // exactly once. Active callbacks retain their own strong references.
         unsafe {
-            let instance = Arc::from_raw(instance.cast::<RustScriptInstance>());
-            instance.godot_instance.store(0, Ordering::Release);
-            drop(instance);
+            let slot = Arc::from_raw(instance.cast::<InstanceSlot>());
+            let current = slot
+                .current
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            current.identity.godot_instance.store(0, Ordering::Release);
+            drop(current);
+            drop(slot);
         };
     }
 }
@@ -2500,6 +2309,101 @@ static INSTANCE_INFO: GDExtensionScriptInstanceInfo3 = GDExtensionScriptInstance
 mod tests {
     use super::*;
 
+    fn test_instance() -> RustScriptInstance {
+        RustScriptInstance {
+            interface: None,
+            codec: None,
+            owner: 1,
+            owner_id: 1,
+            script: 2,
+            language: 3,
+            source_path: "res://minimal.rs".into(),
+            script_uids: Vec::new(),
+            identity: Arc::new(InstanceIdentity::default()),
+            faults: InstanceFaults::default(),
+            names: LifecycleMethodNames {
+                enter_tree: None,
+                ready: None,
+                process: None,
+                physics_process: None,
+                input: None,
+                unhandled_input: None,
+                exit_tree: None,
+            },
+            available: LifecycleAvailability {
+                enter_tree: false,
+                ready: false,
+                process: false,
+                physics_process: false,
+                input: false,
+                unhandled_input: false,
+                exit_tree: false,
+            },
+            properties: Vec::new(),
+            property_infos: Vec::new(),
+            methods: Vec::new(),
+            method_infos: Vec::new(),
+            signals: Vec::new(),
+            emit_signal_method: 0,
+            _empty_metadata_name: None,
+            _empty_metadata_hint: None,
+            state: None,
+            _script_ref: None,
+        }
+    }
+
+    #[test]
+    fn metadata_leases_keep_retired_generations_alive_until_each_list_is_returned() {
+        let mut instance = test_instance();
+        instance.property_infos.push(GDExtensionPropertyInfo {
+            type_: GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_INT,
+            name: ptr::null_mut(),
+            class_name: ptr::null_mut(),
+            hint: 0,
+            hint_string: ptr::null_mut(),
+            usage: 2,
+        });
+        let pointer = into_instance_data(instance);
+        let active = data(pointer).expect("old callback snapshot");
+        let old_lifetime = Arc::downgrade(&active);
+        let mut count = 0;
+        // SAFETY: The live fixture owns its list; Godot member names are not
+        // inspected in this test of the get/free ownership protocol.
+        let (first, second) = unsafe {
+            (
+                get_property_list(pointer, &mut count),
+                get_property_list(pointer, &mut count),
+            )
+        };
+        assert_eq!(count, 1);
+        let slot = slot(pointer).expect("stable slot");
+        let mut next = test_instance();
+        next.source_path = "res://replacement.rs".into();
+        next.identity = active.identity.clone();
+        #[allow(clippy::arc_with_non_send_sync)]
+        {
+            *slot.current.lock().unwrap() = Arc::new(next);
+        }
+        drop(active);
+        assert_eq!(data(pointer).unwrap().source_path, "res://replacement.rs");
+        // SAFETY: Both leases still retain the same old metadata allocation.
+        unsafe {
+            assert_eq!((*first).usage, 2);
+            free_property_list(pointer, second, count);
+            assert!(old_lifetime.upgrade().is_some());
+            assert_eq!(
+                (*first).type_,
+                GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_INT
+            );
+            free_property_list(pointer, first, count);
+        }
+        assert!(old_lifetime.upgrade().is_none());
+        // SAFETY: Release Godot's single reference after returning both lists.
+        unsafe {
+            free(pointer);
+        }
+    }
+
     #[test]
     fn refcounted_script_owner_can_die_at_zero_native_references() {
         // SAFETY: This callback does not dereference its opaque instance
@@ -2532,46 +2436,7 @@ mod tests {
 
     #[test]
     fn instance_metadata_survives_removal_until_the_active_callback_returns() {
-        let data = into_instance_data(RustScriptInstance {
-            interface: None,
-            codec: None,
-            owner: 1,
-            owner_id: 1,
-            script: 2,
-            language: 3,
-            source_path: "res://minimal.rs".into(),
-            script_uids: Vec::new(),
-            godot_instance: AtomicUsize::new(0),
-            faults: InstanceFaults::default(),
-            names: LifecycleMethodNames {
-                enter_tree: None,
-                ready: None,
-                process: None,
-                physics_process: None,
-                input: None,
-                unhandled_input: None,
-                exit_tree: None,
-            },
-            available: LifecycleAvailability {
-                enter_tree: false,
-                ready: false,
-                process: false,
-                physics_process: false,
-                input: false,
-                unhandled_input: false,
-                exit_tree: false,
-            },
-            properties: Vec::new(),
-            property_infos: Vec::new(),
-            methods: Vec::new(),
-            method_infos: Vec::new(),
-            signals: Vec::new(),
-            emit_signal_method: 0,
-            _empty_metadata_name: None,
-            _empty_metadata_hint: None,
-            state: None,
-            _script_ref: None,
-        });
+        let data = into_instance_data(test_instance());
         let mut property_count = u32::MAX;
         let mut method_count = u32::MAX;
         let mut valid = 1;
@@ -2614,46 +2479,7 @@ mod tests {
 
     #[test]
     fn unknown_calls_return_an_explicit_error() {
-        let data = into_instance_data(RustScriptInstance {
-            interface: None,
-            codec: None,
-            owner: 1,
-            owner_id: 1,
-            script: 2,
-            language: 3,
-            source_path: "res://unknown.rs".into(),
-            script_uids: Vec::new(),
-            godot_instance: AtomicUsize::new(0),
-            faults: InstanceFaults::default(),
-            names: LifecycleMethodNames {
-                enter_tree: None,
-                ready: None,
-                process: None,
-                physics_process: None,
-                input: None,
-                unhandled_input: None,
-                exit_tree: None,
-            },
-            available: LifecycleAvailability {
-                enter_tree: false,
-                ready: false,
-                process: false,
-                physics_process: false,
-                input: false,
-                unhandled_input: false,
-                exit_tree: false,
-            },
-            properties: Vec::new(),
-            property_infos: Vec::new(),
-            methods: Vec::new(),
-            method_infos: Vec::new(),
-            signals: Vec::new(),
-            emit_signal_method: 0,
-            _empty_metadata_name: None,
-            _empty_metadata_hint: None,
-            state: None,
-            _script_ref: None,
-        });
+        let data = into_instance_data(test_instance());
         let mut error = GDExtensionCallError {
             error: GDExtensionCallErrorType::GDEXTENSION_CALL_OK,
             argument: -1,

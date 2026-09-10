@@ -47,6 +47,7 @@ struct CallbackContext {
 struct ReloadMonitor {
     watcher: Option<crate::last_known_good::Watcher>,
     pending: Option<(String, crate::module_loader::ModuleGeneration)>,
+    pending_reason: Option<String>,
     next_poll: Instant,
 }
 
@@ -109,6 +110,7 @@ fn create_language_instance(interface: EngineInterface, _object: *mut c_void) ->
         reload_monitor: Mutex::new(ReloadMonitor {
             watcher,
             pending: None,
+            pending_reason: None,
             next_poll: Instant::now(),
         }),
     }))
@@ -1324,65 +1326,63 @@ unsafe extern "C" fn frame(
     }
     monitor.next_poll = now + RELOAD_POLL_INTERVAL;
 
-    if let Some((build_id, candidate)) = monitor.pending.take() {
-        match crate::script_instance::install_generation(candidate.clone()) {
-            Ok(instances) => {
-                host_println!(
-                    "godot-rust: activated Rust build {build_id} and migrated {instances} live instance(s)"
-                );
-            }
-            Err(crate::script_instance::GenerationReloadError::Busy) => {
-                monitor.pending = Some((build_id, candidate));
-            }
-            Err(error) => {
-                host_eprintln!(
-                    "godot-rust: rejected Rust build {build_id}; keeping old code: {error}"
-                );
-            }
-        }
-        return;
-    }
-
     let discovered = match monitor.watcher.as_mut().map(|watcher| watcher.poll()) {
-        Some(Ok(Some(discovered))) => discovered,
-        Some(Ok(None)) | None => return,
+        Some(Ok(discovered)) => discovered,
+        None => None,
         Some(Err(error)) => {
             host_eprintln!("godot-rust: could not inspect the new Rust build: {error}");
             return;
         }
     };
-    // SAFETY: Last Known Good constrains this path to a content-verified,
-    // immutable project build selected by the local build service.
-    let candidate = match unsafe {
-        crate::module_loader::ModuleGeneration::load_for_engine(
-            &discovered.path,
-            language.interface.version(),
-        )
-    } {
-        Ok(candidate) => candidate,
-        Err(error) => {
-            host_eprintln!(
-                "godot-rust: rejected Rust build {}; keeping old code: {error}",
-                discovered.build_id
-            );
-            return;
+    if let Some(discovered) = discovered {
+        // SAFETY: Last Known Good selects a content-verified immutable local project module.
+        match unsafe {
+            crate::module_loader::ModuleGeneration::load_for_engine(
+                &discovered.path,
+                language.interface.version(),
+            )
+        } {
+            Ok(candidate) => {
+                monitor.pending = Some((discovered.build_id, candidate));
+                monitor.pending_reason = None;
+            }
+            Err(error) => {
+                host_eprintln!(
+                    "godot-rust: rejected Rust build {}; keeping old code: {error}",
+                    discovered.build_id
+                );
+            }
         }
+    }
+    let Some((build_id, candidate)) = monitor.pending.take() else {
+        return;
     };
-    match crate::script_instance::install_generation(candidate.clone()) {
+    let result = crate::script_instance::with_engine_interface(language.interface, || {
+        crate::script_instance::install_generation(candidate.clone())
+    });
+    match result {
         Ok(instances) => {
+            monitor.pending_reason = None;
             host_println!(
-                "godot-rust: activated Rust build {} and migrated {instances} live instance(s)",
-                discovered.build_id
+                "godot-rust: activated Rust build {build_id} and migrated {instances} live instance(s)"
             );
         }
         Err(crate::script_instance::GenerationReloadError::Busy) => {
-            monitor.pending = Some((discovered.build_id, candidate));
+            monitor.pending = Some((build_id, candidate));
+        }
+        Err(crate::script_instance::GenerationReloadError::Incompatible(reason)) => {
+            if monitor.pending_reason.as_deref() != Some(&reason) {
+                crate::logging::module(
+                    godot_api::abi::AbiLogLevel::Warning,
+                    format_args!("godot-rust: Rust build {build_id} is waiting: {reason}"),
+                );
+                monitor.pending_reason = Some(reason);
+            }
+            monitor.pending = Some((build_id, candidate));
         }
         Err(error) => {
-            host_eprintln!(
-                "godot-rust: rejected Rust build {}; keeping old code: {error}",
-                discovered.build_id
-            );
+            monitor.pending_reason = None;
+            host_eprintln!("godot-rust: rejected Rust build {build_id}; keeping old code: {error}");
         }
     }
 }

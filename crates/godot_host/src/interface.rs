@@ -138,6 +138,8 @@ pub(crate) struct EngineInterface {
     pub(crate) script_instance_create3: GDExtensionInterfaceScriptInstanceCreate3,
     pub(crate) placeholder_script_instance_create:
         GDExtensionInterfacePlaceHolderScriptInstanceCreate,
+    pub(crate) placeholder_script_instance_update:
+        godot_api::GDExtensionInterfacePlaceHolderScriptInstanceUpdate,
 }
 
 macro_rules! resolve {
@@ -157,8 +159,6 @@ macro_rules! resolve {
 }
 
 impl EngineInterface {
-    /// Resolves the minimum official interface needed to bootstrap the Host.
-    ///
     pub(crate) fn is_editor_hint(self) -> Result<bool, String> {
         let get_singleton = self
             .global_get_singleton
@@ -187,6 +187,8 @@ impl EngineInterface {
         Ok(result != 0)
     }
 
+    /// Resolves the minimum official interface needed to bootstrap the Host.
+    ///
     /// # Safety
     ///
     /// The callbacks and pointer must come from a matching Godot
@@ -497,6 +499,11 @@ impl EngineInterface {
                 get_proc_address,
                 "placeholder_script_instance_create",
                 GDExtensionInterfacePlaceHolderScriptInstanceCreate
+            ),
+            placeholder_script_instance_update: resolve!(
+                get_proc_address,
+                "placeholder_script_instance_update",
+                godot_api::GDExtensionInterfacePlaceHolderScriptInstanceUpdate
             ),
         })
     }

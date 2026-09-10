@@ -80,7 +80,6 @@ pub(crate) struct HostRuntime {
     format_saver: usize,
     remove_format_saver: usize,
     language_registered: bool,
-    module_generation: Option<ModuleGeneration>,
 }
 
 impl HostRuntime {
@@ -268,8 +267,8 @@ impl HostRuntime {
             format_saver,
             true,
         );
-        if let Some(generation) = &module_generation {
-            module_loader::set_active_generation(generation.clone());
+        if let Some(generation) = module_generation {
+            module_loader::set_active_generation(generation);
         }
 
         Ok(Self {
@@ -285,7 +284,6 @@ impl HostRuntime {
             format_saver: format_saver as usize,
             remove_format_saver: remove_format_saver as usize,
             language_registered: true,
-            module_generation,
         })
     }
 
@@ -329,7 +327,6 @@ impl HostRuntime {
             self.language = 0;
         }
         self.registry.unregister_all();
-        self.module_generation = None;
     }
 }
 

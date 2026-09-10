@@ -159,6 +159,25 @@ impl NativeSignal {
         Ok(error)
     }
 
+    pub(crate) fn is_connected(
+        &mut self,
+        callable: &crate::callable_value::NativeCallable,
+    ) -> Result<bool, ValueError> {
+        let is_connected = builtin_method(self.interface, c"is_connected", 4_129_521_963)?;
+        let arguments = [callable.as_ptr()];
+        let mut connected: godot_api::GDExtensionBool = 0;
+        // SAFETY: Signal.is_connected takes one Callable and returns bool.
+        unsafe {
+            is_connected(
+                self.as_mut_ptr(),
+                arguments.as_ptr(),
+                ptr::from_mut(&mut connected).cast(),
+                1,
+            );
+        }
+        Ok(connected != 0)
+    }
+
     pub(crate) fn disconnect(
         &mut self,
         callable: &crate::callable_value::NativeCallable,

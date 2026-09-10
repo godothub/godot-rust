@@ -14,22 +14,23 @@ use godot_api::abi::{
     ABI_PROPERTY_HINT_NONE, ABI_PROPERTY_HINT_RANGE, ABI_PROPERTY_HINT_RESOURCE_TYPE,
     ABI_PROPERTY_HINT_TYPE_STRING, ABI_PROPERTY_USAGE_NODE_PATH_FROM_SCENE_ROOT,
     ABI_PROPERTY_USAGE_READ_ONLY, ABI_PROPERTY_USAGE_SCRIPT_DEFAULT,
-    ABI_PROPERTY_USAGE_SCRIPT_STORAGE, ABI_SCRIPT_EXTENSION_BASE_SCRIPT,
-    ABI_SCRIPT_EXTENSION_FIELD_ACCESS, ABI_SCRIPT_EXTENSION_GLOBAL_CLASS,
-    ABI_SCRIPT_EXTENSION_RESOURCE_UID, AbiByteSlice, AbiByteSliceSlice, AbiCallResult,
-    AbiCallScriptMethodFn, AbiCancelTasksFn, AbiDropValueFn, AbiFieldDescriptorV1, AbiFieldKind,
-    AbiFixedMathDefaultV1, AbiGetScriptDescriptorFn, AbiGetScriptFieldFn, AbiGodotIntegerDefaultFn,
-    AbiGodotIntegerOptionV1, AbiLifecycleSlot, AbiLifecycleTableV1, AbiLogLevel,
-    AbiMethodArgumentSlice, AbiMethodDefaultFn, AbiMethodDescriptorV1, AbiMethodExtensionsV1,
-    AbiMethodKind, AbiPollTasksFn, AbiPropertyType, AbiReceiverKind, AbiReloadPolicy,
-    AbiRpcConfigV1, AbiScriptDescriptorV1, AbiSetScriptFieldFn, AbiSignalArgumentDescriptorV1,
-    AbiStatus, AbiValueType, AbiValueTypeSlice, AbiValueV1, HOST_API_SLOT_CALL_GODOT_METHOD,
-    HOST_API_SLOT_CALL_SUPER_METHOD, HOST_API_SLOT_CANCEL_SIGNAL, HOST_API_SLOT_CURRENT_OWNER,
-    HOST_API_SLOT_DROP_VALUE, HOST_API_SLOT_EMIT_SIGNAL, HOST_API_SLOT_POLL_SIGNAL,
-    HOST_API_SLOT_RETAIN_CALLABLE_VALUE, HOST_API_SLOT_RETAIN_DYNAMIC_VALUE,
-    HOST_API_SLOT_WATCH_SIGNAL, HostApiV1, MODULE_API_SLOT_CANCEL_TASKS,
-    MODULE_API_SLOT_DROP_VALUE, MODULE_API_SLOT_GODOT_API_MAJOR, MODULE_API_SLOT_GODOT_API_MINOR,
-    MODULE_API_SLOT_POLL_TASKS, ModuleApiV1, decode_node_field_class, decode_resource_uid_words,
+    ABI_PROPERTY_USAGE_SCRIPT_STORAGE, ABI_PROPERTY_USAGE_STORAGE,
+    ABI_SCRIPT_EXTENSION_BASE_SCRIPT, ABI_SCRIPT_EXTENSION_FIELD_ACCESS,
+    ABI_SCRIPT_EXTENSION_GLOBAL_CLASS, ABI_SCRIPT_EXTENSION_RESOURCE_UID, AbiByteSlice,
+    AbiByteSliceSlice, AbiCallResult, AbiCallScriptMethodFn, AbiCancelTasksFn, AbiDropValueFn,
+    AbiFieldDescriptorV1, AbiFieldKind, AbiFixedMathDefaultV1, AbiGetScriptDescriptorFn,
+    AbiGetScriptFieldFn, AbiGodotIntegerDefaultFn, AbiGodotIntegerOptionV1, AbiLifecycleSlot,
+    AbiLifecycleTableV1, AbiLogLevel, AbiMethodArgumentSlice, AbiMethodDefaultFn,
+    AbiMethodDescriptorV1, AbiMethodExtensionsV1, AbiMethodKind, AbiPollTasksFn, AbiPropertyType,
+    AbiReceiverKind, AbiReloadPolicy, AbiRpcConfigV1, AbiScriptDescriptorV1, AbiSetScriptFieldFn,
+    AbiSignalArgumentDescriptorV1, AbiStatus, AbiValueType, AbiValueTypeSlice, AbiValueV1,
+    HOST_API_SLOT_CALL_GODOT_METHOD, HOST_API_SLOT_CALL_SUPER_METHOD, HOST_API_SLOT_CANCEL_SIGNAL,
+    HOST_API_SLOT_CURRENT_OWNER, HOST_API_SLOT_DROP_VALUE, HOST_API_SLOT_EMIT_SIGNAL,
+    HOST_API_SLOT_POLL_SIGNAL, HOST_API_SLOT_RETAIN_CALLABLE_VALUE,
+    HOST_API_SLOT_RETAIN_DYNAMIC_VALUE, HOST_API_SLOT_WATCH_SIGNAL, HostApiV1,
+    MODULE_API_SLOT_CANCEL_TASKS, MODULE_API_SLOT_DROP_VALUE, MODULE_API_SLOT_GODOT_API_MAJOR,
+    MODULE_API_SLOT_GODOT_API_MINOR, MODULE_API_SLOT_POLL_TASKS, ModuleApiV1,
+    decode_node_field_class, decode_resource_uid_words,
 };
 use libloading::Library;
 use std::cell::Cell;
@@ -653,34 +654,27 @@ impl ModuleGeneration {
         Ok(())
     }
 
-    /// Rejects schema changes that would invalidate metadata already copied
-    /// into live Godot ScriptInstance objects.
-    ///
-    /// Code pointers are intentionally excluded: changing them is the purpose
-    /// of a generation switch. Metadata and callback availability must remain
-    /// identical until the Host can ask Godot to rebuild live instance
-    /// metadata transactionally.
-    pub(crate) fn ensure_reload_compatible(&self, candidate: &Self) -> Result<(), String> {
-        if self.inner.scripts.len() != candidate.inner.scripts.len() {
-            return Err(format!(
-                "script count changed from {} to {}",
-                self.inner.scripts.len(),
-                candidate.inner.scripts.len()
-            ));
-        }
-        for current in &self.inner.scripts {
-            let Some(next) = candidate
-                .inner
-                .scripts
-                .iter()
-                .find(|script| script.resource_uid == current.resource_uid)
-            else {
+    pub(crate) fn ensure_reload_compatible(
+        &self,
+        candidate: &Self,
+        live_uids: &[i64],
+    ) -> Result<(), String> {
+        for uid in live_uids {
+            let current = self
+                .script_by_uid(*uid)
+                .ok_or_else(|| format!("active script UID {uid} is missing"))?;
+            let next = candidate.script_by_uid(*uid).ok_or_else(|| {
+                format!(
+                    "live script `{}` was removed; detach it or close its scene",
+                    current.source_path()
+                )
+            })?;
+            if current.base() != next.base() || current.is_tool() != next.is_tool() {
                 return Err(format!(
-                    "script `{}` (UID {}) is missing",
-                    current.source_path, current.resource_uid
+                    "script `{}` changed its native base class or tool status; detach it or close its scene to apply the update",
+                    current.source_path()
                 ));
-            };
-            ensure_script_reload_compatible(current, next)?;
+            }
         }
         Ok(())
     }
@@ -695,87 +689,6 @@ fn status_result(status: AbiStatus, message: &str) -> Result<(), ModuleCallError
             message: message.to_owned(),
         })
     }
-}
-
-fn ensure_script_reload_compatible(
-    current: &LoadedScript,
-    candidate: &LoadedScript,
-) -> Result<(), String> {
-    if (
-        &current.source_path,
-        &current.name,
-        &current.global_name,
-        &current.base_script,
-        &current.base,
-        current.tool,
-    ) != (
-        &candidate.source_path,
-        &candidate.name,
-        &candidate.global_name,
-        &candidate.base_script,
-        &candidate.base,
-        candidate.tool,
-    ) {
-        return Err(format!(
-            "script `{}` changed its path, type, base class, or tool status",
-            current.source_path
-        ));
-    }
-    if current.fields != candidate.fields {
-        return Err(format!(
-            "script `{}` changed its field, property, node, or signal schema",
-            current.source_path
-        ));
-    }
-    if current.methods.len() != candidate.methods.len()
-        || current
-            .methods
-            .iter()
-            .zip(&candidate.methods)
-            .any(|(left, right)| !method_schema_matches(left, right))
-    {
-        return Err(format!(
-            "script `{}` changed its reflected method schema",
-            current.source_path
-        ));
-    }
-    if lifecycle_presence(&current.lifecycle) != lifecycle_presence(&candidate.lifecycle) {
-        return Err(format!(
-            "script `{}` changed its lifecycle callback schema",
-            current.source_path
-        ));
-    }
-    Ok(())
-}
-
-fn method_schema_matches(left: &LoadedMethod, right: &LoadedMethod) -> bool {
-    left.id == right.id
-        && left.name == right.name
-        && left.rust_signature == right.rust_signature
-        && left.kind == right.kind
-        && left.lifecycle == right.lifecycle
-        && left.receiver == right.receiver
-        && left.argument_count == right.argument_count
-        && left.argument_types == right.argument_types
-        && left.arguments == right.arguments
-        && left.default_arguments.len() == right.default_arguments.len()
-        && left.vararg == right.vararg
-        && left.return_type == right.return_type
-        && left.return_class == right.return_class
-        && left.options == right.options
-        && left.rpc == right.rpc
-}
-
-fn lifecycle_presence(table: &AbiLifecycleTableV1) -> [bool; 7] {
-    [
-        table.enter_tree.is_some(),
-        table.ready.is_some(),
-        table.process.is_some(),
-        table.physics_process.is_some(),
-        table.input.is_some(),
-        table.unhandled_input.is_some(),
-        table.exit_tree.is_some(),
-    ]
 }
 
 impl Drop for GenerationInner {
@@ -1989,8 +1902,12 @@ impl ModuleField {
             .or(self.descriptor().reload_value_type)
     }
 
-    pub(crate) fn reload_policy(&self) -> AbiReloadPolicy {
-        self.descriptor().reload
+    pub(crate) fn persists_on_reload(&self) -> bool {
+        self.descriptor().reload == AbiReloadPolicy::Persist
+            || (self.descriptor().reload == AbiReloadPolicy::Default
+                && self
+                    .property_usage()
+                    .is_some_and(|usage| usage & ABI_PROPERTY_USAGE_STORAGE != 0))
     }
 
     pub(crate) fn is_node(&self) -> bool {
@@ -2104,17 +2021,21 @@ impl Drop for ModuleScriptState {
 }
 
 pub(crate) fn set_active_generation(generation: ModuleGeneration) {
-    let active = ACTIVE_GENERATION.get_or_init(|| RwLock::new(None));
-    if let Ok(mut active) = active.write() {
-        *active = Some(generation);
-    }
+    replace_active_generation(Some(generation));
 }
 
 pub(crate) fn clear_active_generation() {
-    let active = ACTIVE_GENERATION.get_or_init(|| RwLock::new(None));
-    if let Ok(mut active) = active.write() {
-        *active = None;
-    }
+    replace_active_generation(None);
+}
+
+fn replace_active_generation(generation: Option<ModuleGeneration>) {
+    let previous = {
+        let active = ACTIVE_GENERATION.get_or_init(|| RwLock::new(None));
+        let mut active = active.write().unwrap_or_else(|error| error.into_inner());
+        core::mem::replace(&mut *active, generation)
+    };
+    // Module shutdown can run user destructors and reenter Host lookups.
+    drop(previous);
 }
 
 pub(crate) fn active_generation() -> Option<ModuleGeneration> {
@@ -3940,16 +3861,12 @@ fn invalid(script: u32, message: impl Into<String>) -> ModuleLoadError {
 unsafe extern "C" fn host_log(
     _context: *mut c_void,
     level: AbiLogLevel,
-    target: AbiByteSlice,
+    _target: AbiByteSlice,
     message: AbiByteSlice,
 ) {
     let _ = std::panic::catch_unwind(|| {
-        let target = lossy_text(target);
         let message = lossy_text(message);
-        crate::logging::module(
-            level,
-            format_args!("[godot-rust module/{level:?}] {target}: {message}"),
-        );
+        crate::logging::module(level, format_args!("{message}"));
     });
 }
 
@@ -4438,7 +4355,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_schema_is_loaded_and_method_schema_changes_are_rejected() {
+    fn persistent_field_transport_is_loaded_from_the_descriptor() {
         let descriptor = AbiScriptDescriptorV1 {
             struct_size: AbiScriptDescriptorV1::MINIMUM_SIZE,
             reserved_flags: ABI_SCRIPT_EXTENSION_FIELD_ACCESS | ABI_SCRIPT_EXTENSION_RESOURCE_UID,
@@ -4461,16 +4378,7 @@ mod tests {
             reserved: script_extension_slots(),
         };
         let current = copy_script(0, descriptor).expect("current descriptor");
-        let mut candidate = copy_script(0, descriptor).expect("candidate descriptor");
         assert_eq!(current.fields[0].reload_value_type, Some(AbiValueType::I64));
-        assert!(ensure_script_reload_compatible(&current, &candidate).is_ok());
-
-        candidate.methods[0].rust_signature = "fn _ready(&mut self) -> bool".into();
-        assert!(
-            ensure_script_reload_compatible(&current, &candidate)
-                .expect_err("method schema change")
-                .contains("method schema")
-        );
     }
 
     #[test]

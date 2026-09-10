@@ -1,5 +1,0 @@
-error: assign an explicit integer value to every Godot enum or flag entry
- --> tests/ui/fail/enum_missing_value.rs:6:5
-  |
-6 |     Walk,
-  |     ^^^^

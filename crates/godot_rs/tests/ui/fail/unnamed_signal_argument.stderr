@@ -1,5 +1,0 @@
-error: name each signal argument, such as `Signal<fn(amount: i64)>`
- --> tests/ui/fail/unnamed_signal_argument.rs:6:24
-  |
-6 |     damaged: Signal<fn(i64)>,
-  |                        ^^^

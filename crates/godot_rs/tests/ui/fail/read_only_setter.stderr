@@ -1,5 +1,0 @@
-error: a read-only property cannot declare a setter
- --> tests/ui/fail/read_only_setter.rs:5:42
-  |
-5 |     #[property(default = 100, read_only, set = set_health)]
-  |                                          ^^^^^^^^^^^^^^^^

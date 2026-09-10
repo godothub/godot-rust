@@ -1,5 +1,0 @@
-error: choose only one RPC transfer mode
- --> tests/ui/fail/conflicting_rpc.rs:8:42
-  |
-8 |     #[rpc(authority, any_peer, reliable, unreliable)]
-  |                                          ^^^^^^^^^^

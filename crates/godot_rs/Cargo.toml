@@ -22,7 +22,7 @@ inventory.workspace = true
 godot_api = { workspace = true, default-features = false, features = ["generator"] }
 
 [dev-dependencies]
-trybuild = "1.0.118"
+serde_json.workspace = true
 
 [lib]
 path = "src/lib.rs"

@@ -159,6 +159,34 @@ macro_rules! resolve {
 impl EngineInterface {
     /// Resolves the minimum official interface needed to bootstrap the Host.
     ///
+    pub(crate) fn is_editor_hint(self) -> Result<bool, String> {
+        let get_singleton = self
+            .global_get_singleton
+            .ok_or("Godot singleton lookup is unavailable")?;
+        let ptrcall = self
+            .object_method_bind_ptrcall
+            .ok_or("Godot ptrcall is unavailable")?;
+        let name = crate::string_name::StaticStringName::new(self, c"Engine");
+        // SAFETY: Engine is an official singleton and the StringName remains live.
+        let engine = unsafe { get_singleton(name.as_ptr()) };
+        if engine.is_null() {
+            return Err("Godot Engine singleton is unavailable".into());
+        }
+        let method = crate::runtime::resolve_method(self, c"Engine", c"is_editor_hint", 36_873_697)
+            .map_err(|error| error.to_string())?;
+        let mut result = 0_u8;
+        // SAFETY: Engine.is_editor_hint has no arguments and writes one Godot bool.
+        unsafe {
+            ptrcall(
+                method,
+                engine,
+                ptr::null(),
+                ptr::from_mut(&mut result).cast(),
+            )
+        };
+        Ok(result != 0)
+    }
+
     /// # Safety
     ///
     /// The callbacks and pointer must come from a matching Godot

@@ -1,5 +1,3 @@
-#[cfg(not(any(target_os = "android", target_os = "emscripten", target_os = "ios")))]
-use godot_api::{GDExtensionBool, GDExtensionTypePtr};
 use godot_api::{GDExtensionConstTypePtr, GDExtensionMethodBindPtr};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -93,7 +91,7 @@ pub(crate) fn safe_mode_enabled(_interface: EngineInterface) -> Result<bool, Str
 
 #[cfg(not(any(target_os = "android", target_os = "emscripten", target_os = "ios")))]
 pub(crate) fn safe_mode_enabled(interface: EngineInterface) -> Result<bool, String> {
-    if !engine_is_editor_hint(interface)? {
+    if !interface.is_editor_hint()? {
         return Ok(false);
     }
     let root = globalize_project_root(interface)?;
@@ -104,41 +102,6 @@ pub(crate) fn safe_mode_enabled(interface: EngineInterface) -> Result<bool, Stri
         )
     })?;
     safe_mode_at(&project_root)
-}
-
-#[cfg(not(any(target_os = "android", target_os = "emscripten", target_os = "ios")))]
-fn engine_is_editor_hint(interface: EngineInterface) -> Result<bool, String> {
-    let get_singleton = interface
-        .global_get_singleton
-        .ok_or_else(|| "Godot did not expose global singleton lookup".to_owned())?;
-    let engine_name = StaticStringName::new(interface, c"Engine");
-    // SAFETY: Engine is an official Godot singleton.
-    let engine = unsafe { get_singleton(engine_name.as_ptr()) };
-    if engine.is_null() {
-        return Err("Godot did not expose its Engine singleton".to_owned());
-    }
-    let method = resolve_method(interface, c"Engine", c"is_editor_hint", 36_873_697)
-        .map_err(|error| error.to_string())?;
-    let ptrcall = interface
-        .object_method_bind_ptrcall
-        .ok_or_else(|| "Godot did not expose method bind ptrcall".to_owned())?;
-    let mut output: GDExtensionBool = 0;
-    // SAFETY: Method bind and receiver match Engine.is_editor_hint() -> bool,
-    // and output points to one writable GDExtensionBool.
-    unsafe {
-        ptrcall(
-            method as GDExtensionMethodBindPtr,
-            engine,
-            core::ptr::null(),
-            (&raw mut output).cast::<core::ffi::c_void>() as GDExtensionTypePtr,
-        );
-    }
-    if output > 1 {
-        return Err(format!(
-            "Godot returned an invalid editor-hint boolean value: {output}"
-        ));
-    }
-    Ok(output != 0)
 }
 
 fn safe_mode_at(project_root: &Path) -> Result<bool, String> {

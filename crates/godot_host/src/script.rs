@@ -443,8 +443,11 @@ unsafe extern "C" fn can_instantiate(
         .map(|script| {
             script.has_source.load(Ordering::Acquire)
                 && LANGUAGE_OBJECT.load(Ordering::Acquire) != 0
-                && compiled_script(script)
-                    .is_some_and(|compiled| !source_attributes(script, &compiled).abstract_)
+                && compiled_script(script).is_some_and(|compiled| {
+                    !source_attributes(script, &compiled).abstract_
+                        && (compiled.is_tool()
+                            || !script.interface.is_editor_hint().unwrap_or(true))
+                })
         })
         .unwrap_or(false);
     write_bool(result, valid);
@@ -1266,6 +1269,10 @@ static SCRIPT_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
         get_instance_base_type
     ),
     virtual_method!(c"_instance_create", 1_107_568_780, runtime_instance_create),
+    if !module_script.is_tool() && script.interface.is_editor_hint().unwrap_or(true) {
+        write_null(result);
+        return;
+    }
     virtual_method!(
         c"_placeholder_instance_create",
         1_107_568_780,

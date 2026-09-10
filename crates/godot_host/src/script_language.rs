@@ -86,7 +86,7 @@ fn create_language_instance(interface: EngineInterface, _object: *mut c_void) ->
         return ptr::null_mut();
     }
 
-    let watcher = if is_editor_hint(interface)
+    let watcher = if interface.is_editor_hint().unwrap_or(false)
         && !crate::last_known_good::safe_mode_enabled(interface).unwrap_or(true)
     {
         match crate::last_known_good::Watcher::new(interface) {
@@ -113,38 +113,6 @@ fn create_language_instance(interface: EngineInterface, _object: *mut c_void) ->
         }),
     }))
     .cast()
-}
-
-fn is_editor_hint(interface: EngineInterface) -> bool {
-    let (Some(get_singleton), Some(ptrcall)) = (
-        interface.global_get_singleton,
-        interface.object_method_bind_ptrcall,
-    ) else {
-        return false;
-    };
-    let engine_name = StaticStringName::new(interface, c"Engine");
-    // SAFETY: Engine is an official singleton and the StringName is live.
-    let engine = unsafe { get_singleton(engine_name.as_ptr()) };
-    if engine.is_null() {
-        return false;
-    }
-    let Ok(method) =
-        crate::runtime::resolve_method(interface, c"Engine", c"is_editor_hint", 36_873_697)
-    else {
-        return false;
-    };
-    let mut result = 0_u8;
-    // SAFETY: The bind matches Engine.is_editor_hint() -> bool and the result
-    // points to Godot's one-byte ptrcall bool representation.
-    unsafe {
-        ptrcall(
-            method,
-            engine,
-            ptr::null(),
-            ptr::from_mut(&mut result).cast(),
-        );
-    }
-    result != 0
 }
 
 unsafe fn drop_language_instance(instance: *mut c_void) {

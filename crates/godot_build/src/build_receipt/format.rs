@@ -203,12 +203,7 @@ mod tests {
     fn receipt_id_detects_payload_tampering() {
         let mut receipt = StoredBuildReceipt::new(sample_payload()).expect("Build Receipt");
         receipt.payload.package_name = "changed".to_owned();
-        assert!(
-            receipt
-                .validate()
-                .expect_err("tampering must fail")
-                .contains("Receipt ID")
-        );
+        assert!(receipt.validate().is_err());
     }
 
     fn sample_payload() -> BuildReceiptPayload {

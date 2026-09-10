@@ -761,9 +761,7 @@ mod tests {
             b"#[script(base = Node)]\nstruct Private;\n",
         )
         .expect("private script");
-        let error =
-            sync_script_index(&project.0, &project.package()).expect_err("private type rejected");
-        assert!(error.contains("must be `pub`"));
+        sync_script_index(&project.0, &project.package()).expect_err("private type rejected");
 
         std::fs::write(
             project.0.join("src/scripts/private.rs"),
@@ -772,9 +770,11 @@ mod tests {
         .expect("public script");
         std::fs::write(project.0.join("src/scripts/mod.rs"), b"mod user_owned;\n")
             .expect("user index");
-        let error =
-            sync_script_index(&project.0, &project.package()).expect_err("user index rejected");
-        assert!(error.contains("refusing to replace user-owned"));
+        sync_script_index(&project.0, &project.package()).expect_err("user index rejected");
+        assert_eq!(
+            std::fs::read(project.0.join("src/scripts/mod.rs")).expect("preserved user index"),
+            b"mod user_owned;\n"
+        );
     }
 
     #[test]

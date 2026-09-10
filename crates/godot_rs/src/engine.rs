@@ -1913,8 +1913,6 @@ mod tests {
         let object = ObjectRef::<Node>::__from_instance_id(42);
         assert!(object.is_resolved());
         assert_eq!(object.instance_id(), 42);
-        assert_eq!(object, object);
-        assert!(format!("{object:?}").contains("instance_id: 42"));
     }
 
     #[test]

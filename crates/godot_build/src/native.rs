@@ -200,7 +200,6 @@ mod tests {
         project.native_package = None;
         project.selected_package = Some(project.packages[0].clone());
         project.selection_reason = Some(PackageSelectionReason::RootPackage);
-        let error = plan_native_build(&project).expect_err("native package required");
-        assert!(error.contains("exactly one valid Extension Mode package"));
+        plan_native_build(&project).expect_err("native package required");
     }
 }

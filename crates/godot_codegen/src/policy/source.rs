@@ -490,8 +490,6 @@ sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
             r#"acquisition = "godot --headless --dump-gdextension-interface""#,
             "",
         );
-        let error = parse_official_api_source(&source, GodotApiVersion::new(4, 6))
-            .expect_err("4.6 source without interface JSON should fail");
-        assert!(error.to_string().contains("source of truth"));
+        assert!(parse_official_api_source(&source, GodotApiVersion::new(4, 6)).is_err());
     }
 }

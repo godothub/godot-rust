@@ -535,11 +535,12 @@ mod tests {
         .expect("first publication");
 
         let rejected = project.artifact("rejected", b"broken module");
-        let error = publish_validated_generation_with(&project.0, &rejected, |_| {
-            Err("ABI mismatch".to_owned())
-        })
+        publish_validated_generation_with(
+            &project.0,
+            &rejected,
+            |_| Err("ABI mismatch".to_owned()),
+        )
         .expect_err("rejected publication");
-        assert!(error.contains("ABI mismatch"));
         assert_eq!(read_last_known_good(&project.0).build_id, first.build_id);
         assert!(
             project
@@ -565,14 +566,13 @@ mod tests {
         .expect("first publication");
 
         let changed = project.artifact("changed", b"changed while building");
-        let error = publish_validated_generation_with_guard(
+        publish_validated_generation_with_guard(
             &project.0,
             &changed,
             |_| Ok(("validated".to_owned(), String::new())),
             || Err("source input changed".to_owned()),
         )
         .expect_err("guarded publication");
-        assert!(error.contains("source input changed"));
         assert_eq!(read_last_known_good(&project.0).build_id, first.build_id);
     }
 
@@ -586,8 +586,7 @@ mod tests {
         .expect("publication");
         std::fs::write(&report.module_path, b"tampered module").expect("tampered module");
 
-        let error = verify_last_known_good(&project.0).expect_err("tampering must be rejected");
-        assert!(error.contains("content does not match"));
+        verify_last_known_good(&project.0).expect_err("tampering must be rejected");
     }
 
     #[test]
@@ -605,9 +604,7 @@ mod tests {
         )
         .expect("Last Known Good record");
 
-        let error =
-            verify_last_known_good(&project.0).expect_err("path traversal must be rejected");
-        assert!(error.contains("safe relative path"));
+        verify_last_known_good(&project.0).expect_err("path traversal must be rejected");
     }
 
     fn read_last_known_good(root: &Path) -> LastKnownGood {

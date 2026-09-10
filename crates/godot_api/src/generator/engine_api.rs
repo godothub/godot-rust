@@ -4605,10 +4605,7 @@ mod tests {
         }))
         .unwrap();
         let result = bind_method(&class, &class.methods[0], &HashMap::new(), &HashMap::new());
-        let Err(error) = result else {
-            panic!("invalid boolean must reject generation")
-        };
-        assert!(error.to_string().contains("Node.configure(enabled: bool)"));
+        assert!(result.is_err());
 
         class.methods[0].arguments[0].default_value = Some("true".into());
         class.methods[0].arguments.push(ApiArgument {

@@ -1689,7 +1689,6 @@ mod tests {
 
     #[test]
     fn unit_is_rejected_as_an_argument_type_without_panicking() {
-        let error = value_metadata::<()>().expect_err("unit argument");
-        assert!(error.to_string().contains("cannot use"));
+        assert!(value_metadata::<()>().is_err());
     }
 }

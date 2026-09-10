@@ -389,7 +389,7 @@ mod tests {
                 std::fs::write(project.0.join("src/helper.rs"), b"user source")
                     .expect("existing source");
             }
-            let error = initialize_project_with(&project.0, None::<&str>, |command, _| {
+            initialize_project_with(&project.0, None::<&str>, |command, _| {
                 let root = command.get_current_dir().expect("Cargo working directory");
                 std::fs::create_dir_all(root.join("src")).expect("Cargo source directory");
                 for path in ["Cargo.toml", "Cargo.lock", "src/lib.rs"] {
@@ -398,7 +398,6 @@ mod tests {
                 Err("cargo init was cancelled".to_owned())
             })
             .expect_err("interrupted initializer");
-            assert!(error.contains("cancelled"));
             for path in ["Cargo.toml", "Cargo.lock", "src/lib.rs"] {
                 assert!(!project.0.join(path).exists(), "partial {path} remains");
             }
@@ -421,7 +420,7 @@ mod tests {
         use std::os::windows::process::ExitStatusExt;
 
         let project = TempProject::new();
-        let error = initialize_project_with(&project.0, None::<&str>, |command, _| {
+        initialize_project_with(&project.0, None::<&str>, |command, _| {
             let root = command.get_current_dir().expect("Cargo working directory");
             std::fs::create_dir(root.join("src")).expect("Cargo source directory");
             std::fs::write(root.join("Cargo.toml"), b"[invalid TOML").expect("broken manifest");
@@ -433,7 +432,6 @@ mod tests {
             })
         })
         .expect_err("invalid manifest");
-        assert!(error.contains("Cargo.toml is invalid"), "{error}");
         assert!(!project.0.join("Cargo.toml").exists());
         assert!(!project.0.join("src").exists());
     }

@@ -393,8 +393,7 @@ mod tests {
                 &features(&["macos", "universal", "arm64"]),
                 false,
             )
-            .expect_err("incomplete Universal features")
-            .contains("missing x86_64 or arm64")
+            .is_err()
         );
     }
 

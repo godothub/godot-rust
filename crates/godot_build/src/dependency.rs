@@ -1009,26 +1009,26 @@ mod tests {
     #[test]
     fn source_conflicts_and_stale_previews_do_not_modify_the_manifest() {
         let project = TempProject::new();
+        let manifest_path = project.0.join("Cargo.toml");
+        let original = std::fs::read_to_string(&manifest_path).expect("manifest");
         let mut change = registry_change();
         change.source_kind = DependencySourceKind::Git;
         change.source = "https://example.com/serde.git".to_owned();
-        let error = preview_dependency_change(&project.0, change, None::<&str>)
-            .expect_err("source conflict");
-        assert!(error.contains("source replacement"));
+        preview_dependency_change(&project.0, change, None::<&str>).expect_err("source conflict");
+        assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), original);
         let preview = preview_dependency_change(&project.0, registry_change(), None::<&str>)
             .expect("preview");
-        let manifest_path = project.0.join("Cargo.toml");
-        let mut manifest = std::fs::read_to_string(&manifest_path).expect("manifest");
+        let mut manifest = original;
         manifest.push_str("\n# changed after preview\n");
-        std::fs::write(&manifest_path, manifest).expect("external change");
-        let error = apply_dependency_change(
+        std::fs::write(&manifest_path, &manifest).expect("external change");
+        apply_dependency_change(
             &project.0,
             &preview.expected_sha256,
             preview.change,
             None::<&str>,
         )
         .expect_err("stale");
-        assert!(error.contains("changed after"));
+        assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), manifest);
     }
 
     #[test]

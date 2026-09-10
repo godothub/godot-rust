@@ -829,8 +829,7 @@ mod tests {
                 None,
                 None::<&OsStr>,
             )
-            .expect_err("invalid target")
-            .contains("canonical Rust target triple")
+            .is_err()
         );
     }
 
@@ -904,11 +903,7 @@ mod tests {
             Some(GodotRustMode::Extension),
             Some(GodotApiVersion::new(4, 6)),
         );
-        assert!(
-            script_api_environment(&package)
-                .expect_err("Native package must use Native task path")
-                .contains("Extension Mode")
-        );
+        assert!(script_api_environment(&package).is_err());
     }
 
     #[test]

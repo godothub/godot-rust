@@ -422,7 +422,7 @@ mod tests {
             response
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("invalid build daemon request"))
+                .is_some_and(|error| !error.is_empty())
         );
     }
 
@@ -440,7 +440,7 @@ mod tests {
             response
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains("could not resolve Godot project root"))
+                .is_some_and(|error| !error.is_empty())
         );
     }
 

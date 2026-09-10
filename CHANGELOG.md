@@ -1,3 +1,14 @@
+## 0.9.3
+
+- Fix logs missing from Godot's Output panel.
+- Refresh Inspector properties after building, without restarting the editor.
+- Hot-reload fields, methods, and signals in tool scripts while keeping existing
+  property values.
+- Run ordinary scripts only in the game; only scripts marked `tool` run in the
+  editor.
+- Fix crashes when editing Unicode text or incomplete code, and when using the
+  Profiler.
+
 ## 0.9.2
 
 - Fix build failures caused by file paths on Windows.

@@ -25,9 +25,10 @@ compiler diagnostics, apply suggested fixes, or cancel a running operation.
   standard signal connection dialog.
 - Get syntax highlighting in Godot's script editor, or use your preferred
   external editor and rust-analyzer.
-- Check code automatically when you save. Build to apply compatible changes
-  with hot reload and keep Inspector property values. Changes to field types,
-  method signatures, or inheritance require restarting the scene.
+- Check code automatically when you save. Build to update Inspector properties
+  and `tool` scripts without restarting the editor, keeping compatible property
+  values. Regular scripts run only in the game. If an update cannot be applied,
+  check Godot's Output panel for the reason.
 - Use Cargo dependencies and workspaces, custom Resources, script inheritance,
   and cooperative async tasks. Extension Mode is available for registering
   native Godot classes directly.

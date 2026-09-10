@@ -4,11 +4,11 @@ English | [简体中文](README-ZH.md)
 
 **Write your Godot game in Rust.**
 
-Create and attach `.rs` files just like Godot scripts, write code in a style
-designed for Godot users, and export your game through Godot. Keep your familiar
-editor workflow with Rust's performance, type safety, and Cargo ecosystem.
+Create and attach `.rs` files just like GDScript files, write game logic in Rust,
+and export your game through Godot. Keep your familiar editor workflow with
+Rust's type checking and Cargo ecosystem.
 
-## Why godot-rust?
+## Features
 
 - **At home in Godot**: create and attach Rust scripts in the editor, with
   readable code and syntactic sugar designed for Godot users.
@@ -72,9 +72,15 @@ Press **F5** to run the project or **F6** to run the current scene. The plugin
 builds Rust code when needed. To build manually, use **Build** in the bottom
 **Rust** panel or **Project > Tools > Rust: Build**.
 
-Saving checks your code; run **Build** again to apply changes. Compatible changes
-support hot reload. Changes to field types, method signatures, or inheritance
-require restarting the scene.
+Saving checks your code; use **Build** to apply changes. Inspector properties
+refresh automatically, and `tool` scripts update without reopening the scene.
+Existing property values are kept when their types stay compatible. Regular
+scripts run only in the game; restart the game to try your changes.
+
+If an update cannot be applied, Godot's Output panel explains why. Changing a
+script's Godot base class or `tool` setting requires closing and reopening the
+affected scene, or removing and reattaching its script. See the
+[hot reload guide](example/README.md#热重载) for field reset options and troubleshooting.
 
 ## Export your game
 

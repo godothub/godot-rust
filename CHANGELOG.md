@@ -8,6 +8,7 @@
   editor.
 - Fix crashes when editing Unicode text or incomplete code, and when using the
   Profiler.
+- Fix intermittent project initialization and script saving failures on Windows.
 
 ## 0.9.2
 

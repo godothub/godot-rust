@@ -7,9 +7,11 @@ import argparse
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from stage_example_plugin import stage_example_plugin
@@ -50,6 +52,20 @@ FLOW_PLUGIN = ROOT / "tests" / "fixtures" / "editor_flow"
 DIAGNOSTICS_PLUGIN = ROOT / "tests" / "fixtures" / "editor_diagnostics"
 SETUP_PLUGIN = ROOT / "tests" / "fixtures" / "editor_setup"
 INITIALIZE_PLUGIN = ROOT / "tests" / "fixtures" / "editor_initialize"
+SCRIPTS_PLUGIN = ROOT / "tests" / "fixtures" / "editor_scripts"
+SCRIPTS_MARKERS = (
+    "GODOT_RUST_EDITOR_PLACEHOLDER_READY",
+    "GODOT_RUST_UNICODE_EDIT_SURVIVED",
+    "GODOT_RUST_EXPORT_ADDITION_PRESERVED",
+    "GODOT_RUST_TOOL_NODE_ROLLED_BACK",
+    "GODOT_RUST_TOOL_NODE_RECOVERED",
+    "GODOT_RUST_TOOL_STRUCTURE_RELOADED",
+    "GODOT_RUST_TOOL_RELOAD_ROLLED_BACK",
+    "GODOT_RUST_TOOL_REMOVAL_RELOADED",
+    "GODOT_RUST_TOOL_RESET_RELOADED",
+    "GODOT_RUST_RUNTIME_READY",
+    "GODOT_RUST_RUNTIME_PROCESS",
+)
 DIAGNOSTICS_MARKERS = (
     PROBE_MARKER,
     "GODOT_RUST_BASELINE_RECEIPT_RECORDED",
@@ -376,6 +392,36 @@ def prepare_test_project(destination: Path, scenario: str = "flow") -> None:
     if scenario == "flow":
         fixture = FLOW_PLUGIN
         plugin_name = "godot-rust-editor-flow"
+        base = destination / "src" / "scripts" / "base_greeting.rs"
+        base.write_text(
+            base.read_text(encoding="utf-8").replace(
+                "#[script(base = Node,", "#[script(base = Node, tool,"
+            ),
+            encoding="utf-8",
+        )
+    elif scenario == "scripts":
+        fixture = SCRIPTS_PLUGIN
+        plugin_name = "godot-rust-editor-scripts"
+        scripts = destination / "src" / "scripts"
+        shutil.rmtree(scripts)
+        scripts.mkdir()
+        for index, source in enumerate(sorted(fixture.glob("*.rs")), start=1):
+            shutil.copy2(source, scripts / source.name)
+            (scripts / (source.name + ".uid")).write_text(
+                f"uid://b{index}\n", encoding="utf-8"
+            )
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "auto-check = true", "auto-check = false"
+            ),
+            encoding="utf-8",
+        )
+        (destination / "main.tscn").write_text(
+            '[gd_scene load_steps=2 format=3]\n'
+            '[ext_resource type="Script" path="res://src/scripts/editor_probe.rs" id="1"]\n'
+            '[node name="Probe" type="Node"]\nscript=ExtResource("1")\n',
+            encoding="utf-8",
+        )
     elif scenario == "diagnostics":
         fixture = DIAGNOSTICS_PLUGIN
         plugin_name = "godot-rust-editor-diagnostics"
@@ -435,7 +481,7 @@ enabled=PackedStringArray("godot-rust")
     else:
         raise ValueError(f"unknown editor test scenario: {scenario}")
     addon = destination / "addons" / plugin_name
-    shutil.copytree(fixture, addon)
+    shutil.copytree(fixture, addon, ignore=shutil.ignore_patterns("*.rs"))
     project = destination / "project.godot"
     project.write_text(
         project.read_text(encoding="utf-8").replace(
@@ -456,6 +502,11 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
         stage_example_plugin(release=False)
     runtime_returncode = 0
     runtime_output = ""
+    verbose_output = ""
+    verbose_returncode = 0
+    profiling_output = ""
+    profiling_status = 0
+    profiling_packets = b""
     with tempfile.TemporaryDirectory(
         prefix=f"godot-rust-editor-{scenario}-"
     ) as temporary:
@@ -486,7 +537,7 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
             encoding="utf-8",
             timeout=EDITOR_FLOW_TIMEOUT_SECONDS,
         )
-        if scenario == "flow" and completed.returncode == 0:
+        if scenario in ("flow", "scripts") and completed.returncode == 0:
             runtime = subprocess.run(
                 [
                     godot,
@@ -506,6 +557,22 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
             )
             runtime_returncode = runtime.returncode
             runtime_output = runtime.stdout + runtime.stderr
+            if scenario == "scripts" and runtime.returncode == 0:
+                verbose = subprocess.run(
+                    [godot, "--headless", "--verbose", "--path", str(project), "--quit-after", "10"],
+                    cwd=ROOT,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=120,
+                )
+                verbose_returncode = verbose.returncode
+                verbose_output = verbose.stdout + verbose.stderr
+                profiling_status, profiling_output, profiling_packets = run_profiled_game(
+                    godot, project, environment
+                )
     output = completed.stdout + completed.stderr + runtime_output
     diagnostics = scenario == "diagnostics"
     setup = scenario == "setup"
@@ -516,16 +583,97 @@ def run_editor_test(godot: str, no_build: bool, scenario: str = "flow") -> str:
         markers = SETUP_MARKERS
     elif initialize:
         markers = INITIALIZE_MARKERS
+    elif scenario == "scripts":
+        markers = SCRIPTS_MARKERS
     else:
         markers = REQUIRED_MARKERS
-    errors = output_errors(output, markers, diagnostics)
-    if completed.returncode != 0 or runtime_returncode != 0 or errors:
+    checked_output = output
+    if scenario == "scripts":
+        checked_output = re.sub(r"(?m)^ERROR: GODOT_RUST_LOG_ERROR\r?$", "", output)
+        for prefix, reason in (
+            ("ERROR: godot-rust: rejected Rust build", "field `res://src/scripts/tool_probe.rs::value` changed its stored type; "
+             "keep the type, rename the field, or use #[reload(skip)]"),
+            ("WARNING: godot-rust: Rust build", "could not resolve node fields for `res://src/scripts/tool_probe.rs`: "
+             "InvalidArgument: required node field `child` could not find `ReloadChild`"),
+        ):
+            disposition = "; keeping old code: " if prefix.startswith("ERROR") else " is waiting: "
+            expected = (
+                r"(?m)^" + re.escape(prefix) + r" sha256:[0-9a-f]{64}" + re.escape(disposition + reason) + r"\r?$"
+            )
+            checked_output, count = re.subn(expected, "", checked_output)
+            if count != 1:
+                raise RuntimeError(f"expected exactly one rejected migration: {reason}")
+    errors = output_errors(checked_output, markers, diagnostics)
+    if scenario == "scripts":
+        task_marker = "GODOT_RUST_TOOL_TASK_CANCELLED"
+        cancellations = [match.start() for match in re.finditer(task_marker, completed.stdout)]
+        if len(cancellations) != 2 or cancellations[-1] < completed.stdout.find("GODOT_RUST_TOOL_RELOAD_ROLLED_BACK"):
+            errors.append("old tasks were not cancelled at successful generation replacement")
+        for marker in (
+            "GODOT_RUST_LOG_INFO",
+            "GODOT_RUST_LOG_WORKER",
+            "GODOT_RUST_LONG_BEGIN" + "中" * 700 + "END",
+        ):
+            if marker not in completed.stdout or marker in completed.stderr:
+                errors.append(f"log missing from Godot stdout: {marker[:50]}")
+        for marker in ("WARNING: GODOT_RUST_LOG_WARNING", "ERROR: GODOT_RUST_LOG_ERROR"):
+            if marker not in completed.stderr:
+                errors.append(f"missing Godot severity: {marker}")
+        if "GODOT_RUST_LOG_DEBUG" in output:
+            errors.append("debug logging ignored Godot's verbosity setting")
+        if "GODOT_RUST_RUNTIME_" in completed.stdout + completed.stderr:
+            errors.append("a regular Rust script executed in the editor")
+        errors.extend(output_errors(verbose_output, ("GODOT_RUST_LOG_DEBUG",)))
+        errors.extend(output_errors(profiling_output, ("GODOT_RUST_PROFILE_COMPLETED",)))
+        if b"res://src/scripts/editor_probe.rs::_process" not in profiling_packets:
+            errors.append("the Godot profiler received no Rust frame data")
+    if any((completed.returncode, runtime_returncode, verbose_returncode, profiling_status)) or errors:
         raise RuntimeError(
             "Godot editor plugin load failed: "
             f"editor_status={completed.returncode}, "
-            f"runtime_status={runtime_returncode}, evidence={errors}\n{output}"
+            f"runtime_status={runtime_returncode}, profiler_status={profiling_status}, "
+            f"evidence={errors}\n{output}\n{verbose_output}\n{profiling_output}"
         )
-    return component_output + output
+    return component_output + output + profiling_output
+
+
+def run_profiled_game(
+    godot: str, project: Path, environment: dict[str, str]
+) -> tuple[int, str, bytes]:
+    received = bytearray()
+
+    def collect(connection: socket.socket) -> None:
+        with connection:
+            try:
+                while packet := connection.recv(65536):
+                    received.extend(packet)
+            except ConnectionResetError:
+                pass
+
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        listener.settimeout(10)
+        command = [
+            godot, "--headless", "--path", str(project),
+            "--remote-debug", f"tcp://127.0.0.1:{listener.getsockname()[1]}",
+            "--script", "res://addons/godot-rust-editor-scripts/profile.gd",
+        ]
+        with subprocess.Popen(
+            command, cwd=ROOT, env=environment, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        ) as child:
+            reader = None
+            try:
+                connection, _ = listener.accept()
+                reader = threading.Thread(target=collect, args=(connection,), daemon=True)
+                reader.start()
+                stdout, stderr = child.communicate(timeout=120)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait()
+                if reader is not None:
+                    reader.join(timeout=10)
+            return child.returncode, stdout + stderr, bytes(received)
 
 
 def run_component_test(godot: str) -> str:
@@ -595,7 +743,7 @@ def main() -> int:
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument(
         "--scenario",
-        choices=("flow", "diagnostics", "setup", "initialize", "components"),
+        choices=("flow", "diagnostics", "setup", "initialize", "components", "scripts"),
         default="flow",
     )
     parser.add_argument(

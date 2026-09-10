@@ -16,6 +16,7 @@ on:
       - "tests/fixtures/editor_diagnostics/**"
       - "tests/fixtures/editor_setup/**"
       - "tests/fixtures/editor_initialize/**"
+      - "tests/fixtures/editor_scripts/**"
       - "tests/fixtures/host_load/**"
       - "tests/fixtures/project_module/**"
       - "tools/create_apple_xcframework.py"
@@ -104,6 +105,13 @@ jobs:
         run: >-
           python tools/test_editor_plugin.py
           --scenario diagnostics
+          --godot "${GODOT_BINARY}"
+      - name: Verify script editing, logs, and export reloads
+        shell: bash
+        run: >-
+          python tools/test_editor_plugin.py
+          --scenario scripts
+          --no-build
           --godot "${GODOT_BINARY}"
       - name: Configure and build an existing Cargo package
         shell: bash

@@ -13,6 +13,7 @@ on:
       - "example/addons/godot-rust/**"
       - "tests/fixtures/editor_flow/**"
       - "tests/fixtures/editor_diagnostics/**"
+      - "tests/fixtures/editor_scripts/**"
       - "tests/fixtures/host_load/**"
       - "tests/fixtures/native_extension/**"
       - "tests/fixtures/project_module/**"
@@ -233,6 +234,10 @@ jobs:
           fi
           GODOT_RS_GODOT="${{ matrix.api }}" \
             python3 tools/test_godot_load.py "${host_args[@]}"
+      - name: Verify editor script behavior
+        run: >-
+          python3 tools/test_editor_plugin.py --scenario scripts
+          --godot "/tmp/godot/${GODOT_BINARY}"
       - name: Build and load compatible Native targets
         run: |
           for native_target in ${{ matrix.native_targets }}; do

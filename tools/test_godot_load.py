@@ -266,6 +266,7 @@ def run_load_test(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=180 if valgrind else 60,
         )
         output = completed.stdout + completed.stderr
@@ -293,6 +294,7 @@ def run_load_test(
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=180 if valgrind else 60,
             )
             smoke_output += smoke.stdout + smoke.stderr
@@ -316,6 +318,7 @@ def run_load_test(
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=180 if valgrind else 60,
         )
         fault_output = fault.stdout + fault.stderr

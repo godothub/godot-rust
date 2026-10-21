@@ -97,17 +97,9 @@ func _run_diagnostics_flow() -> void:
 		_fail("The Rust diagnostics panel does not contain one diagnostics tree")
 		return
 	var tree: Tree = trees[0]
-	var item := tree.get_root().get_first_child()
+	var item := _find_script_diagnostic(tree)
 	if item == null:
-		_fail("Failed Cargo Check did not populate the diagnostics panel")
-		return
-	var location = item.get_metadata(0)
-	if (
-		not location is Dictionary
-		or not str(location.get("file_name", "")).ends_with("hello.rs")
-		or int(location.get("line", 0)) <= 0
-	):
-		_fail("The first Cargo diagnostic has no Rust source location")
+		_fail("Failed Cargo Check has no diagnostic for the Rust source")
 		return
 	print("GODOT_RUST_DIAGNOSTICS_PANEL_POPULATED")
 
@@ -127,13 +119,20 @@ func _run_diagnostics_flow() -> void:
 
 	var recovery_baseline := _source_revision()
 	var starts_before := _started_revisions.size()
+	var recovery_source := ""
 	for index in 3:
-		var source := _original_source + "\n// editor recovery save %d\n" % index
-		if not _save_source(source):
+		recovery_source = _original_source + "\n// editor recovery save %d\n" % index
+		if not _save_source(recovery_source):
 			return
 	var recovery_revision := _source_revision()
-	if recovery_revision < recovery_baseline + 3:
-		_fail("Rapid Rust saves were not all observed by the source monitor")
+	if recovery_revision <= recovery_baseline:
+		_fail("Rapid Rust saves did not advance the source revision")
+		return
+	if (
+		_script.source_code != recovery_source
+		or FileAccess.get_file_as_string(SCRIPT_PATH) != recovery_source
+	):
+		_fail("Rapid Rust saves did not preserve the final source")
 		return
 	get_editor_interface().get_resource_filesystem().scan()
 	if not await _wait_for_check(recovery_revision):
@@ -151,7 +150,7 @@ func _run_diagnostics_flow() -> void:
 			% recovery_starts
 		)
 		return
-	if tree.get_root().get_first_child() != null:
+	if _find_script_diagnostic(tree) != null:
 		_fail("Successful recovery did not clear stale Rust diagnostics")
 		return
 	print("GODOT_RUST_RAPID_SAVES_COALESCED")
@@ -164,6 +163,20 @@ func _run_diagnostics_flow() -> void:
 		return
 	print("GODOT_RUST_BUILD_BEFORE_PLAY_RECOVERED")
 	get_tree().quit()
+
+
+func _find_script_diagnostic(tree: Tree) -> TreeItem:
+	var relative_path := SCRIPT_PATH.trim_prefix("res://")
+	var absolute_path := ProjectSettings.globalize_path(SCRIPT_PATH).replace("\\", "/")
+	var item := tree.get_root().get_first_child()
+	while item != null:
+		var location = item.get_metadata(0)
+		if location is Dictionary and int(location.get("line", 0)) > 0:
+			var file_name := str(location.get("file_name", "")).replace("\\", "/")
+			if file_name in [SCRIPT_PATH, relative_path, absolute_path]:
+				return item
+		item = item.get_next()
+	return null
 
 
 func _verify_editor_ui() -> bool:

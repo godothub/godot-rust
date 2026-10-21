@@ -182,6 +182,39 @@ recent_hits: Vec<i64>,
 初始化表达式用于创建脚本状态，适合准备缓存、容器等私有数据。
 Rust 内部的字段赋值遵循普通 Rust 语义；需要校验或发送通知时，显式调用自己的 setter。
 
+### 共享容器与 Rust 快照
+
+Array 和 Dictionary 保留 Godot 的共享容器语义。传入 Rust、作为返回值、
+放入 Variant 或调用 clone，都保留同一容器。修改会被其他持有者看到，
+包括同一次信号广播的其他监听者。duplicate(false) 创建浅复制的独立容器，
+duplicate(true) 还复制嵌套容器；其中的对象和 Resource 继续共享。
+
+容器操作返回 EngineResult，在 Godot 回调或协作任务中执行。get 返回拥有的
+元素值，不提供指向引擎内部元素的 Rust 引用。Array<T> 检查引擎元素约束：
+try_as 检查现有容器，typed_copy 显式创建逐项检查后的独立副本。
+只读容器和类型不符的写入会返回错误。
+
+密集计算可以一次复制到 Rust 容器，处理后显式写回原容器：
+
+~~~rust
+#[func]
+fn sort_scores(&self, scores: Array<i64>) -> EngineResult<()> {
+    let mut local = scores.to_vec()?;
+    local.sort_unstable();
+    scores.assign_from_slice(&local)?;
+    Ok(())
+}
+~~~
+
+snapshot 返回 ArraySnapshot 或 DictionarySnapshot，元素存储由 Rust 拥有；
+其中嵌套容器和对象仍保留共享身份。只有元素类型满足 Send 的快照才可交给后台
+线程，装有引擎句柄的 Vec 仍受 Godot 线程限制。大规模数值缓冲可使用
+PackedArray 批量转换。
+
+兼容的脚本热更新保留容器身份和嵌套共享关系。迁移直接恢复字段存储，不重复调用
+属性 getter、setter。初始化表达式应只初始化新实例；用户初始化代码中的任意
+引擎副作用无法自动回滚。
+
 ### 自定义资源
 
 把配置独立为 Resource，可以在多个角色、武器或关卡之间复用：
@@ -270,3 +303,29 @@ self.tasks().spawn(async move {
 若要在节点退出场景树时停止任务，可保存返回的 `TaskHandle` 并在 `_exit_tree` 中取消。
 还可以使用 `next_frame()`、`sleep(...)` 和 `timeout(...)`，无需阻塞游戏主线程。
 耗时的纯计算可交给 `spawn_blocking(...)`，节点和资源操作保留在主线程。
+
+### 脚本回调与热更新
+
+Object 回调和 Node 生命周期回调一样，直接在固有的 `#[script] impl` 中声明，自动注册，无需 `#[func]`。支持的签名如下：
+
+```rust
+fn _notification(&mut self, what: i32) {}
+fn _to_string(&self) -> String { "Player".into() }
+fn _get(&self, name: StringName) -> Variant { Variant::nil() }
+fn _set(&mut self, name: StringName, value: Variant) -> bool { false }
+fn _get_property_list(&self) -> Array<Dictionary> { Array::new() }
+fn _validate_property(&self, property: Dictionary) {}
+fn _property_can_revert(&self, name: StringName) -> bool { false }
+fn _property_get_revert(&self, name: StringName) -> Variant { Variant::nil() }
+fn _reloaded(&mut self) {}
+```
+
+也可返回 `EngineResult<T>` 或 `ScriptResult<T>`。`_get` 用 `Variant::nil()` 表示未处理，`_set` 用 `false` 表示未处理。动态属性字典遵循 [Godot Object 回调约定](https://docs.godotengine.org/en/4.4/classes/class_object.html#class-object-private-method-get-property-list)，`_validate_property` 通过共享字典原地修改既有属性；动态属性的 Hint/Usage 直接在 `_get_property_list` 中声明。导出字段保留正常的访问器和默认回退值。
+
+`_reloaded` 在新代际提交、持久字段存储恢复、节点注入、处理开关和连接刷新完成后调用一次，用于重建缓存、重新启动实例任务；不会重放 `_ready`。回调失败属于已提交代际的运行时错误，不会触发回滚。准备失败保留旧代际任务。构造函数及清理代码对引擎对象造成的任意副作用无法自动回滚。
+
+普通回调不扫描源码，仅在引擎调试器启用时采集局部变量，源码定位延迟到堆栈查询或错误报告。生成的引擎调用契约和函数地址有缓存，模块元数据地址按代际隔离，最多八个参数使用内联缓冲。
+
+主线程任务由唤醒和单调时钟定时器驱动，每帧最多轮询一次；等待 Signal 的任务使用 Host 的信号轮询接口。`spawn_blocking` 最多复用八个线程，队列上限 1024，队列满时返回 `BlockingTaskError::QueueFull`。模块卸载前会关闭并等待空闲线程退出。
+
+真实引擎回归会输出 0/64/256 KiB 源码填充时的回调耗时，以及两种模式下 20,000 次引擎调用的耗时。可用 `python3 tools/test_godot_load.py --godot /path/to/godot` 和 `python3 tools/test_native_load.py --godot /path/to/godot` 复现；这些是当前机器上的测量，不代表跨平台延迟保证。

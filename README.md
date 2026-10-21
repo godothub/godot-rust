@@ -196,6 +196,45 @@ Initialization expressions run when script state is created and are useful for
 private caches and containers. Direct field assignments follow normal Rust semantics;
 call your own setter explicitly when you need validation or notifications.
 
+### Shared containers and Rust snapshots
+
+Array and Dictionary preserve Godot's shared-container semantics. Passing them
+to Rust, returning them, storing them in a Variant, or cloning their Rust
+wrappers keeps the same container. Changes are visible to other holders,
+including signal listeners. Use duplicate(false) for a shallow independent
+container, or duplicate(true) to also copy nested containers; referenced objects
+and Resources remain shared.
+
+Container operations return EngineResult and run in a Godot callback or
+cooperative task. get returns an owned element, never a reference into engine
+storage. Array<T> checks the engine's element constraints; try_as checks an
+existing container, while typed_copy explicitly creates a checked copy.
+Read-only and incompatible typed-container writes return errors.
+
+For intensive Rust computation, copy once, process locally, and explicitly
+write back to the existing shared container:
+
+~~~rust
+#[func]
+fn sort_scores(&self, scores: Array<i64>) -> EngineResult<()> {
+    let mut local = scores.to_vec()?;
+    local.sort_unstable();
+    scores.assign_from_slice(&local)?;
+    Ok(())
+}
+~~~
+
+snapshot returns ArraySnapshot or DictionarySnapshot with Rust-owned element
+storage. Nested containers and objects still share their identities. A snapshot
+can move to a worker only when its element types are Send; a Vec containing
+engine handles is still restricted to the Godot thread. Use packed-array
+conversions for large numeric buffers.
+
+Compatible script reloads preserve container identities and nested aliases.
+Migration restores backing fields without rerunning property getters or
+setters. Initialization expressions should only initialize the new instance;
+arbitrary engine side effects in user initialization cannot be rolled back.
+
 ### Custom resources
 
 Put configuration in a Resource to share it across characters, weapons, or levels:
@@ -289,3 +328,29 @@ a node leaves the tree, retain its `TaskHandle` and cancel it in `_exit_tree`.
 Use `next_frame()`, `sleep(...)`, and `timeout(...)` without blocking the game loop.
 Send expensive pure computation to `spawn_blocking(...)`, keeping node and resource
 operations on the main thread.
+
+### Script callbacks and hot reload
+
+Object callbacks are registered automatically in an inherent `#[script] impl`, like the Node lifecycle callbacks. The supported signatures are:
+
+```rust
+fn _notification(&mut self, what: i32) {}
+fn _to_string(&self) -> String { "Player".into() }
+fn _get(&self, name: StringName) -> Variant { Variant::nil() }
+fn _set(&mut self, name: StringName, value: Variant) -> bool { false }
+fn _get_property_list(&self) -> Array<Dictionary> { Array::new() }
+fn _validate_property(&self, property: Dictionary) {}
+fn _property_can_revert(&self, name: StringName) -> bool { false }
+fn _property_get_revert(&self, name: StringName) -> Variant { Variant::nil() }
+fn _reloaded(&mut self) {}
+```
+
+Callbacks can also return `EngineResult<T>` or `ScriptResult<T>`. `_get` returns `Variant::nil()` for an unhandled property; `_set` returns `false`. Dynamic property dictionaries follow [Godot's Object callback contract](https://docs.godotengine.org/en/4.4/classes/class_object.html#class-object-private-method-get-property-list). `_validate_property` edits existing properties through the shared dictionary in place; dynamic properties declare their hints and usage directly in `_get_property_list`. Reflected exported fields keep their normal accessors and default revert values.
+
+`_reloaded` runs once after the new generation is published, persisted backing storage is restored, node fields are injected, and processing/connections are refreshed. Use it to rebuild caches and restart instance tasks; `_ready` is not replayed. A failure in `_reloaded` is a runtime callback failure in the committed generation, not a rollback. Failed preparation preserves the old generation's tasks. Constructor/cleanup side effects on engine objects cannot be rolled back automatically.
+
+Ordinary callbacks do not scan source text. Debugger locals are captured only while the engine debugger is active; line lookup is deferred to stack inspection or error reporting. Generated engine-call contracts and targets are cached, with generation-local metadata addresses. Up to eight arguments use inline storage.
+
+Main-thread tasks are driven by real wakes and a monotonic timer queue, and are polled at most once per frame. Pending signal awaits use the Host signal polling API. `spawn_blocking` uses at most eight reusable workers and a bounded queue of 1024 jobs; saturation returns `BlockingTaskError::QueueFull`. Idle workers are joined before module unloading.
+
+Real-engine regression runs print callback times for 0/64/256 KiB source padding and timing for 20,000 engine calls in Script/Extension Mode. Run `python3 tools/test_godot_load.py --godot /path/to/godot` and `python3 tools/test_native_load.py --godot /path/to/godot` to reproduce; timings are measurements on that machine, not a cross-platform latency guarantee.

@@ -267,6 +267,14 @@ func _verify_hot_reload() -> bool:
 		_fail("The first Rust module generation did not become active")
 		return false
 	owner.set(&"prefix", "Saved")
+	var shared_values: Array[int] = [10, 20]
+	var shared_metadata := {"values": shared_values}
+	owner.set(&"shared_values", shared_values)
+	owner.set(&"shared_metadata", shared_metadata)
+	if shared_values != [10, 20, 77] or owner.call(&"shared_setter_calls") != 1:
+		owner.free()
+		_fail("Initial shared-container property setter did not run")
+		return false
 
 	var source_file := FileAccess.open(HOT_RELOAD_SCRIPT_PATH, FileAccess.READ)
 	if source_file == null:
@@ -319,6 +327,27 @@ func _verify_hot_reload() -> bool:
 		owner.free()
 		_fail("Rust hot reload did not preserve Inspector state")
 		return false
+	if (
+		not is_same(owner.get(&"shared_values"), shared_values)
+		or not is_same(owner.get(&"shared_metadata"), shared_metadata)
+		or not is_same((owner.get(&"shared_metadata") as Dictionary)["values"], shared_values)
+		or shared_values != [10, 20, 77]
+		or owner.call(&"shared_setter_calls") != 1
+		or owner.call(&"reloaded_calls") != 1
+	):
+		owner.free()
+		_fail("Hot reload lost container aliases or reran property setters")
+		return false
+	shared_values.append(30)
+	shared_metadata["external"] = true
+	if (
+		(owner.get(&"shared_values") as Array).back() != 30
+		or not (owner.get(&"shared_metadata") as Dictionary).get("external", false)
+	):
+		owner.free()
+		_fail("Retained containers became stale after retiring the old Rust module")
+		return false
+	print("GODOT_RUST_HOT_RELOAD_CONTAINER_IDENTITY")
 	owner.free()
 	print("GODOT_RUST_HOT_RELOAD_STATE_PRESERVED")
 	return true

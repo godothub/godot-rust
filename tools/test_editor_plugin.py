@@ -43,6 +43,7 @@ REQUIRED_MARKERS = (
     SUPER_CALL_MARKER,
     SUPER_LIFECYCLE_MARKER,
     "GODOT_RUST_HOT_RELOAD_STATE_PRESERVED",
+    "GODOT_RUST_HOT_RELOAD_CONTAINER_IDENTITY",
     "GODOT_RUST_BUILD_RECEIPT_REUSED",
     "GODOT_RUST_RECEIPT_REUSE_MSEC",
     "GODOT_RUST_UNCHANGED_BUILD_REUSED",
@@ -389,10 +390,34 @@ def prepare_test_project(destination: Path, scenario: str = "flow") -> None:
         fixture = FLOW_PLUGIN
         plugin_name = "godot-rust-editor-flow"
         base = destination / "src" / "scripts" / "base_greeting.rs"
+        source = base.read_text(encoding="utf-8").replace(
+            "#[script(base = Node,", "#[script(base = Node, tool,"
+        ).replace("prefix: String,", """prefix: String,
+    #[export(get = get_shared_values, set = set_shared_values)]
+    shared_values: Array<i64>,
+    #[export]
+    shared_metadata: Dictionary,
+    #[reload(persist)]
+    shared_setter_calls: i64,
+    reloaded_calls: i64,""")
+        source += """
+#[script]
+impl BaseGreeting {
+    fn get_shared_values(&self) -> Array<i64> { self.shared_values.clone() }
+    fn set_shared_values(&mut self, value: Array<i64>) {
+        value.push(77).expect("shared setter");
+        self.shared_values = value;
+        self.shared_setter_calls += 1;
+    }
+    #[func]
+    fn shared_setter_calls(&self) -> i64 { self.shared_setter_calls }
+    #[func]
+    fn reloaded_calls(&self) -> i64 { self.reloaded_calls }
+    fn _reloaded(&mut self) { self.reloaded_calls += 1; }
+}
+"""
         base.write_text(
-            base.read_text(encoding="utf-8").replace(
-                "#[script(base = Node,", "#[script(base = Node, tool,"
-            ),
+            source,
             encoding="utf-8",
         )
     elif scenario == "scripts":

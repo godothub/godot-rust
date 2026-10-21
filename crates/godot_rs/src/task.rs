@@ -1,6 +1,6 @@
 //! Main-thread cooperative tasks for Script Mode.
 //!
-//! Tasks are polled once per Godot frame by the Script Host. They never move
+//! Ready tasks are polled at most once per Godot frame by the Script Host. They never move
 //! to a worker thread, so generated engine handles remain subject to the same
 //! main-thread rules as ordinary script callbacks.
 
@@ -8,11 +8,13 @@ use core::cell::{Cell, RefCell};
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use core::task::{Context, Poll, Waker};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, Weak};
+use std::task::Wake;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -20,32 +22,37 @@ use crate::error::{EngineError, EngineResult};
 use crate::signal::{Signal, SignalResult};
 
 thread_local! {
-    static TASKS: RefCell<Vec<Task>> = const { RefCell::new(Vec::new()) };
+    static TASKS: RefCell<HashMap<u64, Task>> = RefCell::new(HashMap::new());
+    static READY: Arc<Mutex<VecDeque<u64>>> = Arc::new(Mutex::new(VecDeque::new()));
+    static TIMERS: RefCell<BinaryHeap<TimerWake>> = const { RefCell::new(BinaryHeap::new()) };
     static NEXT_TASK_ID: Cell<u64> = const { Cell::new(1) };
     static CANCELLING_TASKS: Cell<bool> = const { Cell::new(false) };
 }
 
-static BLOCKING_WORKERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+static BLOCKING_WORKERS: Mutex<BlockingPool> = Mutex::new(BlockingPool::new());
 
 struct Task {
     id: u64,
     cancelled: Rc<AtomicBool>,
-    scope_cancelled: Option<Rc<AtomicBool>>,
+    scope_cancelled: Option<Rc<ScopeState>>,
     future: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    wake: Arc<TaskWake>,
 }
 
 /// A cancellation handle for one cooperative Rust task.
 #[derive(Clone)]
 pub struct TaskHandle {
+    wake: Arc<TaskWake>,
     id: u64,
     cancelled: Rc<AtomicBool>,
-    scope_cancelled: Option<Rc<AtomicBool>>,
+    scope_cancelled: Option<Rc<ScopeState>>,
 }
 
 impl TaskHandle {
     /// Requests cancellation. The future is dropped at the next Host frame.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        self.wake.wake_by_ref();
     }
 
     /// Returns whether cancellation has been requested.
@@ -55,7 +62,7 @@ impl TaskHandle {
             || self
                 .scope_cancelled
                 .as_ref()
-                .is_some_and(|scope| scope.load(Ordering::Acquire))
+                .is_some_and(|scope| scope.cancelled.load(Ordering::Acquire))
     }
 
     /// Stable identity within this loaded project-module generation.
@@ -72,7 +79,61 @@ impl TaskHandle {
 /// has been destroyed. Cancelling does not stop an already-running worker.
 #[derive(Debug, Default)]
 pub struct TaskScope {
-    cancelled: Rc<AtomicBool>,
+    cancelled: Rc<ScopeState>,
+}
+
+#[derive(Debug, Default)]
+struct ScopeState {
+    cancelled: AtomicBool,
+    tasks: RefCell<Vec<Weak<TaskWake>>>,
+    compact_at: Cell<usize>,
+    #[cfg(test)]
+    compaction_visits: Cell<usize>,
+}
+
+#[derive(Debug)]
+struct TaskWake {
+    id: u64,
+    queued: AtomicBool,
+    alive: AtomicBool,
+    ready: Arc<Mutex<VecDeque<u64>>>,
+}
+impl Wake for TaskWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        if self.alive.load(Ordering::Acquire) && !self.queued.swap(true, Ordering::AcqRel) {
+            self.ready
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(self.id);
+        }
+    }
+}
+
+struct TimerRegistration {
+    wake: Waker,
+}
+struct TimerWake {
+    deadline: Instant,
+    registration: Weak<TimerRegistration>,
+}
+impl PartialEq for TimerWake {
+    fn eq(&self, other: &Self) -> bool {
+        self.deadline == other.deadline
+    }
+}
+impl Eq for TimerWake {}
+impl PartialOrd for TimerWake {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TimerWake {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        other.deadline.cmp(&self.deadline)
+    }
 }
 
 impl TaskScope {
@@ -89,7 +150,16 @@ impl TaskScope {
 
     /// Permanently cancels this scope and every task spawned through it.
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.cancelled.cancelled.store(true, Ordering::Release);
+        for task in self
+            .cancelled
+            .tasks
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            task.wake_by_ref();
+        }
     }
 }
 
@@ -109,31 +179,59 @@ pub fn spawn(future: impl Future<Output = ()> + 'static) -> TaskHandle {
 
 fn spawn_in_scope(
     future: impl Future<Output = ()> + 'static,
-    scope_cancelled: Option<Rc<AtomicBool>>,
+    scope_cancelled: Option<Rc<ScopeState>>,
 ) -> TaskHandle {
     let id = NEXT_TASK_ID.with(|next| {
         let id = next.get();
         next.set(id.checked_add(1).unwrap_or(1));
         id
     });
+    let wake = Arc::new(TaskWake {
+        id,
+        queued: AtomicBool::new(false),
+        alive: AtomicBool::new(true),
+        ready: READY.with(Arc::clone),
+    });
+    if let Some(scope) = &scope_cancelled {
+        let mut tasks = scope.tasks.borrow_mut();
+        if tasks.len() >= scope.compact_at.get() {
+            #[cfg(test)]
+            scope
+                .compaction_visits
+                .set(scope.compaction_visits.get() + tasks.len());
+            // Double the live population between scans. A scope with many
+            // concurrent tasks must not rescan every registration per spawn.
+            // Completed tasks may still have handles, so weak ownership alone
+            // does not identify registrations that need cancellation wakes.
+            tasks.retain(|task| {
+                task.upgrade()
+                    .is_some_and(|task| task.alive.load(Ordering::Acquire))
+            });
+            scope.compact_at.set(tasks.len().saturating_mul(2).max(128));
+        }
+        tasks.push(Arc::downgrade(&wake));
+    }
     let cancelled = Rc::new(AtomicBool::new(false));
     let mut task = Task {
         id,
         cancelled: cancelled.clone(),
         scope_cancelled: scope_cancelled.clone(),
         future: Some(Box::pin(future)),
+        wake: wake.clone(),
     };
     if CANCELLING_TASKS.get()
         || scope_cancelled
             .as_ref()
-            .is_some_and(|scope| scope.load(Ordering::Acquire))
+            .is_some_and(|scope| scope.cancelled.load(Ordering::Acquire))
     {
         cancelled.store(true, Ordering::Release);
         drop_task_future(&mut task);
     } else {
-        TASKS.with(|tasks| tasks.borrow_mut().push(task));
+        TASKS.with(|tasks| tasks.borrow_mut().insert(id, task));
+        wake.wake_by_ref();
     }
     TaskHandle {
+        wake,
         id,
         cancelled,
         scope_cancelled,
@@ -170,20 +268,40 @@ impl Future for NextFrame {
 pub fn sleep(duration: Duration) -> Sleep {
     Sleep {
         deadline: Instant::now().checked_add(duration),
+        registered: None,
     }
 }
 
 /// Future returned by [`sleep`].
 pub struct Sleep {
     deadline: Option<Instant>,
+    registered: Option<Arc<TimerRegistration>>,
 }
 
 impl Future for Sleep {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         match self.deadline {
-            Some(deadline) if Instant::now() < deadline => Poll::Pending,
+            Some(deadline) if Instant::now() < deadline => {
+                if self
+                    .registered
+                    .as_ref()
+                    .is_none_or(|wake| !wake.wake.will_wake(context.waker()))
+                {
+                    let registration = Arc::new(TimerRegistration {
+                        wake: context.waker().clone(),
+                    });
+                    TIMERS.with(|timers| {
+                        timers.borrow_mut().push(TimerWake {
+                            deadline,
+                            registration: Arc::downgrade(&registration),
+                        })
+                    });
+                    self.registered = Some(registration);
+                }
+                Poll::Pending
+            }
             Some(_) => Poll::Ready(()),
             None => Poll::Pending,
         }
@@ -207,14 +325,14 @@ impl std::error::Error for TimeoutError {}
 pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
     Timeout {
         future: Box::pin(future),
-        deadline: Instant::now().checked_add(duration),
+        timer: sleep(duration),
     }
 }
 
 /// Future returned by [`timeout`].
 pub struct Timeout<F: Future> {
     future: Pin<Box<F>>,
-    deadline: Option<Instant>,
+    timer: Sleep,
 }
 
 impl<F: Future> Future for Timeout<F> {
@@ -225,9 +343,9 @@ impl<F: Future> Future for Timeout<F> {
         if let Poll::Ready(output) = this.future.as_mut().poll(context) {
             return Poll::Ready(Ok(output));
         }
-        match this.deadline {
-            Some(deadline) if Instant::now() >= deadline => Poll::Ready(Err(TimeoutError)),
-            Some(_) | None => Poll::Pending,
+        match Pin::new(&mut this.timer).poll(context) {
+            Poll::Ready(()) => Poll::Ready(Err(TimeoutError)),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -241,6 +359,8 @@ pub enum BlockingTaskError {
     Panic,
     /// The worker exited without delivering a result.
     Disconnected,
+    /// The bounded worker queue is full.
+    QueueFull,
 }
 
 impl core::fmt::Display for BlockingTaskError {
@@ -249,6 +369,7 @@ impl core::fmt::Display for BlockingTaskError {
             Self::Spawn(message) => write!(formatter, "could not start Rust worker: {message}"),
             Self::Panic => formatter.write_str("Rust worker panicked"),
             Self::Disconnected => formatter.write_str("Rust worker exited without a result"),
+            Self::QueueFull => formatter.write_str("Rust worker queue is full"),
         }
     }
 }
@@ -256,6 +377,8 @@ impl core::fmt::Display for BlockingTaskError {
 impl std::error::Error for BlockingTaskError {}
 
 /// Runs CPU-bound or blocking Rust work away from the Godot main thread.
+/// Uses at most eight reusable workers and a 1024-job queue; a full queue
+/// returns [`BlockingTaskError::QueueFull`] instead of creating more threads.
 ///
 /// Engine objects and generated Godot APIs must stay on the main thread and
 /// therefore must not be moved into this closure. Dropping the returned
@@ -273,64 +396,143 @@ where
     spawn_blocking_with(&BLOCKING_WORKERS, work)
 }
 
-fn spawn_blocking_with<T, F>(registry: &Mutex<Vec<JoinHandle<()>>>, work: F) -> BlockingTask<T>
+type BlockingJob = Box<dyn FnOnce() + Send>;
+struct BlockingPool {
+    sender: Option<mpsc::SyncSender<BlockingJob>>,
+    workers: Vec<JoinHandle<()>>,
+    pending: Option<Arc<core::sync::atomic::AtomicUsize>>,
+}
+impl BlockingPool {
+    const fn new() -> Self {
+        Self {
+            sender: None,
+            workers: Vec::new(),
+            pending: None,
+        }
+    }
+    fn start(&mut self) -> Result<(), BlockingTaskError> {
+        if self.sender.is_some() {
+            return Ok(());
+        }
+        let (sender, receiver) = mpsc::sync_channel::<BlockingJob>(1024);
+        let receiver = Arc::new(Mutex::new(receiver));
+        let pending = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let count = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .clamp(1, 8);
+        for _ in 0..count {
+            let receiver = receiver.clone();
+            let pending = pending.clone();
+            let worker = std::thread::Builder::new()
+                .name("godot-rust-worker".to_owned())
+                .spawn(move || {
+                    loop {
+                        let job = receiver.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                        let Ok(job) = job else {
+                            break;
+                        };
+                        // Jobs isolate closure panics and always release their count.
+                        let _ = catch_unwind(AssertUnwindSafe(job));
+                        pending.fetch_sub(1, Ordering::Release);
+                    }
+                });
+            match worker {
+                Ok(worker) => self.workers.push(worker),
+                Err(error) => {
+                    drop(sender);
+                    for worker in self.workers.drain(..) {
+                        let _ = worker.join();
+                    }
+                    return Err(BlockingTaskError::Spawn(error.to_string()));
+                }
+            }
+        }
+        self.pending = Some(pending);
+        self.sender = Some(sender);
+        Ok(())
+    }
+}
+
+fn spawn_blocking_with<T, F>(registry: &Mutex<BlockingPool>, work: F) -> BlockingTask<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    reap_finished_workers(registry);
-    let mut workers = registry.lock().unwrap_or_else(|error| error.into_inner());
+    let wake = Arc::new(Mutex::new(None::<Waker>));
+    let completed = wake.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
-    let spawn = std::thread::Builder::new()
-        .name("godot-rust-worker".to_owned())
-        .spawn(move || {
-            let result = catch_unwind(AssertUnwindSafe(work)).map_err(|_| BlockingTaskError::Panic);
-            let _ = sender.send(result);
-        });
-    BlockingTask {
-        receiver: spawn.map_or_else(
-            |error| Err(BlockingTaskError::Spawn(error.to_string())),
-            |worker| {
-                workers.push(worker);
-                Ok(receiver)
-            },
-        ),
+    let mut pool = registry.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(error) = pool.start() {
+        drop(pool);
+        return BlockingTask {
+            receiver: Err(error),
+            wake,
+        };
     }
-}
-
-fn reap_finished_workers(registry: &Mutex<Vec<JoinHandle<()>>>) {
-    let finished = {
-        let mut workers = registry.lock().unwrap_or_else(|error| error.into_inner());
-        let mut finished = Vec::new();
-        let mut index = 0;
-        while index < workers.len() {
-            if workers[index].is_finished() {
-                finished.push(workers.swap_remove(index));
-            } else {
-                index += 1;
-            }
+    let pending = pool
+        .pending
+        .as_ref()
+        .expect("started pool has a counter")
+        .clone();
+    pending.fetch_add(1, Ordering::Relaxed);
+    let job = Box::new(move || {
+        let result = catch_unwind(AssertUnwindSafe(work)).map_err(|_| BlockingTaskError::Panic);
+        let _ = sender.send(result);
+        let waker = completed.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(waker) = waker {
+            waker.wake();
         }
-        finished
+    });
+    let submitted = pool
+        .sender
+        .as_ref()
+        .expect("started pool has a sender")
+        .try_send(job);
+    // Rejecting a queued closure drops user-owned captures; do that after
+    // releasing the registry lock so their destructors can submit other work.
+    drop(pool);
+    let receiver = match submitted {
+        Ok(()) => Ok(receiver),
+        Err(error) => {
+            pending.fetch_sub(1, Ordering::Release);
+            Err(match error {
+                mpsc::TrySendError::Full(_) => BlockingTaskError::QueueFull,
+                mpsc::TrySendError::Disconnected(_) => BlockingTaskError::Disconnected,
+            })
+        }
     };
-    for worker in finished {
-        let _ = worker.join();
-    }
+    BlockingTask { receiver, wake }
 }
 
 pub(crate) fn blocking_workers_finished() -> bool {
     blocking_workers_finished_in(&BLOCKING_WORKERS)
 }
 
-fn blocking_workers_finished_in(registry: &Mutex<Vec<JoinHandle<()>>>) -> bool {
-    reap_finished_workers(registry);
-    registry
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .is_empty()
+fn blocking_workers_finished_in(registry: &Mutex<BlockingPool>) -> bool {
+    let workers = {
+        let mut pool = registry.lock().unwrap_or_else(|e| e.into_inner());
+        if pool
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.load(Ordering::Acquire) != 0)
+        {
+            return false;
+        }
+        // Idle workers also execute module code: close and join them before
+        // telling the Host that this generation can safely be unloaded.
+        pool.sender.take();
+        pool.pending.take();
+        core::mem::take(&mut pool.workers)
+    };
+    for worker in workers {
+        let _ = worker.join();
+    }
+    true
 }
 
 /// Future returned by [`spawn_blocking`].
 pub struct BlockingTask<T> {
+    wake: Arc<Mutex<Option<Waker>>>,
     receiver: Result<Receiver<Result<T, BlockingTaskError>>, BlockingTaskError>,
 }
 
@@ -339,7 +541,8 @@ impl<T> Unpin for BlockingTask<T> {}
 impl<T> Future for BlockingTask<T> {
     type Output = Result<T, BlockingTaskError>;
 
-    fn poll(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        *self.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(context.waker().clone());
         let receiver = match &self.receiver {
             Ok(receiver) => receiver,
             Err(_) => {
@@ -401,7 +604,7 @@ impl SignalFuture {
 impl<Args: SignalResult> Future for SignalFuture<Args> {
     type Output = EngineResult<Args>;
 
-    fn poll(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if matches!(self.state, SignalFutureState::New(_)) {
             let SignalFutureState::New(encoded) =
                 core::mem::replace(&mut self.state, SignalFutureState::Done)
@@ -419,6 +622,7 @@ impl<Args: SignalResult> Future for SignalFuture<Args> {
             match crate::module::watch_signal(value) {
                 Ok(token) => {
                     self.state = SignalFutureState::Watching(token);
+                    context.waker().wake_by_ref();
                     return Poll::Pending;
                 }
                 Err(error) => return Poll::Ready(Err(error)),
@@ -434,7 +638,10 @@ impl<Args: SignalResult> Future for SignalFuture<Args> {
             crate::module::poll_signal(token).map(|fired| fired.then(Vec::new))
         };
         match result {
-            Ok(None) => Poll::Pending,
+            Ok(None) => {
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
             Ok(Some(arguments)) => {
                 self.state = SignalFutureState::Done;
                 Poll::Ready(Args::from_signal_arguments(arguments))
@@ -458,19 +665,58 @@ impl<Args> Drop for SignalFuture<Args> {
 
 #[doc(hidden)]
 pub fn poll_frame() {
-    let mut active = TASKS.with(|tasks| core::mem::take(&mut *tasks.borrow_mut()));
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for mut task in active.drain(..) {
+    let now = Instant::now();
+    let active_count = TASKS.with(|tasks| tasks.borrow().len());
+    TIMERS.with(|timers| {
+        let mut timers = timers.borrow_mut();
+        // Cancelled/completed timers retain weak entries only. Compact them
+        // amortized, so long timeouts cannot accumulate dead registrations.
+        if timers.len() > active_count.saturating_mul(2).saturating_add(64) {
+            timers.retain(|timer| timer.registration.strong_count() != 0);
+        }
+    });
+    loop {
+        let timer = TIMERS.with(|timers| {
+            let mut timers = timers.borrow_mut();
+            if timers.peek().is_some_and(|timer| {
+                timer.deadline <= now || timer.registration.strong_count() == 0
+            }) {
+                timers.pop()
+            } else {
+                None
+            }
+        });
+        let Some(timer) = timer else {
+            break;
+        };
+        if let Some(registration) = timer.registration.upgrade() {
+            registration.wake.wake_by_ref();
+        }
+    }
+    let ready = READY.with(Arc::clone);
+    let count = ready.lock().unwrap_or_else(|e| e.into_inner()).len();
+    // Snapshot the frame's work count. Self-wakes and tasks spawned while
+    // polling belong to the next frame, preserving next_frame semantics.
+    for _ in 0..count {
+        let id = ready.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+        let Some(id) = id else {
+            break;
+        };
+        let Some(mut task) = TASKS.with(|tasks| tasks.borrow_mut().remove(&id)) else {
+            continue;
+        };
+        task.wake.queued.store(false, Ordering::Release);
         if task.cancelled.load(Ordering::Acquire)
             || task
                 .scope_cancelled
                 .as_ref()
-                .is_some_and(|scope| scope.load(Ordering::Acquire))
+                .is_some_and(|scope| scope.cancelled.load(Ordering::Acquire))
         {
             drop_task_future(&mut task);
             continue;
         }
+        let waker = Waker::from(task.wake.clone());
+        let mut context = Context::from_waker(&waker);
         let poll = catch_unwind(AssertUnwindSafe(|| {
             task.future
                 .as_mut()
@@ -479,7 +725,9 @@ pub fn poll_frame() {
                 .poll(&mut context)
         }));
         match poll {
-            Ok(Poll::Pending) => TASKS.with(|tasks| tasks.borrow_mut().push(task)),
+            Ok(Poll::Pending) => {
+                TASKS.with(|tasks| tasks.borrow_mut().insert(id, task));
+            }
             Ok(Poll::Ready(())) => drop_task_future(&mut task),
             Err(_) => {
                 crate::godot_warn!("Rust task {} panicked and was cancelled", task.id);
@@ -501,13 +749,16 @@ pub fn cancel_all() {
 
     let _scope = CancellationScope(CANCELLING_TASKS.replace(true));
     let tasks = TASKS.with(|tasks| core::mem::take(&mut *tasks.borrow_mut()));
-    for mut task in tasks {
+    for (_, mut task) in tasks {
         task.cancelled.store(true, Ordering::Release);
         drop_task_future(&mut task);
     }
+    READY.with(|ready| ready.lock().unwrap_or_else(|e| e.into_inner()).clear());
+    TIMERS.with(|timers| timers.borrow_mut().clear());
 }
 
 fn drop_task_future(task: &mut Task) {
+    task.wake.alive.store(false, Ordering::Release);
     let Some(future) = task.future.take() else {
         return;
     };
@@ -519,19 +770,10 @@ fn drop_task_future(task: &mut Task) {
     }
 }
 
+#[cfg(test)]
 fn noop_waker() -> Waker {
-    // SAFETY: The vtable never dereferences or owns the null data pointer.
-    unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE)) }
+    Waker::noop().clone()
 }
-
-unsafe fn clone_noop(_: *const ()) -> RawWaker {
-    RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE)
-}
-
-unsafe fn wake_noop(_: *const ()) {}
-
-static NOOP_WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(clone_noop, wake_noop, wake_noop, wake_noop);
 
 #[cfg(test)]
 mod tests {
@@ -539,6 +781,137 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::Duration;
+
+    #[test]
+    fn dormant_tasks_wait_for_wake_and_cancellation_wakes_them() {
+        cancel_all();
+        let polls = Rc::new(Cell::new(0));
+        let scope = TaskScope::new();
+        for _ in 0..1000 {
+            let polls = polls.clone();
+            scope.spawn(std::future::poll_fn(move |_| {
+                polls.set(polls.get() + 1);
+                Poll::<()>::Pending
+            }));
+        }
+        poll_frame();
+        assert_eq!(polls.get(), 1000);
+        for _ in 0..100 {
+            poll_frame();
+        }
+        assert_eq!(
+            polls.get(),
+            1000,
+            "dormant tasks must not be polled every frame"
+        );
+        scope.cancel();
+        poll_frame();
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+    }
+
+    #[test]
+    fn registering_live_scoped_tasks_has_linear_compaction_work() {
+        cancel_all();
+        const TASK_COUNT: usize = 4096;
+        let scope = TaskScope::new();
+        for _ in 0..TASK_COUNT {
+            scope.spawn(std::future::pending());
+        }
+        assert_eq!(scope.cancelled.tasks.borrow().len(), TASK_COUNT);
+        assert!(
+            scope.cancelled.compaction_visits.get() < TASK_COUNT * 2,
+            "scope registration scans must grow linearly with concurrent tasks"
+        );
+        poll_frame();
+        scope.cancel();
+        poll_frame();
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+    }
+
+    #[test]
+    fn completed_scoped_tasks_do_not_accumulate_with_retained_handles() {
+        cancel_all();
+        const TASK_COUNT: usize = 4096;
+        let scope = TaskScope::new();
+        let mut handles = Vec::with_capacity(TASK_COUNT);
+        for _ in 0..TASK_COUNT {
+            handles.push(scope.spawn(async {}));
+            poll_frame();
+        }
+        assert!(
+            scope.cancelled.tasks.borrow().len() <= 128,
+            "completed tasks must be pruned even while their handles remain alive"
+        );
+        assert!(scope.cancelled.compaction_visits.get() <= TASK_COUNT * 2);
+        scope.cancel();
+        assert!(handles.iter().all(TaskHandle::is_cancelled));
+        poll_frame();
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+    }
+
+    #[test]
+    fn a_worker_wake_reschedules_a_main_thread_future() {
+        cancel_all();
+        let wake = Arc::new(Mutex::new(None::<Waker>));
+        let captured = wake.clone();
+        let polls = Rc::new(Cell::new(0));
+        let observed = polls.clone();
+        spawn(std::future::poll_fn(move |context| {
+            observed.set(observed.get() + 1);
+            *captured.lock().unwrap() = Some(context.waker().clone());
+            if observed.get() == 2 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }));
+        poll_frame();
+        poll_frame();
+        assert_eq!(polls.get(), 1);
+        std::thread::spawn(move || wake.lock().unwrap().take().unwrap().wake())
+            .join()
+            .unwrap();
+        poll_frame();
+        assert_eq!(polls.get(), 2);
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+    }
+
+    #[test]
+    fn cancelled_timers_release_wakers_and_completed_timeouts_do_not_accumulate() {
+        cancel_all();
+        for _ in 0..256 {
+            spawn(async {
+                let _ = timeout(Duration::from_secs(86_400), next_frame()).await;
+            });
+        }
+        poll_frame();
+        poll_frame();
+        poll_frame();
+        TIMERS.with(|timers| assert!(timers.borrow().is_empty()));
+        TASKS.with(|tasks| assert!(tasks.borrow().is_empty()));
+    }
+
+    #[test]
+    fn timers_resume_sleeping_tasks_and_time_out_dormant_futures() {
+        cancel_all();
+        let completed = Rc::new(Cell::new(0));
+        let observed = completed.clone();
+        spawn(async move {
+            sleep(Duration::from_millis(1)).await;
+            assert_eq!(
+                timeout(Duration::from_millis(1), std::future::pending::<()>()).await,
+                Err(TimeoutError)
+            );
+            observed.set(1);
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while completed.get() == 0 {
+            assert!(Instant::now() < deadline);
+            poll_frame();
+            std::thread::yield_now();
+        }
+        cancel_all();
+    }
 
     #[test]
     fn dropping_scope_cancels_only_its_tasks_before_another_poll() {
@@ -693,8 +1066,43 @@ mod tests {
     }
 
     #[test]
+    fn blocking_work_reuses_a_bounded_pool() {
+        let registry = Mutex::new(BlockingPool::new());
+        let gate = Arc::new(AtomicBool::new(false));
+        let mut tasks = Vec::new();
+        for value in 0..64 {
+            let gate = gate.clone();
+            tasks.push(Box::pin(spawn_blocking_with(&registry, move || {
+                while !gate.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                value
+            })));
+        }
+        assert!(registry.lock().unwrap().workers.len() <= 8);
+        gate.store(true, Ordering::Release);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        for (index, mut task) in tasks.into_iter().enumerate() {
+            loop {
+                if let Poll::Ready(value) = task.as_mut().poll(&mut context) {
+                    assert_eq!(value, Ok(index));
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        }
+        while !blocking_workers_finished_in(&registry) {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
     fn detached_blocking_workers_prevent_unloading_until_they_finish() {
-        let registry = Mutex::new(Vec::new());
+        let registry = Mutex::new(BlockingPool::new());
         let (release, wait) = mpsc::sync_channel(0);
         let task = spawn_blocking_with(&registry, move || wait.recv().unwrap());
         drop(task);
@@ -706,7 +1114,7 @@ mod tests {
             assert!(Instant::now() < deadline, "worker did not finish");
             std::thread::yield_now();
         }
-        assert!(registry.lock().unwrap().is_empty());
+        assert!(registry.lock().unwrap().workers.is_empty());
     }
 
     #[test]
@@ -741,7 +1149,7 @@ mod tests {
             }
         }
 
-        let registry = Mutex::new(Vec::new());
+        let registry = Mutex::new(BlockingPool::new());
         let mut value = Box::pin(spawn_blocking_with(&registry, || 42_u32));
         assert_eq!(wait_for(&mut value), Ok(42));
 
@@ -758,6 +1166,6 @@ mod tests {
             assert!(Instant::now() < deadline, "workers did not finish");
             std::thread::yield_now();
         }
-        assert!(registry.lock().unwrap().is_empty());
+        assert!(registry.lock().unwrap().workers.is_empty());
     }
 }

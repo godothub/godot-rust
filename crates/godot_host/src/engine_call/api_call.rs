@@ -247,6 +247,35 @@ unsafe fn call_godot_api(
     {
         *pointer = value.as_const_ptr();
     }
+    if resolved.contract.mutates_base
+        && matches!(
+            resolved.contract.base_value.ptrcall_type,
+            AbiPtrcallType::ARRAY | AbiPtrcallType::DICTIONARY
+        )
+    {
+        let type_ = if resolved.contract.base_value.ptrcall_type == AbiPtrcallType::ARRAY {
+            GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_ARRAY
+        } else {
+            GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_DICTIONARY
+        };
+        let codec = crate::variant_codec::VariantCodec::new(interface)
+            .ok_or_else(|| EngineCallError::internal("container Variant codec is unavailable"))?;
+        let member = match resolved.target {
+            ResolvedTarget::IndexedSetter(_) => "indexed_set",
+            ResolvedTarget::KeyedSetter(_) => "keyed_set",
+            _ => resolved.contract.member_name.as_deref().unwrap_or(""),
+        };
+        crate::dynamic_value::validate_container_mutation(
+            &codec,
+            type_,
+            native_base
+                .as_ref()
+                .expect("validated receiver")
+                .as_const_ptr(),
+            member,
+            argument_pointers.as_slice(),
+        )?;
+    }
     let mut native_output = NativeValue::empty_output(interface, &resolved.contract.return_value)?;
 
     match resolved.target {

@@ -216,9 +216,9 @@ impl NativeCallable {
             "RefCounted",
             "Callable target",
         )?;
-        let values = crate::variant::Array::from(vec![crate::variant::Variant::from(
+        let values = crate::variant::Array::from_vec(vec![crate::variant::Variant::from(
             ObjectRef::<Object>::__from_instance_id(object_id),
-        )]);
+        )])?;
         let arguments = super::dynamic_value::NativeArray::from_rust(interface, &values, None, 0)?;
         let unbind = builtin_method(interface, "unbind", 755_001_590)?
             .ok_or_else(|| EngineError::unavailable("Callable.unbind is unavailable"))?;

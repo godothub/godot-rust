@@ -1261,6 +1261,39 @@ fn invoke_godot_api_inner(
     {
         *pointer = value.as_const_ptr();
     }
+    if mutates_base
+        && matches!(
+            spec.base_value.ptrcall_type,
+            AbiPtrcallType::ARRAY | AbiPtrcallType::DICTIONARY
+        )
+    {
+        let receiver = native_base
+            .as_ref()
+            .expect("validated container receiver")
+            .to_native_variant(interface, spec.base_value.ptrcall_type)?
+            .to_rust(0)?;
+        let values = native_arguments
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .to_native_variant(
+                        interface,
+                        contracts
+                            .get(index)
+                            .unwrap_or(&variant_contract)
+                            .ptrcall_type,
+                    )?
+                    .to_rust(0)
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        let member = match spec.kind {
+            AbiGodotApiKind::BUILTIN_INDEXED_SETTER => "indexed_set",
+            AbiGodotApiKind::BUILTIN_KEYED_SETTER => "keyed_set",
+            _ => member_name,
+        };
+        super::container::validate_mutation(receiver, member, &values)?;
+    }
     let argument_pointer = if argument_pointers.is_empty() {
         ptr::null()
     } else {

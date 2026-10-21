@@ -25,6 +25,222 @@ const SIZE_HASH: i64 = 3_173_160_232;
 const RESIZE_HASH: i64 = 848_867_239;
 const KEYS_HASH: i64 = 4_144_163_970;
 
+pub(crate) fn ensure_writable(
+    interface: EngineInterface,
+    type_: GDExtensionVariantType,
+    value: GDExtensionConstTypePtr,
+) -> Result<(), ValueError> {
+    let read_only = builtin_method(interface, type_, c"is_read_only", 3_918_633_141)?
+        .ok_or_else(|| internal("container read-only check is unavailable"))?;
+    let mut result = 0_u8;
+    // SAFETY: Receiver is an initialized Array/Dictionary and result is a bool slot.
+    unsafe {
+        read_only(
+            value.cast_mut(),
+            ptr::null(),
+            ptr::from_mut(&mut result).cast(),
+            0,
+        )
+    };
+    if result != 0 {
+        Err(invalid("Godot container is read-only"))
+    } else {
+        Ok(())
+    }
+}
+
+fn container_integer(
+    interface: EngineInterface,
+    type_: GDExtensionVariantType,
+    value: GDExtensionConstTypePtr,
+    name: &'static core::ffi::CStr,
+) -> Result<i64, ValueError> {
+    let method = builtin_method(interface, type_, name, SIZE_HASH)?
+        .ok_or_else(|| internal("container metadata is unavailable"))?;
+    let mut result = 0_i64;
+    // SAFETY: Authenticated zero-argument metadata getter returns int64.
+    unsafe {
+        method(
+            value.cast_mut(),
+            ptr::null(),
+            ptr::from_mut(&mut result).cast(),
+            0,
+        )
+    };
+    Ok(result)
+}
+
+fn container_class(
+    interface: EngineInterface,
+    type_: GDExtensionVariantType,
+    value: GDExtensionConstTypePtr,
+    name: &'static core::ffi::CStr,
+) -> Result<String, ValueError> {
+    let method = builtin_method(interface, type_, name, 1_825_232_092)?
+        .ok_or_else(|| internal("container class metadata is unavailable"))?;
+    let mut result = OwnedStringName::empty(interface)
+        .ok_or_else(|| internal("StringName construction failed"))?;
+    let destroy = destructor(
+        interface,
+        GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_STRING_NAME,
+    )?
+    .ok_or_else(|| internal("StringName destructor is unavailable"))?;
+    // SAFETY: Release the empty value, then initialize the exact StringName return slot.
+    unsafe {
+        destroy(result.as_mut_ptr());
+        method(value.cast_mut(), ptr::null(), result.as_mut_ptr(), 0)
+    };
+    result
+        .to_utf8()
+        .map_err(|_| internal("container class metadata is invalid UTF-8"))
+}
+
+fn check_element(
+    codec: &VariantCodec,
+    type_: i64,
+    class: &str,
+    value: GDExtensionConstVariantPtr,
+) -> Result<(), ValueError> {
+    if type_ == 0 {
+        return Ok(());
+    }
+    let actual = codec
+        .variant_type(value)
+        .ok_or_else(|| invalid("invalid container element Variant"))?
+        .0 as i64;
+    if type_ == 24 {
+        if actual == 0 {
+            return Ok(());
+        }
+        if actual != 24 {
+            return Err(invalid("container element must be an Object"));
+        }
+        let object = codec
+            .read_object_id(value)
+            .map_err(|_| invalid("invalid container Object"))?;
+        if object == 0 {
+            return Ok(());
+        }
+        let interface = codec.interface();
+        let name = OwnedStringName::new(interface, class)
+            .ok_or_else(|| internal("class name construction failed"))?;
+        let lookup = interface
+            .object_get_instance_from_id
+            .ok_or_else(|| internal("Object lookup is unavailable"))?;
+        let get_tag = interface
+            .classdb_get_class_tag
+            .ok_or_else(|| internal("class lookup is unavailable"))?;
+        let cast = interface
+            .object_cast_to
+            .ok_or_else(|| internal("Object class check is unavailable"))?;
+        // SAFETY: Godot resolves both the stable identity and the initialized class name.
+        let valid = unsafe {
+            let object = lookup(object);
+            let tag = get_tag(name.as_ptr());
+            !object.is_null() && !tag.is_null() && !cast(object, tag).is_null()
+        };
+        if valid {
+            return Ok(());
+        }
+    } else if actual == type_ {
+        return Ok(());
+    }
+    Err(invalid(
+        "value does not match the Godot container type constraint",
+    ))
+}
+
+pub(crate) fn validate_container_mutation(
+    codec: &VariantCodec,
+    type_: GDExtensionVariantType,
+    receiver: GDExtensionConstTypePtr,
+    member: &str,
+    arguments: &[GDExtensionConstTypePtr],
+) -> Result<(), ValueError> {
+    if member != "make_read_only" {
+        ensure_writable(codec.interface(), type_, receiver)?;
+    }
+    let interface = codec.interface();
+    if type_ == array_type() {
+        let type_id = container_integer(interface, type_, receiver, c"get_typed_builtin")?;
+        let class = if type_id == 24 {
+            container_class(interface, type_, receiver, c"get_typed_class_name")?
+        } else {
+            String::new()
+        };
+        if type_id == 0 {
+            return Ok(());
+        }
+        let value_index = match member {
+            "append" | "push_back" | "push_front" | "fill" => Some(0),
+            "set" | "insert" | "indexed_set" => Some(1),
+            _ => None,
+        };
+        if let Some(index) = value_index {
+            let value = arguments
+                .get(index)
+                .ok_or_else(|| invalid("container mutation omitted a value"))?;
+            check_element(codec, type_id, &class, value.cast())?;
+        } else if matches!(member, "assign" | "append_array") {
+            let source = *arguments
+                .first()
+                .ok_or_else(|| invalid("container assignment omitted its source"))?;
+            let size = builtin_method(interface, array_type(), c"size", SIZE_HASH)?;
+            let count = builtin_size(size, source, "invalid Array source size")?;
+            let get = interface
+                .array_operator_index_const
+                .ok_or_else(|| internal("Array index operation is unavailable"))?;
+            for index in 0..count {
+                // SAFETY: Index is below the source's current size on the Godot thread.
+                let value = unsafe { get(source, index as i64) };
+                if value.is_null() {
+                    return Err(invalid("invalid Array source element"));
+                }
+                check_element(codec, type_id, &class, value.cast_const())?;
+            }
+        }
+    } else if type_ == dictionary_type() {
+        let key_type = container_integer(interface, type_, receiver, c"get_typed_key_builtin")?;
+        let value_type = container_integer(interface, type_, receiver, c"get_typed_value_builtin")?;
+        let key_class = if key_type == 24 {
+            container_class(interface, type_, receiver, c"get_typed_key_class_name")?
+        } else {
+            String::new()
+        };
+        let value_class = if value_type == 24 {
+            container_class(interface, type_, receiver, c"get_typed_value_class_name")?
+        } else {
+            String::new()
+        };
+        if key_type == 0 && value_type == 0 {
+            return Ok(());
+        }
+        if matches!(member, "set" | "keyed_set" | "get_or_add") {
+            if let Some(key) = arguments.first() {
+                check_element(codec, key_type, &key_class, key.cast())?;
+            }
+            if let Some(value) = arguments.get(1) {
+                check_element(codec, value_type, &value_class, value.cast())?;
+            }
+        } else if matches!(member, "assign" | "merge") {
+            let source = *arguments
+                .first()
+                .ok_or_else(|| invalid("Dictionary assignment omitted its source"))?;
+            let borrowed = BorrowedDictionary {
+                interface,
+                storage: source,
+            };
+            let keys = borrowed.keys()?;
+            for index in 0..keys.len()? {
+                let key = keys.get(index)?;
+                check_element(codec, key_type, &key_class, key)?;
+                check_element(codec, value_type, &value_class, borrowed.get(key)?)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) enum NativeDynamic {
     Variant(OwnedVariant),
     Array(OwnedArray),
@@ -40,6 +256,7 @@ pub(crate) struct DynamicCallBacking {
 pub(crate) struct EncodedDynamic {
     pub(crate) bytes: Vec<u8>,
     pub(crate) callable_tokens: Vec<u64>,
+    pub(crate) container_tokens: crate::container::Leases,
 }
 
 impl DynamicCallBacking {
@@ -59,6 +276,74 @@ impl Drop for DynamicCallBacking {
 }
 
 impl NativeDynamic {
+    pub(crate) fn from_shared_variant(
+        codec: &VariantCodec,
+        kind: AbiValueType,
+        value: &OwnedVariant,
+    ) -> Result<Self, ValueError> {
+        let interface = codec.interface();
+        let get_to = interface
+            .get_variant_to_type_constructor
+            .ok_or_else(|| internal("builtin conversion is unavailable"))?;
+        let type_ = builtin_variant_type(match kind {
+            AbiValueType::ARRAY => "Array",
+            AbiValueType::DICTIONARY => "Dictionary",
+            _ => return Err(invalid("invalid container kind")),
+        })
+        .ok_or_else(|| internal("container Variant type is unavailable"))?;
+        if codec.variant_type(value.as_ptr()) != Some(type_) {
+            return Err(invalid("container has the wrong native type"));
+        }
+        // SAFETY: This is an authenticated builtin Variant type.
+        let convert = unsafe { get_to(type_) }
+            .ok_or_else(|| internal("container conversion is unavailable"))?;
+        let mut result = Self::empty(interface, kind)?;
+        match &mut result {
+            Self::Array(array) => {
+                // SAFETY: Replace the initialized empty wrapper with a shared copy of a live Array.
+                unsafe {
+                    array.destroy.expect("Array destructor")(array.as_mut_ptr());
+                    convert(array.as_mut_ptr(), value.as_ptr().cast_mut());
+                }
+            }
+            Self::Dictionary(dictionary) => {
+                // SAFETY: Replace the initialized empty wrapper with a shared copy of a live Dictionary.
+                unsafe {
+                    dictionary.destroy.expect("Dictionary destructor")(dictionary.as_mut_ptr());
+                    convert(dictionary.as_mut_ptr(), value.as_ptr().cast_mut());
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn assign_shared(
+        codec: &VariantCodec,
+        kind: AbiValueType,
+        target: &OwnedVariant,
+        source: &Self,
+    ) -> Result<(), ValueError> {
+        let mut target = Self::from_shared_variant(codec, kind, target)?;
+        let type_ = match kind {
+            AbiValueType::ARRAY => array_type(),
+            AbiValueType::DICTIONARY => dictionary_type(),
+            _ => return Err(invalid("invalid container kind")),
+        };
+        ensure_writable(codec.interface(), type_, target.as_const_ptr())?;
+        let hash = if kind == AbiValueType::ARRAY {
+            2_307_260_970
+        } else {
+            3_642_266_950
+        };
+        let assign = builtin_method(codec.interface(), type_, c"assign", hash)?
+            .ok_or_else(|| internal("container assign is unavailable"))?;
+        let arguments = [source.as_const_ptr()];
+        validate_container_mutation(codec, type_, target.as_const_ptr(), "assign", &arguments)?;
+        // SAFETY: Receiver and source are live containers of the same authenticated builtin type.
+        unsafe { assign(target.as_mut_ptr(), arguments.as_ptr(), ptr::null_mut(), 1) };
+        Ok(())
+    }
     /// Copies signal arguments before Godot releases its borrowed call frame.
     pub(crate) fn from_variant_arguments(
         interface: EngineInterface,
@@ -207,6 +492,21 @@ impl NativeDynamic {
         &self,
         context: Option<&EngineCallContext>,
     ) -> Result<EncodedDynamic, ValueError> {
+        self.to_bytes_with_snapshot(context, false)
+    }
+
+    pub(crate) fn to_bytes_snapshot(
+        &self,
+        context: Option<&EngineCallContext>,
+    ) -> Result<EncodedDynamic, ValueError> {
+        self.to_bytes_with_snapshot(context, true)
+    }
+
+    fn to_bytes_with_snapshot(
+        &self,
+        context: Option<&EngineCallContext>,
+        snapshot: bool,
+    ) -> Result<EncodedDynamic, ValueError> {
         let interface = match self {
             Self::Variant(value) => value.interface(),
             Self::Array(value) => value.interface,
@@ -215,6 +515,7 @@ impl NativeDynamic {
         let codec = VariantCodec::new(interface)
             .ok_or_else(|| internal("Godot Variant codecs are unavailable"))?;
         let mut writer = Writer::new(context);
+        writer.snapshot_top = snapshot;
         match self {
             Self::Variant(value) => writer.variant(&codec, value.as_ptr(), 0)?,
             Self::Array(value) => writer.array(&codec, value, 0)?,
@@ -260,6 +561,7 @@ pub(crate) fn decode_dynamic_variant(
         let token = context.retain_dynamic(
             NativeDynamic::Variant(retained_value),
             encoded.callable_tokens,
+            encoded.container_tokens,
         )?;
         if let Err(error) = set_dynamic_ownership(&mut bytes, token) {
             let _ = context.release_dynamic(token);
@@ -345,7 +647,7 @@ pub(crate) fn set_dynamic_ownership(bytes: &mut [u8], token: u64) -> Result<(), 
 }
 
 impl NativeDynamic {
-    fn into_variant(self, codec: &VariantCodec) -> Result<OwnedVariant, ValueError> {
+    pub(crate) fn into_variant(self, codec: &VariantCodec) -> Result<OwnedVariant, ValueError> {
         match self {
             Self::Variant(value) => Ok(value),
             Self::Array(value) => value.to_variant(codec),
@@ -363,6 +665,29 @@ pub(crate) struct OwnedArray {
 }
 
 impl OwnedArray {
+    fn validate_type(&self, element: &str) -> Result<(), ValueError> {
+        let actual = container_integer(
+            self.interface,
+            array_type(),
+            self.as_ptr(),
+            c"get_typed_builtin",
+        )?;
+        let expected = builtin_variant_type(element).map_or(24, |kind| kind.0 as i64);
+        if actual != expected {
+            return Err(invalid("Array has incompatible engine element constraints"));
+        }
+        if expected == 24
+            && container_class(
+                self.interface,
+                array_type(),
+                self.as_ptr(),
+                c"get_typed_class_name",
+            )? != element
+        {
+            return Err(invalid("Array has incompatible engine class constraints"));
+        }
+        Ok(())
+    }
     fn empty(interface: EngineInterface) -> Result<Self, ValueError> {
         let mut value = Self {
             interface,
@@ -619,6 +944,13 @@ impl<'a> Reader<'a> {
 
     fn variant(&mut self, codec: &VariantCodec, depth: usize) -> Result<OwnedVariant, ValueError> {
         let node = self.node(depth)?;
+        if node.flags == godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER {
+            let token =
+                read_u64(node.payload, 0).ok_or_else(|| invalid("invalid container token"))?;
+            return crate::container::get(AbiValueType(node.type_), token)?
+                .copy_value()
+                .map_err(|_| internal("container Variant copy failed"));
+        }
         match node.type_ {
             37 => self
                 .array_payload(codec, node, depth, None)?
@@ -686,6 +1018,19 @@ impl<'a> Reader<'a> {
         typed_array_element: Option<&str>,
     ) -> Result<OwnedArray, ValueError> {
         check_depth(depth)?;
+        if node.flags == godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER {
+            let token = read_u64(node.payload, 0).ok_or_else(|| invalid("invalid Array token"))?;
+            let value = crate::container::get(AbiValueType::ARRAY, token)?;
+            let NativeDynamic::Array(array) =
+                NativeDynamic::from_shared_variant(codec, AbiValueType::ARRAY, &value)?
+            else {
+                unreachable!()
+            };
+            if let Some(element) = typed_array_element {
+                array.validate_type(element)?;
+            }
+            return Ok(array);
+        }
         let count = container_count(node.payload)?;
         let payload_end = node.payload_end;
         self.offset = node.payload_start + 8;
@@ -694,8 +1039,32 @@ impl<'a> Reader<'a> {
             result.set_typed(element)?;
         }
         result.resize(count)?;
+        let constraint = if typed_array_element.is_some() {
+            let type_id = container_integer(
+                codec.interface(),
+                array_type(),
+                result.as_ptr(),
+                c"get_typed_builtin",
+            )?;
+            let class = if type_id == 24 {
+                container_class(
+                    codec.interface(),
+                    array_type(),
+                    result.as_ptr(),
+                    c"get_typed_class_name",
+                )?
+            } else {
+                String::new()
+            };
+            Some((type_id, class))
+        } else {
+            None
+        };
         for index in 0..count {
             let value = self.variant(codec, depth + 1)?;
+            if let Some((type_id, class)) = &constraint {
+                check_element(codec, *type_id, class, value.as_ptr())?;
+            }
             result.set(index, &value)?;
         }
         if self.offset != payload_end {
@@ -711,6 +1080,17 @@ impl<'a> Reader<'a> {
         depth: usize,
     ) -> Result<OwnedDictionary, ValueError> {
         check_depth(depth)?;
+        if node.flags == godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER {
+            let token =
+                read_u64(node.payload, 0).ok_or_else(|| invalid("invalid Dictionary token"))?;
+            let value = crate::container::get(AbiValueType::DICTIONARY, token)?;
+            let NativeDynamic::Dictionary(dictionary) =
+                NativeDynamic::from_shared_variant(codec, AbiValueType::DICTIONARY, &value)?
+            else {
+                unreachable!()
+            };
+            return Ok(dictionary);
+        }
         let count = container_count(node.payload)?;
         let payload_end = node.payload_end;
         self.offset = node.payload_start + 8;
@@ -742,7 +1122,7 @@ impl<'a> Reader<'a> {
             header[8..16].try_into().expect("u64 width"),
         ))
         .map_err(|_| invalid("dynamic Godot argument length is out of range"))?;
-        if flags != 0 {
+        if flags != 0 && flags != godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER {
             return Err(invalid("dynamic Godot argument uses unsupported ABI flags"));
         }
         let payload_start = header_end;
@@ -753,9 +1133,17 @@ impl<'a> Reader<'a> {
             .bytes
             .get(payload_start..payload_end)
             .ok_or_else(|| invalid("dynamic Godot argument payload is truncated"))?;
+        if flags == godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER
+            && (!matches!(type_, 37 | 38)
+                || payload.len() != 8
+                || read_u64(payload, 0).is_none_or(|token| token == 0))
+        {
+            return Err(invalid("invalid shared-container node"));
+        }
         self.offset = payload_end;
         Ok(Node {
             type_,
+            flags,
             payload,
             payload_start,
             payload_end,
@@ -765,6 +1153,7 @@ impl<'a> Reader<'a> {
 
 struct Node<'a> {
     type_: u32,
+    flags: u32,
     payload: &'a [u8],
     payload_start: usize,
     payload_end: usize,
@@ -774,6 +1163,8 @@ struct Writer {
     bytes: Vec<u8>,
     context: *const EngineCallContext,
     callable_tokens: Vec<u64>,
+    container_tokens: Vec<u64>,
+    snapshot_top: bool,
 }
 
 impl Writer {
@@ -787,6 +1178,8 @@ impl Writer {
             bytes,
             context: context.map_or(ptr::null(), ptr::from_ref),
             callable_tokens: Vec::new(),
+            container_tokens: Vec::new(),
+            snapshot_top: false,
         }
     }
 
@@ -799,6 +1192,7 @@ impl Writer {
         Ok(EncodedDynamic {
             bytes: core::mem::take(&mut self.bytes),
             callable_tokens: core::mem::take(&mut self.callable_tokens),
+            container_tokens: crate::container::Leases(core::mem::take(&mut self.container_tokens)),
         })
     }
 
@@ -883,7 +1277,7 @@ impl Writer {
         value: &OwnedArray,
         depth: usize,
     ) -> Result<(), ValueError> {
-        self.array_elements(codec, value.as_ptr(), value.len()?, depth)
+        self.borrowed_array(codec, value.as_ptr(), depth)
     }
 
     fn dictionary(
@@ -892,7 +1286,7 @@ impl Writer {
         value: &OwnedDictionary,
         depth: usize,
     ) -> Result<(), ValueError> {
-        self.dictionary_entries(codec, value, depth)
+        self.borrowed_dictionary(codec, value.as_ptr(), depth)
     }
 
     fn borrowed_array(
@@ -901,6 +1295,9 @@ impl Writer {
         value: GDExtensionConstTypePtr,
         depth: usize,
     ) -> Result<(), ValueError> {
+        if !(self.context.is_null() || self.snapshot_top && depth == 0) {
+            return self.container(codec, AbiValueType::ARRAY, value);
+        }
         let size = builtin_method(codec.interface(), array_type(), c"size", SIZE_HASH)?;
         let count = builtin_size(size, value, "Godot Array returned an invalid size")?;
         self.array_elements(codec, value, count, depth)
@@ -940,6 +1337,9 @@ impl Writer {
         value: GDExtensionConstTypePtr,
         depth: usize,
     ) -> Result<(), ValueError> {
+        if !(self.context.is_null() || self.snapshot_top && depth == 0) {
+            return self.container(codec, AbiValueType::DICTIONARY, value);
+        }
         let borrowed = BorrowedDictionary {
             interface: codec.interface(),
             storage: value,
@@ -947,17 +1347,25 @@ impl Writer {
         self.dictionary_borrowed_entries(codec, &borrowed, depth)
     }
 
-    fn dictionary_entries(
+    fn container(
         &mut self,
         codec: &VariantCodec,
-        value: &OwnedDictionary,
-        depth: usize,
+        kind: AbiValueType,
+        value: GDExtensionConstTypePtr,
     ) -> Result<(), ValueError> {
-        let borrowed = BorrowedDictionary {
-            interface: value.interface,
-            storage: value.as_ptr(),
+        let type_ = if kind == AbiValueType::ARRAY {
+            array_type()
+        } else {
+            dictionary_type()
         };
-        self.dictionary_borrowed_entries(codec, &borrowed, depth)
+        let native = variant_from_builtin(codec, type_, value)?;
+        let token = crate::container::insert(kind, native)?;
+        self.container_tokens.push(token);
+        let header = self.begin(kind.0);
+        self.bytes[header + 4..header + 8]
+            .copy_from_slice(&godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER.to_le_bytes());
+        self.bytes.extend_from_slice(&token.to_le_bytes());
+        self.end(header)
     }
 
     fn dictionary_borrowed_entries(
@@ -1152,6 +1560,9 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        for token in self.container_tokens.drain(..) {
+            let _ = crate::container::release(token);
+        }
         if self.context.is_null() {
             return;
         }

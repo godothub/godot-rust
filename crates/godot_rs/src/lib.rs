@@ -57,7 +57,9 @@ pub mod prelude {
         BlockingTask, BlockingTaskError, SignalFuture, TaskHandle, TaskScope, Timeout,
         TimeoutError, next_frame, sleep, spawn, spawn_blocking, timeout,
     };
-    pub use crate::variant::{Array, Dictionary, Variant, VariantKind};
+    pub use crate::variant::{
+        Array, ArraySnapshot, Dictionary, DictionarySnapshot, Variant, VariantKind,
+    };
     pub use crate::{godot_debug, godot_error, godot_print, godot_warn};
     pub use crate::{godot_enum, godot_flags, script};
 }

@@ -290,6 +290,7 @@ impl HostRuntime {
 
     pub(crate) fn shutdown(&mut self) {
         module_loader::clear_active_generation();
+        crate::container::clear();
         let format_saver = self.format_saver as GDExtensionObjectPtr;
         if !format_saver.is_null() {
             call_format_loader_method(

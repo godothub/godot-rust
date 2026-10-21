@@ -477,6 +477,8 @@ impl ModuleGeneration {
         let entry = *entry;
 
         let mut reserved = [0; 16];
+        reserved[godot_api::abi::HOST_API_SLOT_CONTAINER] =
+            crate::container::access as *const () as usize;
         reserved[HOST_API_SLOT_EMIT_SIGNAL] =
             crate::script_instance::emit_signal_from_module as *const () as usize;
         reserved[HOST_API_SLOT_CURRENT_OWNER] =

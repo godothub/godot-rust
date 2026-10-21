@@ -777,7 +777,7 @@ pub(crate) fn poll_signal_values(token: u64) -> EngineResult<Option<Vec<crate::v
             use crate::engine::EngineReturn;
             let values =
                 crate::variant::Array::<crate::variant::Variant>::__from_host_return(value)?;
-            Ok(Some(values.into_vec()))
+            Ok(Some(values.to_vec()?))
         }
         _ => Err(EngineError::invalid_result(
             "the godot-rust Host returned an invalid Signal future state",
@@ -930,10 +930,11 @@ pub(crate) fn call_script_member(
             "this Host does not support typed script access",
         ));
     }
-    let callback =
+    let callback = {
         // SAFETY: ABI 37 assigns this nonzero slot to AbiCallScriptMemberFn.
         unsafe { core::mem::transmute::<usize, godot_api::abi::AbiCallScriptMemberFn>(slot) }
-            .expect("nonzero script callback");
+    }
+    .expect("nonzero script callback");
     let count = u32::try_from(arguments.len())
         .map_err(|_| EngineError::invalid_argument("too many typed script arguments"))?;
     let mut output = AbiValueV1::NIL;
@@ -971,10 +972,11 @@ pub(crate) fn validate_object(
             "this Host does not support checked object casts",
         ));
     }
-    let callback =
+    let callback = {
         // SAFETY: ABI 37 assigns this nonzero slot to AbiValidateObjectFn.
         unsafe { core::mem::transmute::<usize, godot_api::abi::AbiValidateObjectFn>(slot) }
-            .expect("nonzero object validation callback");
+    }
+    .expect("nonzero object validation callback");
     // SAFETY: Static class text and the Host table remain live for the call.
     let result = unsafe {
         callback(
@@ -1110,10 +1112,11 @@ pub(crate) fn retain_object_ref(object_id: u64) -> EngineResult<HostObjectRefTok
             "this Host cannot retain borrowed GodotRef arguments",
         ));
     }
-    let callback =
+    let callback = {
         // SAFETY: ABI minor 37 assigns this nonzero slot to AbiRetainObjectFn.
         unsafe { core::mem::transmute::<usize, godot_api::abi::AbiRetainObjectFn>(slot) }
-            .expect("nonzero retention callback");
+    }
+    .expect("nonzero retention callback");
     let mut value = AbiValueV1::NIL;
     // SAFETY: The Host and writable output remain live through this call.
     let result = unsafe { callback(host.context, object_id, &mut value) };
@@ -1166,6 +1169,93 @@ impl Drop for HostObjectRefToken {
 pub(crate) struct HostDynamicValueToken {
     value: AbiValueV1,
     host: *const HostApiV1,
+}
+
+pub(crate) struct HostContainerToken {
+    kind: AbiValueType,
+    token: u64,
+    host: *const HostApiV1,
+}
+
+impl Drop for HostContainerToken {
+    fn drop(&mut self) {
+        // SAFETY: Container ownership is released before its module's Host table is retired.
+        let host = unsafe { &*self.host };
+        let slot = host.reserved[godot_api::abi::HOST_API_SLOT_CONTAINER];
+        // SAFETY: The Host ABI defines this initialized callback slot.
+        let callback =
+            unsafe { core::mem::transmute::<usize, godot_api::abi::AbiContainerFn>(slot) };
+        if let Some(callback) = callback {
+            let mut output = AbiValueV1::NIL;
+            // SAFETY: Only opaque identity values and live output storage cross this call.
+            let _ = unsafe {
+                callback(
+                    host.context,
+                    godot_api::abi::ABI_CONTAINER_RELEASE,
+                    self.kind,
+                    self.token,
+                    AbiByteSlice::EMPTY,
+                    AbiByteSlice::EMPTY,
+                    &mut output,
+                )
+            };
+        }
+    }
+}
+
+pub(crate) fn retain_container(kind: AbiValueType, token: u64) -> EngineResult<HostContainerToken> {
+    let value = container_access(godot_api::abi::ABI_CONTAINER_RETAIN, kind, token, &[], None)?;
+    Ok(HostContainerToken {
+        kind,
+        token,
+        host: value.host,
+    })
+}
+
+pub(crate) fn container_access(
+    operation: u32,
+    kind: AbiValueType,
+    token: u64,
+    bytes: &[u8],
+    element: Option<&str>,
+) -> EngineResult<HostMethodValue> {
+    let host = engine_host_api("shared containers require the godot-rust Host")?;
+    let slot = host.reserved[godot_api::abi::HOST_API_SLOT_CONTAINER];
+    if slot == 0 {
+        return Err(EngineError::unavailable(
+            "the Host did not provide shared containers",
+        ));
+    }
+    // SAFETY: ABI 4 defines this callback slot as AbiContainerFn.
+    let callback = unsafe { core::mem::transmute::<usize, godot_api::abi::AbiContainerFn>(slot) }
+        .expect("container callback");
+    let element = element.unwrap_or("");
+    let mut output = AbiValueV1::NIL;
+    // SAFETY: Both input slices and the writable output slot remain live throughout the synchronous call.
+    let result = unsafe {
+        callback(
+            host.context,
+            operation,
+            kind,
+            token,
+            AbiByteSlice {
+                ptr: bytes.as_ptr(),
+                len: bytes.len(),
+            },
+            AbiByteSlice {
+                ptr: element.as_ptr(),
+                len: element.len(),
+            },
+            &mut output,
+        )
+    };
+    if result.status != AbiStatus::Ok {
+        return Err(EngineError::from_abi(result));
+    }
+    Ok(HostMethodValue {
+        value: output,
+        host: ptr::from_ref(host),
+    })
 }
 
 impl Drop for HostDynamicValueToken {
@@ -1457,13 +1547,18 @@ mod tests {
             0 => (AbiValueType::VARIANT, Variant::from(object)),
             1 => (
                 AbiValueType::ARRAY,
-                Variant::from(Array::from(vec![object])),
+                Variant::from(Array::from_vec(vec![object]).expect("array initializer")),
             ),
-            2 => {
-                let mut values = Dictionary::default();
-                values.insert("resource", object);
-                (AbiValueType::DICTIONARY, Variant::from(values))
-            }
+            2 => (
+                AbiValueType::DICTIONARY,
+                Variant::from(
+                    Dictionary::from_entries(vec![(
+                        Variant::from("resource"),
+                        Variant::from(object),
+                    )])
+                    .expect("dictionary initializer"),
+                ),
+            ),
             _ => unreachable!(),
         }
     }

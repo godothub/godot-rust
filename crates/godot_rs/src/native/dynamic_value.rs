@@ -10,7 +10,7 @@ use super::packed_array::NativePackedArray;
 use super::runtime::Interface;
 use super::sys;
 use super::value::GodotStringName;
-use crate::engine::{GodotRef, Object, ObjectRef, RefCounted};
+use crate::engine::{GodotRef, Object, ObjectApi, ObjectRef, RefCounted};
 use crate::error::{EngineError, EngineResult};
 use crate::math::{
     Aabb, Basis, Color, Plane, Projection, Quaternion, Rect2, Rect2i, Transform2D, Transform3D,
@@ -41,6 +41,61 @@ pub(super) struct NativeVariant {
 }
 
 impl NativeVariant {
+    pub(super) fn container_snapshot(&self, kind: AbiValueType) -> EngineResult<Vec<Variant>> {
+        match kind {
+            AbiValueType::ARRAY => NativeArray::from_variant(self)?.snapshot(),
+            AbiValueType::DICTIONARY => NativeDictionary::from_variant(self)?.snapshot(0),
+            _ => Err(EngineError::invalid_argument(
+                "invalid container snapshot kind",
+            )),
+        }
+    }
+
+    pub(super) fn from_container_snapshot(
+        interface: Interface,
+        kind: AbiValueType,
+        values: &[Variant],
+        element: Option<&str>,
+    ) -> EngineResult<Self> {
+        match kind {
+            AbiValueType::ARRAY => {
+                for value in values {
+                    if let Some(element) = element {
+                        validate_element(value, element)?;
+                    }
+                }
+                let mut array = NativeArray::empty(interface)?;
+                if let Some(element) = element {
+                    array.set_typed(element)?;
+                }
+                array.resize(values.len())?;
+                for (index, value) in values.iter().enumerate() {
+                    let value = Self::from_rust(interface, value, 1)?;
+                    array.set(index, &value)?;
+                }
+                Self::from_raw(interface, variant_type_array(), array.as_const_ptr())
+            }
+            AbiValueType::DICTIONARY => {
+                if values.len() % 2 != 0 {
+                    return Err(EngineError::invalid_argument(
+                        "Dictionary snapshot omitted a value",
+                    ));
+                }
+                let mut dictionary = NativeDictionary::empty(interface)?;
+                for pair in values.chunks_exact(2) {
+                    let key = Self::from_rust(interface, &pair[0], 1)?;
+                    let value = Self::from_rust(interface, &pair[1], 1)?;
+                    dictionary.insert(&key, &value)?;
+                }
+                Self::from_raw(
+                    interface,
+                    variant_type_dictionary(),
+                    dictionary.as_const_ptr(),
+                )
+            }
+            _ => Err(EngineError::invalid_argument("invalid container kind")),
+        }
+    }
     pub(super) fn uninitialized(interface: Interface) -> Self {
         Self {
             interface,
@@ -469,6 +524,24 @@ impl NativeVariant {
     }
 }
 
+pub(super) fn validate_element(value: &Variant, element: &str) -> EngineResult<()> {
+    let expected = crate::variant::builtin_type_id(element).unwrap_or(24);
+    let actual = crate::variant::kind_type_id(value.kind());
+    if expected == 24 {
+        match value.kind() {
+            VariantKind::Nil => return Ok(()),
+            VariantKind::Object(object) if !object.is_resolved() => return Ok(()),
+            VariantKind::Object(object) if object.is_class(element)? => return Ok(()),
+            _ => {}
+        }
+    } else if expected == actual {
+        return Ok(());
+    }
+    Err(EngineError::invalid_argument(
+        "value does not match the Godot container type constraint",
+    ))
+}
+
 impl Drop for NativeVariant {
     fn drop(&mut self) {
         if self.initialized {
@@ -638,25 +711,16 @@ impl NativeArray {
     }
 
     pub(super) fn from_rust(
-        interface: Interface,
+        _interface: Interface,
         values: &Array,
         typed_element: Option<&str>,
         depth: usize,
     ) -> EngineResult<Self> {
         check_depth(depth)?;
-        if values.len() > ABI_DYNAMIC_MAX_ELEMENTS {
-            return Err(EngineError::invalid_argument(
-                "Native Array exceeds the element boundary",
-            ));
-        }
-        let mut result = Self::empty(interface)?;
+        let token = values.native_token()?;
+        let result = Self::from_variant(token.value())?;
         if let Some(element) = typed_element {
-            result.set_typed(element)?;
-        }
-        result.resize(values.len())?;
-        for (index, value) in values.iter().enumerate() {
-            let value = NativeVariant::from_rust(interface, value, depth + 1)?;
-            result.set(index, &value)?;
+            result.validate_type(element)?;
         }
         Ok(result)
     }
@@ -669,13 +733,48 @@ impl NativeArray {
 
     fn to_rust(&self, depth: usize) -> EngineResult<Array> {
         check_depth(depth)?;
+        let value =
+            NativeVariant::from_raw(self.interface, variant_type_array(), self.as_const_ptr())?;
+        Ok(Array::from_native(
+            super::container::NativeContainerToken::insert(AbiValueType::ARRAY, value)?,
+        ))
+    }
+
+    fn snapshot(&self) -> EngineResult<Vec<Variant>> {
         let count = self.len()?;
+        if count > ABI_DYNAMIC_MAX_ELEMENTS {
+            return Err(EngineError::invalid_result(
+                "Array snapshot exceeds the element limit",
+            ));
+        }
         let mut values = Vec::with_capacity(count);
         for index in 0..count {
-            let value = self.get(index)?;
-            values.push(borrowed_variant_to_rust(self.interface, value, depth + 1)?);
+            values.push(borrowed_variant_to_rust(
+                self.interface,
+                self.get(index)?,
+                1,
+            )?);
         }
-        Ok(Array::from_vec(values))
+        Ok(values)
+    }
+
+    fn validate_type(&self, element: &str) -> EngineResult<()> {
+        let value = self.to_rust(0)?;
+        let actual = crate::engine::builtin::array::get_typed_builtin(&value)?;
+        let expected = crate::variant::builtin_type_id(element).unwrap_or(24);
+        if actual != expected {
+            return Err(EngineError::invalid_argument(
+                "Array has incompatible engine element constraints",
+            ));
+        }
+        if expected == 24
+            && crate::engine::builtin::array::get_typed_class_name(&value)?.as_str() != element
+        {
+            return Err(EngineError::invalid_argument(
+                "Array has incompatible engine class constraints",
+            ));
+        }
+        Ok(())
     }
 
     fn set_typed(&mut self, element: &str) -> EngineResult<()> {
@@ -805,20 +904,9 @@ impl NativeDictionary {
         self.initialized = true;
     }
 
-    fn from_rust(interface: Interface, value: &Dictionary, depth: usize) -> EngineResult<Self> {
+    fn from_rust(_interface: Interface, value: &Dictionary, depth: usize) -> EngineResult<Self> {
         check_depth(depth)?;
-        if value.len() > ABI_DYNAMIC_MAX_ELEMENTS {
-            return Err(EngineError::invalid_argument(
-                "Native Dictionary exceeds the entry boundary",
-            ));
-        }
-        let mut result = Self::empty(interface)?;
-        for (key, value) in value.iter() {
-            let key = NativeVariant::from_rust(interface, key, depth + 1)?;
-            let value = NativeVariant::from_rust(interface, value, depth + 1)?;
-            result.insert(&key, &value)?;
-        }
-        Ok(result)
+        Self::from_variant(value.native_token()?.value())
     }
 
     fn from_variant(value: &NativeVariant) -> EngineResult<Self> {
@@ -828,6 +916,18 @@ impl NativeDictionary {
     }
 
     fn to_rust(&self, depth: usize) -> EngineResult<Dictionary> {
+        check_depth(depth)?;
+        let value = NativeVariant::from_raw(
+            self.interface,
+            variant_type_dictionary(),
+            self.as_const_ptr(),
+        )?;
+        Ok(Dictionary::from_native(
+            super::container::NativeContainerToken::insert(AbiValueType::DICTIONARY, value)?,
+        ))
+    }
+
+    fn snapshot(&self, depth: usize) -> EngineResult<Vec<Variant>> {
         check_depth(depth)?;
         let count = builtin_size(
             builtin_method(self.interface, variant_type_dictionary(), "size", SIZE_HASH)?,
@@ -870,12 +970,14 @@ impl NativeDictionary {
                     "Godot returned a null Dictionary value",
                 ));
             }
-            entries.push((
-                borrowed_variant_to_rust(self.interface, key, depth + 1)?,
-                borrowed_variant_to_rust(self.interface, value.cast_const(), depth + 1)?,
-            ));
+            entries.push(borrowed_variant_to_rust(self.interface, key, depth + 1)?);
+            entries.push(borrowed_variant_to_rust(
+                self.interface,
+                value.cast_const(),
+                depth + 1,
+            )?);
         }
-        Ok(Dictionary::from_entries(entries))
+        Ok(entries)
     }
 
     fn insert(&mut self, key: &NativeVariant, value: &NativeVariant) -> EngineResult<()> {

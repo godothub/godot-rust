@@ -1,8 +1,9 @@
-//! Owned dynamic Godot values and container types.
+//! Dynamic Godot values, shared engine containers and explicit Rust snapshots.
 
 use core::cell::OnceCell;
 use core::fmt;
-use core::ops::{Deref, Index};
+mod container;
+pub use container::{Array, ArraySnapshot, Dictionary, DictionarySnapshot};
 
 use godot_api::abi::{
     ABI_DYNAMIC_MAGIC as WIRE_MAGIC, ABI_DYNAMIC_MAX_BYTES as MAX_WIRE_BYTES,
@@ -61,8 +62,9 @@ type WireCache = OnceCell<Result<Box<[u8]>, VariantError>>;
 
 /// One owned Godot-compatible dynamic value.
 ///
-/// Values are ordinary Rust-owned data. The SDK serializes them only at a
-/// Host call boundary, so they remain safe across project-module reloads.
+/// Scalar payloads are Rust-owned. Array and Dictionary payloads share their
+/// engine container through runtime-owned opaque handles, including across
+/// compatible project-module reloads.
 pub struct Variant {
     value: VariantValue,
     encoded: WireCache,
@@ -234,6 +236,11 @@ impl Variant {
 
     #[doc(hidden)]
     pub fn __bytes(&self) -> Result<&[u8], VariantError> {
+        match &self.value {
+            VariantValue::Array(array) => return array.__bytes(),
+            VariantValue::Dictionary(dictionary) => return dictionary.__bytes(),
+            _ => {}
+        }
         self.encoded
             .get_or_init(|| encode_root(self).map(Vec::into_boxed_slice))
             .as_deref()
@@ -279,20 +286,8 @@ impl Variant {
     }
 
     fn attach_ownership(&mut self, ownership: SharedGodotRefOwnership) {
-        match &mut self.value {
-            VariantValue::Object(value) => value.ownership = Some(ownership),
-            VariantValue::Array(values) => {
-                for value in &mut values.values {
-                    value.attach_ownership(std::rc::Rc::clone(&ownership));
-                }
-            }
-            VariantValue::Dictionary(values) => {
-                for (key, value) in &mut values.entries {
-                    key.attach_ownership(std::rc::Rc::clone(&ownership));
-                    value.attach_ownership(std::rc::Rc::clone(&ownership));
-                }
-            }
-            _ => {}
+        if let VariantValue::Object(value) = &mut self.value {
+            value.ownership = Some(ownership);
         }
     }
 }
@@ -321,345 +316,12 @@ impl PartialEq for Variant {
     }
 }
 
-/// Owned Godot `Array`, optionally constrained to one element type.
-pub struct Array<T = Variant> {
-    values: Vec<T>,
-    encoded: WireCache,
-}
-
-impl<T> Array<T> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            values: Vec::new(),
-            encoded: OnceCell::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn from_vec(values: Vec<T>) -> Self {
-        Self {
-            values,
-            encoded: OnceCell::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn into_vec(self) -> Vec<T> {
-        self.values
-    }
-
-    pub fn push(&mut self, value: T) {
-        self.invalidate();
-        self.values.push(value);
-    }
-
-    pub fn pop(&mut self) -> Option<T> {
-        self.invalidate();
-        self.values.pop()
-    }
-
-    pub fn insert(&mut self, index: usize, value: T) {
-        self.invalidate();
-        self.values.insert(index, value);
-    }
-
-    pub fn remove(&mut self, index: usize) -> T {
-        self.invalidate();
-        self.values.remove(index)
-    }
-
-    pub fn clear(&mut self) {
-        self.invalidate();
-        self.values.clear();
-    }
-
-    fn invalidate(&mut self) {
-        let _ = self.encoded.take();
-    }
-}
-
-impl<T: VariantConvert> Array<T> {
-    #[doc(hidden)]
-    pub fn __bytes(&self) -> Result<&[u8], VariantError> {
-        self.encoded
-            .get_or_init(|| {
-                let values = self
-                    .values
-                    .iter()
-                    .map(VariantConvert::to_variant)
-                    .collect::<Vec<_>>();
-                encode_root(&Variant::from(Array::from_vec(values))).map(Vec::into_boxed_slice)
-            })
-            .as_deref()
-            .map_err(|error| *error)
-    }
-
-    #[doc(hidden)]
-    pub fn __from_bytes(bytes: &[u8]) -> Option<Self> {
-        if godot_api::abi::dynamic_value_ownership_token(bytes).is_some()
-            || !validate_dynamic_value(AbiValueType::ARRAY, bytes)
-        {
-            return None;
-        }
-        let value = decode_root(bytes, CallableDecodeMode::RejectOwned).ok()?;
-        let VariantValue::Array(values) = value.value else {
-            return None;
-        };
-        values
-            .into_vec()
-            .into_iter()
-            .map(T::from_variant)
-            .collect::<Option<Vec<_>>>()
-            .map(Self::from_vec)
-    }
-
-    pub(crate) fn __from_host_bytes(
-        bytes: &[u8],
-        ownership: Option<crate::module::HostDynamicValueToken>,
-    ) -> Option<Self> {
-        let value = Variant::__from_host_bytes(bytes, ownership)?;
-        let VariantValue::Array(values) = value.value else {
-            return None;
-        };
-        values
-            .into_vec()
-            .into_iter()
-            .map(T::from_variant)
-            .collect::<Option<Vec<_>>>()
-            .map(Self::from_vec)
-    }
-}
-
-impl<T: Clone> Clone for Array<T> {
-    fn clone(&self) -> Self {
-        Self::from_vec(self.values.clone())
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for Array<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.values.fmt(formatter)
-    }
-}
-
-impl<T: PartialEq> PartialEq for Array<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.values == other.values
-    }
-}
-
-impl<T> Default for Array<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> From<Vec<T>> for Array<T> {
-    fn from(values: Vec<T>) -> Self {
-        Self::from_vec(values)
-    }
-}
-
-impl<T> From<Array<T>> for Vec<T> {
-    fn from(values: Array<T>) -> Self {
-        values.into_vec()
-    }
-}
-
-impl<T> AsRef<[T]> for Array<T> {
-    fn as_ref(&self) -> &[T] {
-        &self.values
-    }
-}
-
-impl<T> Deref for Array<T> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        &self.values
-    }
-}
-
-impl<'a, T> IntoIterator for &'a Array<T> {
-    type Item = &'a T;
-    type IntoIter = core::slice::Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.values.iter()
-    }
-}
-
-impl<T> IntoIterator for Array<T> {
-    type Item = T;
-    type IntoIter = std::vec::IntoIter<T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.values.into_iter()
-    }
-}
-
-/// Owned Godot `Dictionary`.
-///
-/// Entries retain insertion order on the Rust side. Keys use Variant equality,
-/// which keeps the API useful for every Godot-compatible key type.
-pub struct Dictionary {
-    entries: Vec<(Variant, Variant)>,
-    encoded: WireCache,
-}
-
-impl Dictionary {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            encoded: OnceCell::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn from_entries(entries: Vec<(Variant, Variant)>) -> Self {
-        let mut dictionary = Self::new();
-        for (key, value) in entries {
-            dictionary.insert(key, value);
-        }
-        dictionary
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    #[must_use]
-    pub fn get(&self, key: &Variant) -> Option<&Variant> {
-        self.entries
-            .iter()
-            .find_map(|(candidate, value)| (candidate == key).then_some(value))
-    }
-
-    pub fn insert(
-        &mut self,
-        key: impl Into<Variant>,
-        value: impl Into<Variant>,
-    ) -> Option<Variant> {
-        self.invalidate();
-        let key = key.into();
-        let value = value.into();
-        if let Some((_, current)) = self
-            .entries
-            .iter_mut()
-            .find(|(candidate, _)| candidate == &key)
-        {
-            return Some(core::mem::replace(current, value));
-        }
-        self.entries.push((key, value));
-        None
-    }
-
-    pub fn remove(&mut self, key: &Variant) -> Option<Variant> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(candidate, _)| candidate == key)?;
-        self.invalidate();
-        Some(self.entries.remove(index).1)
-    }
-
-    pub fn clear(&mut self) {
-        self.invalidate();
-        self.entries.clear();
-    }
-
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&Variant, &Variant)> {
-        self.entries.iter().map(|(key, value)| (key, value))
-    }
-
-    #[doc(hidden)]
-    pub fn __bytes(&self) -> Result<&[u8], VariantError> {
-        self.encoded
-            .get_or_init(|| encode_root(&Variant::from(self.clone())).map(Vec::into_boxed_slice))
-            .as_deref()
-            .map_err(|error| *error)
-    }
-
-    #[doc(hidden)]
-    pub fn __from_bytes(bytes: &[u8]) -> Option<Self> {
-        if godot_api::abi::dynamic_value_ownership_token(bytes).is_some()
-            || !validate_dynamic_value(AbiValueType::DICTIONARY, bytes)
-        {
-            return None;
-        }
-        let value = decode_root(bytes, CallableDecodeMode::RejectOwned).ok()?;
-        let VariantValue::Dictionary(value) = value.value else {
-            return None;
-        };
-        Some(value)
-    }
-
-    pub(crate) fn __from_host_bytes(
-        bytes: &[u8],
-        ownership: Option<crate::module::HostDynamicValueToken>,
-    ) -> Option<Self> {
-        let value = Variant::__from_host_bytes(bytes, ownership)?;
-        let VariantValue::Dictionary(value) = value.value else {
-            return None;
-        };
-        Some(value)
-    }
-
-    fn invalidate(&mut self) {
-        let _ = self.encoded.take();
-    }
-}
-
-impl Clone for Dictionary {
-    fn clone(&self) -> Self {
-        Self::from_entries(self.entries.clone())
-    }
-}
-
-impl Default for Dictionary {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Debug for Dictionary {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_map()
-            .entries(self.entries.iter().map(|(key, value)| (key, value)))
-            .finish()
-    }
-}
-
-impl PartialEq for Dictionary {
-    fn eq(&self, other: &Self) -> bool {
-        self.len() == other.len()
-            && self
-                .entries
-                .iter()
-                .all(|(key, value)| other.get(key) == Some(value))
-    }
-}
-
-impl Index<&Variant> for Dictionary {
-    type Output = Variant;
-
-    fn index(&self, index: &Variant) -> &Self::Output {
-        self.get(index).expect("Dictionary key does not exist")
-    }
-}
-
 /// Conversion contract used by typed Godot arrays.
 #[doc(hidden)]
 pub trait VariantConvert: Sized + Clone {
+    fn __element_type() -> Option<&'static str> {
+        None
+    }
     fn to_variant(&self) -> Variant;
     fn from_variant(value: Variant) -> Option<Self>;
 }
@@ -683,6 +345,16 @@ macro_rules! variant_conversion {
         }
 
         impl VariantConvert for $type {
+            fn __element_type() -> Option<&'static str> {
+                Some(match stringify!($variant) {
+                    "Bool" => "bool",
+                    "Int" => "int",
+                    "Float" => "float",
+                    "Rid" => "RID",
+                    "Aabb" => "AABB",
+                    name => name,
+                })
+            }
             fn to_variant(&self) -> Variant {
                 Variant::from(self.clone())
             }
@@ -757,6 +429,9 @@ impl From<i32> for Variant {
 }
 
 impl VariantConvert for i32 {
+    fn __element_type() -> Option<&'static str> {
+        Some("int")
+    }
     fn to_variant(&self) -> Variant {
         Variant::from(*self)
     }
@@ -776,6 +451,9 @@ impl From<f32> for Variant {
 }
 
 impl VariantConvert for f32 {
+    fn __element_type() -> Option<&'static str> {
+        Some("float")
+    }
     fn to_variant(&self) -> Variant {
         Variant::from(*self)
     }
@@ -790,6 +468,9 @@ impl VariantConvert for f32 {
 }
 
 impl<T: crate::engine::GodotIntegerValue> VariantConvert for T {
+    fn __element_type() -> Option<&'static str> {
+        Some("int")
+    }
     fn to_variant(&self) -> Variant {
         Variant::from(self.__raw() as i64)
     }
@@ -818,6 +499,9 @@ impl<T: GodotClass> From<ObjectRef<T>> for Variant {
 }
 
 impl<T: GodotClass> VariantConvert for ObjectRef<T> {
+    fn __element_type() -> Option<&'static str> {
+        Some(T::CLASS_NAME)
+    }
     fn to_variant(&self) -> Variant {
         Variant::from(*self)
     }
@@ -839,6 +523,9 @@ impl<T: GodotClass> From<Option<ObjectRef<T>>> for Variant {
 }
 
 impl<T: GodotClass> VariantConvert for Option<ObjectRef<T>> {
+    fn __element_type() -> Option<&'static str> {
+        Some(T::CLASS_NAME)
+    }
     fn to_variant(&self) -> Variant {
         Variant::from(*self)
     }
@@ -862,6 +549,9 @@ impl<T: GodotClass> From<GodotRef<T>> for Variant {
 }
 
 impl<T: GodotClass> VariantConvert for GodotRef<T> {
+    fn __element_type() -> Option<&'static str> {
+        Some(T::CLASS_NAME)
+    }
     fn to_variant(&self) -> Variant {
         Variant::new(VariantValue::Object(DynamicObject {
             object: ObjectRef::__from_instance_id(self.instance_id()),
@@ -889,6 +579,9 @@ impl<T: GodotClass> From<Option<GodotRef<T>>> for Variant {
 }
 
 impl<T: GodotClass> VariantConvert for Option<GodotRef<T>> {
+    fn __element_type() -> Option<&'static str> {
+        Some(T::CLASS_NAME)
+    }
     fn to_variant(&self) -> Variant {
         self.as_ref().map_or_else(
             || Variant::from(ObjectRef::<T>::unresolved()),
@@ -907,30 +600,22 @@ impl<T: GodotClass> VariantConvert for Option<GodotRef<T>> {
 
 impl<T: VariantConvert> From<Array<T>> for Variant {
     fn from(values: Array<T>) -> Self {
-        let values = values
-            .into_vec()
-            .into_iter()
-            .map(|value| value.to_variant())
-            .collect();
-        Self::new(VariantValue::Array(Array::from_vec(values)))
+        Self::new(VariantValue::Array(values.untyped()))
     }
 }
 
 impl<T: VariantConvert> VariantConvert for Array<T> {
+    fn __element_type() -> Option<&'static str> {
+        Some("Array")
+    }
     fn to_variant(&self) -> Variant {
         Variant::from(self.clone())
     }
-
     fn from_variant(value: Variant) -> Option<Self> {
         let VariantValue::Array(values) = value.value else {
             return None;
         };
-        values
-            .into_vec()
-            .into_iter()
-            .map(T::from_variant)
-            .collect::<Option<Vec<_>>>()
-            .map(Self::from_vec)
+        Self::try_from_untyped(values).ok()
     }
 }
 
@@ -947,6 +632,244 @@ fn encode_root(value: &Variant) -> Result<Vec<u8>, VariantError> {
         ));
     }
     Ok(output)
+}
+
+pub(crate) fn encode_container_values(
+    kind: AbiValueType,
+    values: &[Variant],
+) -> crate::error::EngineResult<Vec<u8>> {
+    use crate::error::EngineError;
+    let count = if kind == AbiValueType::DICTIONARY {
+        if values.len() % 2 != 0 {
+            return Err(EngineError::invalid_argument(
+                "Dictionary snapshot omitted a value",
+            ));
+        }
+        values.len() / 2
+    } else {
+        values.len()
+    };
+    if count > MAX_CONTAINER_ELEMENTS {
+        return Err(EngineError::invalid_argument(
+            "container snapshot exceeds the element limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&WIRE_MAGIC);
+    bytes.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&kind.0.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    bytes.extend_from_slice(&(count as u64).to_le_bytes());
+    for value in values {
+        encode_node(value, &mut bytes, 1)
+            .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
+    }
+    let length = (bytes.len() - 36) as u64;
+    bytes[28..36].copy_from_slice(&length.to_le_bytes());
+    Ok(bytes)
+}
+
+pub(crate) fn decode_native_snapshot(
+    bytes: &[u8],
+    kind: AbiValueType,
+) -> crate::error::EngineResult<Vec<Variant>> {
+    decode_snapshot(bytes, kind, CallableDecodeMode::Native)
+        .map_err(|error| crate::error::EngineError::invalid_argument(error.to_string()))
+}
+
+fn decode_host_snapshot(
+    value: crate::module::HostMethodValue,
+    kind: AbiValueType,
+) -> crate::error::EngineResult<Vec<Variant>> {
+    use crate::error::EngineError;
+    let abi = value.abi();
+    let (pointer, length) = abi
+        .byte_range(kind)
+        .ok_or_else(|| EngineError::invalid_result("invalid container snapshot range"))?;
+    if length > MAX_WIRE_BYTES {
+        return Err(EngineError::invalid_result(
+            "container snapshot exceeds the byte limit",
+        ));
+    }
+    // SAFETY: HostMethodValue retains this validated output allocation.
+    let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
+    let token = godot_api::abi::dynamic_value_ownership_token(bytes)
+        .ok_or_else(|| EngineError::invalid_result("container snapshot omitted ownership"))?;
+    let owner = crate::module::retain_dynamic_value(kind, token)?
+        .map(|owner| std::rc::Rc::new(GodotRefOwnership::Dynamic(owner)))
+        .ok_or_else(|| {
+            EngineError::invalid_result("container snapshot omitted its ownership lease")
+        })?;
+    let mut values = decode_snapshot(bytes, kind, CallableDecodeMode::Host)
+        .map_err(|error| EngineError::invalid_result(error.to_string()))?;
+    for value in &mut values {
+        value.attach_ownership(std::rc::Rc::clone(&owner));
+    }
+    Ok(values)
+}
+
+fn decode_snapshot(
+    bytes: &[u8],
+    kind: AbiValueType,
+    mode: CallableDecodeMode,
+) -> Result<Vec<Variant>, VariantError> {
+    if !validate_dynamic_value(kind, bytes) || bytes.get(24..28) != Some(&[0, 0, 0, 0]) {
+        return Err(VariantError::new("invalid inline container snapshot"));
+    }
+    let count = read_count(bytes, 36, bytes.len())?;
+    let count = if kind == AbiValueType::DICTIONARY {
+        count * 2
+    } else {
+        count
+    };
+    let mut offset = 44;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(decode_node(bytes, &mut offset, 1, mode)?);
+    }
+    if offset != bytes.len() {
+        return Err(VariantError::new("container snapshot has trailing bytes"));
+    }
+    Ok(values)
+}
+
+pub(crate) fn builtin_type_id(name: &str) -> Option<i64> {
+    Some(match name {
+        "Nil" => 0,
+        "bool" => 1,
+        "int" => 2,
+        "float" => 3,
+        "String" => 4,
+        "Vector2" => 5,
+        "Vector2i" => 6,
+        "Rect2" => 7,
+        "Rect2i" => 8,
+        "Vector3" => 9,
+        "Vector3i" => 10,
+        "Transform2D" => 11,
+        "Vector4" => 12,
+        "Vector4i" => 13,
+        "Plane" => 14,
+        "Quaternion" => 15,
+        "AABB" => 16,
+        "Basis" => 17,
+        "Transform3D" => 18,
+        "Projection" => 19,
+        "Color" => 20,
+        "StringName" => 21,
+        "NodePath" => 22,
+        "RID" => 23,
+        "Object" => 24,
+        "Callable" => 25,
+        "Signal" => 26,
+        "Dictionary" => 27,
+        "Array" => 28,
+        "PackedByteArray" => 29,
+        "PackedInt32Array" => 30,
+        "PackedInt64Array" => 31,
+        "PackedFloat32Array" => 32,
+        "PackedFloat64Array" => 33,
+        "PackedStringArray" => 34,
+        "PackedVector2Array" => 35,
+        "PackedVector3Array" => 36,
+        "PackedColorArray" => 37,
+        "PackedVector4Array" => 38,
+        _ => return None,
+    })
+}
+
+pub(crate) fn builtin_type_name(id: i64) -> Option<&'static str> {
+    const NAMES: &[&str] = &[
+        "Nil",
+        "bool",
+        "int",
+        "float",
+        "String",
+        "Vector2",
+        "Vector2i",
+        "Rect2",
+        "Rect2i",
+        "Vector3",
+        "Vector3i",
+        "Transform2D",
+        "Vector4",
+        "Vector4i",
+        "Plane",
+        "Quaternion",
+        "AABB",
+        "Basis",
+        "Transform3D",
+        "Projection",
+        "Color",
+        "StringName",
+        "NodePath",
+        "RID",
+        "Object",
+        "Callable",
+        "Signal",
+        "Dictionary",
+        "Array",
+        "PackedByteArray",
+        "PackedInt32Array",
+        "PackedInt64Array",
+        "PackedFloat32Array",
+        "PackedFloat64Array",
+        "PackedStringArray",
+        "PackedVector2Array",
+        "PackedVector3Array",
+        "PackedColorArray",
+        "PackedVector4Array",
+    ];
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| NAMES.get(index).copied())
+}
+
+pub(crate) fn kind_type_id(kind: VariantKind<'_>) -> i64 {
+    match kind {
+        VariantKind::Nil => 0,
+        VariantKind::Bool(_) => 1,
+        VariantKind::Int(_) => 2,
+        VariantKind::Float(_) => 3,
+        VariantKind::String(_) => 4,
+        VariantKind::Vector2(_) => 5,
+        VariantKind::Vector2i(_) => 6,
+        VariantKind::Rect2(_) => 7,
+        VariantKind::Rect2i(_) => 8,
+        VariantKind::Vector3(_) => 9,
+        VariantKind::Vector3i(_) => 10,
+        VariantKind::Transform2D(_) => 11,
+        VariantKind::Vector4(_) => 12,
+        VariantKind::Vector4i(_) => 13,
+        VariantKind::Plane(_) => 14,
+        VariantKind::Quaternion(_) => 15,
+        VariantKind::Aabb(_) => 16,
+        VariantKind::Basis(_) => 17,
+        VariantKind::Transform3D(_) => 18,
+        VariantKind::Projection(_) => 19,
+        VariantKind::Color(_) => 20,
+        VariantKind::StringName(_) => 21,
+        VariantKind::NodePath(_) => 22,
+        VariantKind::Rid(_) => 23,
+        VariantKind::Object(_) => 24,
+        VariantKind::Callable(_) => 25,
+        VariantKind::Signal(_) => 26,
+        VariantKind::Dictionary(_) => 27,
+        VariantKind::Array(_) => 28,
+        VariantKind::PackedByteArray(_) => 29,
+        VariantKind::PackedInt32Array(_) => 30,
+        VariantKind::PackedInt64Array(_) => 31,
+        VariantKind::PackedFloat32Array(_) => 32,
+        VariantKind::PackedFloat64Array(_) => 33,
+        VariantKind::PackedStringArray(_) => 34,
+        VariantKind::PackedVector2Array(_) => 35,
+        VariantKind::PackedVector3Array(_) => 36,
+        VariantKind::PackedColorArray(_) => 37,
+        VariantKind::PackedVector4Array(_) => 38,
+    }
 }
 
 fn encode_node(value: &Variant, output: &mut Vec<u8>, depth: usize) -> Result<(), VariantError> {
@@ -1033,27 +956,14 @@ fn encode_node(value: &Variant, output: &mut Vec<u8>, depth: usize) -> Result<()
             })?);
         }
         VariantValue::Array(values) => {
-            if values.len() > MAX_CONTAINER_ELEMENTS {
-                return Err(VariantError::new(
-                    "Godot Array exceeds the element-count limit",
-                ));
-            }
-            output.extend_from_slice(&(values.len() as u64).to_le_bytes());
-            for value in values {
-                encode_node(value, output, depth + 1)?;
-            }
+            let bytes = values.__bytes()?;
+            output[header + 4..header + 8].copy_from_slice(&bytes[24..28]);
+            output.extend_from_slice(&bytes[36..]);
         }
         VariantValue::Dictionary(values) => {
-            if values.len() > MAX_CONTAINER_ELEMENTS {
-                return Err(VariantError::new(
-                    "Godot Dictionary exceeds the entry-count limit",
-                ));
-            }
-            output.extend_from_slice(&(values.len() as u64).to_le_bytes());
-            for (key, value) in values.iter() {
-                encode_node(key, output, depth + 1)?;
-                encode_node(value, output, depth + 1)?;
-            }
+            let bytes = values.__bytes()?;
+            output[header + 4..header + 8].copy_from_slice(&bytes[24..28]);
+            output.extend_from_slice(&bytes[36..]);
         }
     }
     let payload_length = output
@@ -1120,7 +1030,7 @@ fn decode_node(
         header[8..16].try_into().expect("u64 width"),
     ))
     .map_err(|_| VariantError::new("dynamic Godot value length is out of range"))?;
-    if flags != 0 {
+    if flags != 0 && flags != godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER {
         return Err(VariantError::new(
             "dynamic Godot value uses unsupported ABI flags",
         ));
@@ -1133,6 +1043,33 @@ fn decode_node(
         .get(payload_start..payload_end)
         .ok_or_else(|| VariantError::new("dynamic Godot value payload is truncated"))?;
     *offset = payload_end;
+
+    if flags == godot_api::abi::ABI_DYNAMIC_NODE_CONTAINER {
+        let token = read_u64_exact(payload)?;
+        return match (type_, callable_mode) {
+            (37, CallableDecodeMode::Host) => Array::<Variant>::from_host(token)
+                .map(Variant::from)
+                .map_err(|_| VariantError::new("invalid Host Array token")),
+            (38, CallableDecodeMode::Host) => Dictionary::from_host(token)
+                .map(Variant::from)
+                .map_err(|_| VariantError::new("invalid Host Dictionary token")),
+            (37, CallableDecodeMode::Native) => {
+                crate::native::retain_container(AbiValueType::ARRAY, token)
+                    .map(Array::<Variant>::from_native)
+                    .map(Variant::from)
+                    .map_err(|_| VariantError::new("invalid Native Array token"))
+            }
+            (38, CallableDecodeMode::Native) => {
+                crate::native::retain_container(AbiValueType::DICTIONARY, token)
+                    .map(Dictionary::from_native)
+                    .map(Variant::from)
+                    .map_err(|_| VariantError::new("invalid Native Dictionary token"))
+            }
+            _ => Err(VariantError::new(
+                "container handles require their owning runtime",
+            )),
+        };
+    }
 
     let value = match type_ {
         0 if payload.is_empty() => Variant::nil(),
@@ -1274,7 +1211,9 @@ fn decode_array(
             "Godot Array ABI payload is not canonical",
         ));
     }
-    Ok(Variant::new(VariantValue::Array(Array::from_vec(values))))
+    Array::from_vec(values)
+        .map(Variant::from)
+        .map_err(|_| VariantError::new("Array snapshot could not be materialized"))
 }
 
 fn decode_dictionary(
@@ -1297,9 +1236,9 @@ fn decode_dictionary(
             "Godot Dictionary ABI payload is not canonical",
         ));
     }
-    Ok(Variant::new(VariantValue::Dictionary(
-        Dictionary::from_entries(entries),
-    )))
+    Dictionary::from_entries(entries)
+        .map(Variant::from)
+        .map_err(|_| VariantError::new("Dictionary snapshot could not be materialized"))
 }
 
 fn read_count(bytes: &[u8], start: usize, end: usize) -> Result<usize, VariantError> {
@@ -1462,68 +1401,97 @@ mod tests {
     }
 
     #[test]
-    fn nested_dynamic_values_round_trip_canonically() {
-        let mut nested = Dictionary::new();
-        nested.insert("name", "玩家");
-        nested.insert("position", Vector3::new(1.0, -2.0, 3.5));
-        nested.insert(
-            "values",
-            Array::from(vec![
-                Variant::from(42_i64),
-                Variant::from(PackedByteArray::from(vec![0, 127, 255])),
-            ]),
-        );
-        let value = Variant::from(nested);
-        let bytes = value.__bytes().expect("valid dynamic value");
-        assert_eq!(Variant::__from_bytes(bytes), Some(value));
+    fn explicit_snapshots_round_trip_canonically() {
+        let values = vec![
+            Variant::from("name"),
+            Variant::from("玩家"),
+            Variant::from("position"),
+            Variant::from(Vector3::new(1.0, -2.0, 3.5)),
+            Variant::from("packed"),
+            Variant::from(PackedByteArray::from(vec![0, 127, 255])),
+        ];
+        let bytes =
+            encode_container_values(AbiValueType::DICTIONARY, &values).expect("snapshot wire");
+        let restored = decode_snapshot(
+            &bytes,
+            AbiValueType::DICTIONARY,
+            CallableDecodeMode::RejectOwned,
+        )
+        .expect("snapshot");
+        assert_eq!(restored, values);
     }
 
     #[test]
-    fn standard_callables_round_trip_inside_dynamic_containers() {
+    fn standard_callables_round_trip_inside_snapshots() {
         let callback = Callable::from_object_method(
             ObjectRef::<crate::engine::Node>::__from_instance_id(42),
             "_ready",
         );
-        let mut dictionary = Dictionary::new();
-        dictionary.insert("callback", callback.clone());
-        let value = Variant::from(dictionary);
-        let bytes = value.__bytes().expect("dynamic Callable wire");
-        let restored = Variant::__from_bytes(bytes).expect("dynamic Callable");
-        let VariantKind::Dictionary(dictionary) = restored.kind() else {
-            panic!("Dictionary");
-        };
-        let VariantKind::Callable(restored) = dictionary[&Variant::from("callback")].kind() else {
-            panic!("Callable");
-        };
-        assert_eq!(restored, &callback);
+        let values = vec![Variant::from("callback"), Variant::from(callback.clone())];
+        let bytes =
+            encode_container_values(AbiValueType::DICTIONARY, &values).expect("snapshot wire");
+        let restored = decode_snapshot(
+            &bytes,
+            AbiValueType::DICTIONARY,
+            CallableDecodeMode::RejectOwned,
+        )
+        .expect("snapshot");
+        assert_eq!(restored, values);
     }
 
     #[test]
-    fn signals_round_trip_inside_dynamic_containers() {
+    fn signals_round_trip_inside_snapshots() {
         let signal = Signal::from_object(
             ObjectRef::<crate::engine::Node>::__from_instance_id(42),
             "已完成",
         );
-        let mut dictionary = Dictionary::new();
-        dictionary.insert("signal", signal.clone());
-        let value = Variant::from(dictionary);
-        let bytes = value.__bytes().expect("dynamic Signal wire");
-        let restored = Variant::__from_bytes(bytes).expect("dynamic Signal");
-        let VariantKind::Dictionary(dictionary) = restored.kind() else {
-            panic!("Dictionary");
-        };
-        let VariantKind::Signal(restored) = dictionary[&Variant::from("signal")].kind() else {
-            panic!("Signal");
-        };
-        assert_eq!(restored, &signal);
+        let values = vec![Variant::from("signal"), Variant::from(signal)];
+        let bytes =
+            encode_container_values(AbiValueType::DICTIONARY, &values).expect("snapshot wire");
+        let restored = decode_snapshot(
+            &bytes,
+            AbiValueType::DICTIONARY,
+            CallableDecodeMode::RejectOwned,
+        )
+        .expect("snapshot");
+        assert_eq!(restored, values);
     }
 
     #[test]
-    fn typed_arrays_reject_values_of_the_wrong_type() {
-        let values = Array::<Vector2>::from(vec![Vector2::new(1.0, 2.0)]);
-        let bytes = values.__bytes().expect("typed array wire").to_vec();
-        assert_eq!(Array::<Vector2>::__from_bytes(&bytes), Some(values));
-        assert!(Array::<i64>::__from_bytes(&bytes).is_none());
+    fn lazy_containers_share_identity_and_snapshots_are_independent() {
+        let array = Array::<i64>::new();
+        assert!(array.is_same(&array.clone()).expect("local identity"));
+        let snapshot = ArraySnapshot::from_vec(vec![1_i64, 2]);
+        let mut independent = snapshot.clone();
+        independent.as_mut_slice()[0] = 99;
+        assert_eq!(snapshot.as_slice(), &[1, 2]);
+        let initialized = Array::from_vec(vec![1_i64, 2]).expect("offline initializer");
+        assert_eq!(
+            initialized.get(1).expect("owned initializer element"),
+            Some(2)
+        );
+        let bytes = initialized.__bytes().expect("standalone default wire");
+        assert!(validate_dynamic_value(AbiValueType::ARRAY, bytes));
+        let dictionary =
+            Dictionary::from_entries(vec![(Variant::from("answer"), Variant::from(42_i64))])
+                .expect("offline dictionary initializer");
+        assert!(validate_dynamic_value(
+            AbiValueType::DICTIONARY,
+            dictionary.__bytes().expect("standalone dictionary default")
+        ));
+        let snapshot = DictionarySnapshot::from_entries(vec![(
+            Variant::from("answer"),
+            Variant::from(42_i64),
+        )]);
+        let map = snapshot
+            .into_hash_map::<String, i64>()
+            .expect("Rust-owned map");
+        assert_eq!(map.get("answer"), Some(&42));
+        let duplicate = DictionarySnapshot::from_entries(vec![
+            (Variant::from("same"), Variant::from(1_i64)),
+            (Variant::from("same"), Variant::from(2_i64)),
+        ]);
+        assert!(duplicate.into_hash_map::<String, i64>().is_err());
     }
 
     #[test]

@@ -53,7 +53,7 @@ struct OwnedGodotRefs {
 
 struct OwnedDynamicValues {
     next_token: u64,
-    values: HashMap<u64, (usize, NativeDynamic, Vec<u64>)>,
+    values: HashMap<u64, (usize, NativeDynamic, Vec<u64>, crate::container::Leases)>,
 }
 
 struct OwnedCallableValues {
@@ -171,6 +171,7 @@ impl EngineCallContext {
         &self,
         value: NativeDynamic,
         callable_tokens: Vec<u64>,
+        container_tokens: crate::container::Leases,
     ) -> Result<u64, ValueError> {
         let mut dynamics = match self.dynamics.lock() {
             Ok(dynamics) => dynamics,
@@ -208,7 +209,9 @@ impl EngineCallContext {
             ));
         }
         dynamics.next_token = next_token;
-        dynamics.values.insert(token, (1, value, callable_tokens));
+        dynamics
+            .values
+            .insert(token, (1, value, callable_tokens, container_tokens));
         Ok(token)
     }
 
@@ -222,7 +225,7 @@ impl EngineCallContext {
         let Ok(mut dynamics) = self.dynamics.lock() else {
             return AbiStatus::Internal;
         };
-        let Some((references, _, _)) = dynamics.values.get_mut(&token) else {
+        let Some((references, _, _, _)) = dynamics.values.get_mut(&token) else {
             return AbiStatus::InvalidArgument;
         };
         let Some(next) = references.checked_add(1) else {
@@ -236,18 +239,20 @@ impl EngineCallContext {
         let Ok(mut dynamics) = self.dynamics.lock() else {
             return AbiStatus::Internal;
         };
-        let Some((references, _, _)) = dynamics.values.get_mut(&token) else {
+        let Some((references, _, _, _)) = dynamics.values.get_mut(&token) else {
             return AbiStatus::InvalidArgument;
         };
         if *references > 1 {
             *references -= 1;
             return AbiStatus::Ok;
         }
-        let Some((_, value, callable_tokens)) = dynamics.values.remove(&token) else {
+        let Some((_, value, callable_tokens, container_tokens)) = dynamics.values.remove(&token)
+        else {
             return AbiStatus::Internal;
         };
         drop(dynamics);
         drop(value);
+        drop(container_tokens);
         for token in callable_tokens {
             let _ = self.release_callable(token);
         }
@@ -423,6 +428,23 @@ pub(crate) fn own_returned_dynamic(
     value_type: AbiValueType,
     value: NativeDynamic,
 ) -> Result<AbiValueV1, ValueError> {
+    own_dynamic(context, value_type, value, false)
+}
+
+pub(crate) fn own_returned_dynamic_snapshot(
+    context: &EngineCallContext,
+    value_type: AbiValueType,
+    value: NativeDynamic,
+) -> Result<AbiValueV1, ValueError> {
+    own_dynamic(context, value_type, value, true)
+}
+
+fn own_dynamic(
+    context: &EngineCallContext,
+    value_type: AbiValueType,
+    value: NativeDynamic,
+    snapshot: bool,
+) -> Result<AbiValueV1, ValueError> {
     if !matches!(
         value_type,
         AbiValueType::VARIANT | AbiValueType::ARRAY | AbiValueType::DICTIONARY
@@ -432,9 +454,13 @@ pub(crate) fn own_returned_dynamic(
             "Host attempted to retain an unsupported dynamic value",
         ));
     }
-    let encoded = value.to_bytes(Some(context))?;
+    let encoded = if snapshot {
+        value.to_bytes_snapshot(Some(context))?
+    } else {
+        value.to_bytes(Some(context))?
+    };
     let mut bytes = encoded.bytes;
-    let token = context.retain_dynamic(value, encoded.callable_tokens)?;
+    let token = context.retain_dynamic(value, encoded.callable_tokens, encoded.container_tokens)?;
     if let Err(error) = set_dynamic_ownership(&mut bytes, token) {
         let _ = context.release_dynamic(token);
         return Err(error);

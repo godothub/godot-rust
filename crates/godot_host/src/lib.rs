@@ -16,6 +16,7 @@ macro_rules! host_println {
 }
 
 mod callable_value;
+mod container;
 mod debugger;
 mod dynamic_value;
 mod engine_call;

@@ -198,8 +198,8 @@ fn declarations_preserve_script_types_and_initialize_plain_state() {
     assert!(!player.health.is_resolved());
     assert!(player.camera.is_none());
     assert!(player.weapon.is_none());
-    assert!(player.weapons.is_empty());
-    assert!(player.equipment_sets.is_empty());
+    assert!(player.weapons.is_empty().expect("empty default"));
+    assert!(player.equipment_sets.is_empty().expect("empty default"));
     assert!(player.recent_hits.is_empty());
     assert_eq!(player.recent_hits.capacity(), 32);
     assert_eq!(

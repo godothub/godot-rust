@@ -1594,6 +1594,14 @@ const fn dynamic_variant_type(value: AbiValueType) -> GDExtensionVariantType {
 }
 
 impl OwnedVariant {
+    pub(crate) fn copy_value(&self) -> Result<Self, ()> {
+        let copy = self.interface.variant_new_copy.ok_or(())?;
+        let mut result = Self::uninitialized(self.interface);
+        // SAFETY: Source is initialized; destination is aligned uninitialized Variant storage.
+        unsafe { copy(result.as_mut_ptr(), self.as_ptr()) };
+        result.mark_initialized();
+        Ok(result)
+    }
     pub(crate) const fn interface(&self) -> EngineInterface {
         self.interface
     }

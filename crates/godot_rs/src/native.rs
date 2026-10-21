@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod callable_value;
 mod class;
+mod container;
 mod dynamic_value;
 mod engine_call;
 mod method;
@@ -29,6 +30,7 @@ pub use value::GodotValue;
 pub(crate) use callable_value::{
     NativeCallableToken, retain_rust_callable, retained_callable_from_bytes,
 };
+pub(crate) use container::{NativeContainerToken, materialize_container, retain_container};
 pub(crate) use godot_api::api_snapshot;
 pub use godot_api::native as sys;
 
@@ -256,6 +258,7 @@ unsafe extern "C" fn deinitialize_level<L: ExtensionLibrary>(
     context.engine.unregister_level(level);
     if level == L::MINIMUM_LEVEL {
         callable_value::clear_thread_local_state();
+        container::clear_thread_local_state();
         engine_call::clear_thread_local_state();
     }
     if level == InitializationLevel::Core {

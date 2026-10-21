@@ -1718,32 +1718,42 @@ fn apply_rpc_configs<T: NativeClass>(
         crate::engine::NodeApi::rpc_config(
             &node,
             &method.name,
-            &rpc_config_variant(method.config),
+            &rpc_config_variant(method.config)?,
         )?;
     }
     Ok(())
 }
 
-fn rpc_config_variant(config: RpcConfig) -> Variant {
-    let mut value = Dictionary::new();
-    value.insert(
-        "rpc_mode",
-        match config.mode {
-            crate::script::RpcMode::Authority => 0_i64,
-            crate::script::RpcMode::AnyPeer => 1_i64,
-        },
-    );
-    value.insert("call_local", config.call_local);
-    value.insert(
-        "transfer_mode",
-        match config.transfer_mode {
-            crate::script::RpcTransferMode::Unreliable => 0_i64,
-            crate::script::RpcTransferMode::UnreliableOrdered => 1_i64,
-            crate::script::RpcTransferMode::Reliable => 2_i64,
-        },
-    );
-    value.insert("channel", i64::from(config.channel));
-    Variant::from(value)
+fn rpc_config_entries(config: RpcConfig) -> Vec<(Variant, Variant)> {
+    vec![
+        (
+            Variant::from("rpc_mode"),
+            Variant::from(match config.mode {
+                crate::script::RpcMode::Authority => 0_i64,
+                crate::script::RpcMode::AnyPeer => 1_i64,
+            }),
+        ),
+        (
+            Variant::from("call_local"),
+            Variant::from(config.call_local),
+        ),
+        (
+            Variant::from("transfer_mode"),
+            Variant::from(match config.transfer_mode {
+                crate::script::RpcTransferMode::Unreliable => 0_i64,
+                crate::script::RpcTransferMode::UnreliableOrdered => 1_i64,
+                crate::script::RpcTransferMode::Reliable => 2_i64,
+            }),
+        ),
+        (
+            Variant::from("channel"),
+            Variant::from(i64::from(config.channel)),
+        ),
+    ]
+}
+
+fn rpc_config_variant(config: RpcConfig) -> crate::error::EngineResult<Variant> {
+    Dictionary::from_entries(rpc_config_entries(config)).map(Variant::from)
 }
 
 unsafe extern "C" fn free_instance<T: NativeClass>(
@@ -1824,30 +1834,21 @@ mod tests {
 
     #[test]
     fn native_rpc_metadata_uses_godots_node_configuration_keys() {
-        let config = rpc_config_variant(RpcConfig {
+        let config = rpc_config_entries(RpcConfig {
             mode: crate::script::RpcMode::AnyPeer,
             call_local: true,
             transfer_mode: crate::script::RpcTransferMode::Reliable,
             channel: 7,
         });
-        let crate::variant::VariantKind::Dictionary(config) = config.kind() else {
-            panic!("RPC config must be a Dictionary");
+        let config = |name: &str| {
+            config
+                .iter()
+                .find(|(key, _)| key == &Variant::from(name))
+                .map(|(_, value)| value)
         };
-        assert_eq!(
-            config.get(&Variant::from("rpc_mode")),
-            Some(&Variant::from(1_i64))
-        );
-        assert_eq!(
-            config.get(&Variant::from("call_local")),
-            Some(&Variant::from(true))
-        );
-        assert_eq!(
-            config.get(&Variant::from("transfer_mode")),
-            Some(&Variant::from(2_i64))
-        );
-        assert_eq!(
-            config.get(&Variant::from("channel")),
-            Some(&Variant::from(7_i64))
-        );
+        assert_eq!(config("rpc_mode"), Some(&Variant::from(1_i64)));
+        assert_eq!(config("call_local"), Some(&Variant::from(true)));
+        assert_eq!(config("transfer_mode"), Some(&Variant::from(2_i64)));
+        assert_eq!(config("channel"), Some(&Variant::from(7_i64)));
     }
 }

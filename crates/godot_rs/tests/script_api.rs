@@ -314,8 +314,8 @@ fn struct_macro_generates_defaults_and_field_metadata() {
     assert!(player.empty_text.is_empty());
     assert_eq!(player.spawn_path, NodePath::from("../Spawn"));
     assert!(player.labels.is_empty());
-    assert!(player.patrol_points.is_empty());
-    assert!(player.settings.is_empty());
+    assert!(player.patrol_points.is_empty().expect("empty default"));
+    assert!(player.settings.is_empty().expect("empty default"));
     assert!(player.selected_node.is_none());
     assert!(player.gradient.is_none());
     assert_eq!(player.worker_mode, node::ProcessMode::PROCESS_MODE_ALWAYS);

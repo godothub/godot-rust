@@ -5,6 +5,7 @@
 //! recognizes the lexical constructs needed for highlighting, navigation, and
 //! conservative brace-based indentation.
 
+use std::collections::HashSet;
 use syn::parse::Parser;
 
 /// Rust 2024 keywords plus primitive types that should receive keyword-style
@@ -135,6 +136,7 @@ pub(crate) fn find_function_line(source: &str, requested_name: &str) -> Option<u
 pub(crate) fn function_declarations(source: &str) -> Vec<(String, usize)> {
     let mut scanner = Scanner::new(source);
     let mut functions = Vec::<(String, usize)>::new();
+    let mut seen = HashSet::new();
     while let Some(token) = scanner.next_token() {
         if token.text != "fn" {
             continue;
@@ -144,11 +146,7 @@ pub(crate) fn function_declarations(source: &str) -> Vec<(String, usize)> {
         };
         let line = name.line;
         let name = name.text.strip_prefix("r#").unwrap_or(name.text);
-        if is_identifier(name)
-            && !functions
-                .iter()
-                .any(|(existing, _)| existing.as_str() == name)
-        {
+        if is_identifier(name) && seen.insert(name) {
             functions.push((name.to_owned(), line));
         }
     }
@@ -158,18 +156,16 @@ pub(crate) fn function_declarations(source: &str) -> Vec<(String, usize)> {
 /// Collects source-local identifiers for conservative editor completion.
 pub(crate) fn identifiers(source: &str) -> Vec<String> {
     let mut scanner = Scanner::new(source);
-    let mut values = Vec::new();
+    let mut seen = HashSet::new();
     while let Some(token) = scanner.next_token() {
         let value = token.text.strip_prefix("r#").unwrap_or(token.text);
-        if is_identifier(value)
-            && !HIGHLIGHT_WORDS.contains(&value)
-            && !values.iter().any(|existing| existing == value)
-        {
-            values.push(value.to_owned());
+        if is_identifier(value) && !HIGHLIGHT_WORDS.contains(&value) {
+            seen.insert(value);
         }
     }
-    values.sort();
-    values
+    let mut values = seen.into_iter().collect::<Vec<_>>();
+    values.sort_unstable();
+    values.into_iter().map(str::to_owned).collect()
 }
 
 /// Finds declarations that Godot can navigate to without a full compiler AST.
@@ -1079,6 +1075,63 @@ impl Player {
             ),
             "Player speed.\nMeasured per second."
         );
+    }
+
+    #[test]
+    fn declarations_keep_first_lines_when_raw_and_unicode_names_repeat() {
+        let source = "fn zebra() {}\nfn r#移动() {}\nfn r#zebra() {}\nfn 移动() {}\n\
+                      // fn ignored_comment() {}\n\
+                      const TEXT: &str = r#\"fn ignored_string() {}\"#;\n\
+                      fn r#type() {}\nfn r#type() {}\nfn unfinished(\nfn";
+        assert_eq!(
+            function_declarations(source),
+            [
+                ("zebra".to_owned(), 0),
+                ("移动".to_owned(), 1),
+                ("type".to_owned(), 6),
+                ("unfinished".to_owned(), 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn completion_identifiers_are_sorted_and_deduplicate_borrowed_names() {
+        let source = "fn r#移动() { let café = zebra; café; r#café; r#zebra; 移动(); }\n\
+                      /* ignored_comment /* nested_comment */ */\n\
+                      let alpha = \"ignored_string\"; let r#type = alpha;\n\
+                      let unfinished = r#\"ignored_raw_string\"#; let r#";
+        assert_eq!(
+            identifiers(source),
+            ["alpha", "café", "r", "unfinished", "zebra", "移动"]
+        );
+    }
+
+    #[test]
+    fn large_scripts_keep_all_unique_declarations_and_sorted_identifiers() {
+        const COUNT: usize = 10_000;
+        let mut source = String::new();
+        for index in 0..COUNT {
+            source.push_str(&format!(
+                "fn method_{index:05}() {{}}\nfn r#method_{index:05}() {{}}\n"
+            ));
+        }
+        // The lexical scanner also supports a function while its body is being typed.
+        source.push_str("fn final_method(");
+
+        let functions = function_declarations(&source);
+        assert_eq!(functions.len(), COUNT + 1);
+        for (index, (name, line)) in functions[..COUNT].iter().enumerate() {
+            assert_eq!(name, &format!("method_{index:05}"));
+            assert_eq!(*line, index * 2);
+        }
+        assert_eq!(functions[COUNT], ("final_method".to_owned(), COUNT * 2));
+
+        let values = identifiers(&source);
+        assert_eq!(values.len(), COUNT + 1);
+        assert_eq!(values[0], "final_method");
+        for (index, name) in values[1..].iter().enumerate() {
+            assert_eq!(name, &format!("method_{index:05}"));
+        }
     }
 
     #[test]

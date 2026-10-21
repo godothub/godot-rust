@@ -6,6 +6,7 @@ use godot_api::{
     GDExtensionClassInstancePtr, GDExtensionConstTypePtr, GDExtensionTypePtr,
     GDExtensionVariantType,
 };
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::{
@@ -458,6 +459,10 @@ unsafe fn complete_code(
         return;
     };
     let functions = crate::rust_source::function_declarations(&source);
+    let function_names = functions
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<HashSet<_>>();
     let identifiers = crate::rust_source::identifiers(&source);
     let mut owned = Vec::<(i64, String, String, i64)>::new();
     for keyword in crate::rust_source::HIGHLIGHT_WORDS {
@@ -469,7 +474,7 @@ unsafe fn complete_code(
         ));
     }
     for identifier in identifiers {
-        let kind = if functions.iter().any(|(name, _)| name == &identifier) {
+        let kind = if function_names.contains(identifier.as_str()) {
             COMPLETION_KIND_FUNCTION
         } else if identifier
             .as_bytes()
@@ -1622,7 +1627,6 @@ static LANGUAGE_VIRTUAL_METHODS: &[VirtualMethodSpec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     #[test]
     fn editor_panic_returns_a_valid_fallback_across_the_c_boundary() {

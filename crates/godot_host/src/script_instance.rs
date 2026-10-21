@@ -1248,34 +1248,33 @@ unsafe extern "C" fn call(
         }
         _ => None,
     };
-    let debug_locals = match &prepared.target {
-        PreparedTarget::Reflected(method) => method
-            .arguments()
-            .zip(prepared.arguments.as_slice())
-            .filter_map(|((name, _), value)| {
-                debug_value_text(*value).map(|value| (name.to_owned(), value))
-            })
-            .collect(),
-        PreparedTarget::Lifecycle(_) => prepared
-            .arguments
-            .as_slice()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| {
-                let name = match callback_name {
-                    "_process" | "_physics_process" => "delta".to_owned(),
-                    "_input" | "_unhandled_input" => "event".to_owned(),
-                    _ => format!("arg{index}"),
-                };
-                debug_value_text(*value).map(|value| (name, value))
-            })
-            .collect(),
-    };
     let _debug_scope = crate::debugger::CallbackScope::enter(
         &instance.source_path,
         callback_name,
         instance.identity.address.load(Ordering::Acquire),
-        debug_locals,
+        || match &prepared.target {
+            PreparedTarget::Reflected(method) => method
+                .arguments()
+                .zip(prepared.arguments.as_slice())
+                .filter_map(|((name, _), value)| {
+                    debug_value_text(*value).map(|value| (name.to_owned(), value))
+                })
+                .collect(),
+            PreparedTarget::Lifecycle(_) => prepared
+                .arguments
+                .as_slice()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| {
+                    let name = match callback_name {
+                        "_process" | "_physics_process" => "delta".to_owned(),
+                        "_input" | "_unhandled_input" => "event".to_owned(),
+                        _ => format!("arg{index}"),
+                    };
+                    debug_value_text(*value).map(|value| (name, value))
+                })
+                .collect(),
+        },
     );
     let _profile_scope = crate::profiler::ProfileScope::enter(&instance.source_path, callback_name);
     let outcome = match state.try_lock() {

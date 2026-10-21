@@ -84,6 +84,7 @@ pub(crate) struct HostRuntime {
 
 impl HostRuntime {
     pub(crate) fn start(interface: EngineInterface) -> Result<Self, RuntimeError> {
+        crate::debugger::initialize(interface);
         let mut registry = ClassRegistry::new(interface)?;
         let engine_name = StaticStringName::new(interface, c"Engine");
         let get_singleton = interface

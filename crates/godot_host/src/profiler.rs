@@ -18,7 +18,6 @@ struct ProfileState {
     accumulated: HashMap<String, ProfileEntry>,
     current_frame: HashMap<String, ProfileEntry>,
     last_frame: HashMap<String, ProfileEntry>,
-    save_native_calls: bool,
 }
 
 struct ActiveCall {
@@ -28,6 +27,7 @@ struct ActiveCall {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static SAVE_NATIVE_CALLS: AtomicBool = AtomicBool::new(false);
 static STATE: OnceLock<Mutex<ProfileState>> = OnceLock::new();
 
 thread_local! {
@@ -40,11 +40,17 @@ pub(crate) struct ProfileScope {
 
 impl ProfileScope {
     pub(crate) fn enter(source: &str, function: &str) -> Self {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return Self { active: false };
+        }
         Self::enter_signature(format!("{source}::{function}"), true)
     }
 
     pub(crate) fn enter_native(owner: &str, member: &str) -> Self {
-        Self::enter_signature(format!("[native] {owner}.{member}"), saves_native_calls())
+        if !ENABLED.load(Ordering::Relaxed) || !saves_native_calls() {
+            return Self { active: false };
+        }
+        Self::enter_signature(format!("[native] {owner}.{member}"), true)
     }
 
     fn enter_signature(signature: String, allowed: bool) -> Self {
@@ -128,20 +134,11 @@ pub(crate) fn stop() {
 }
 
 pub(crate) fn set_save_native_calls(enabled: bool) {
-    if let Ok(mut state) = STATE
-        .get_or_init(|| Mutex::new(ProfileState::default()))
-        .lock()
-    {
-        state.save_native_calls = enabled;
-    }
+    SAVE_NATIVE_CALLS.store(enabled, Ordering::Release);
 }
 
 pub(crate) fn saves_native_calls() -> bool {
-    STATE
-        .get_or_init(|| Mutex::new(ProfileState::default()))
-        .lock()
-        .map(|state| state.save_native_calls)
-        .unwrap_or(false)
+    SAVE_NATIVE_CALLS.load(Ordering::Relaxed)
 }
 
 pub(crate) fn next_frame() {

@@ -29,8 +29,8 @@ use godot_api::abi::{
     HOST_API_SLOT_POLL_SIGNAL, HOST_API_SLOT_RETAIN_CALLABLE_VALUE,
     HOST_API_SLOT_RETAIN_DYNAMIC_VALUE, HOST_API_SLOT_WATCH_SIGNAL, HostApiV1,
     MODULE_API_SLOT_CANCEL_TASKS, MODULE_API_SLOT_DROP_VALUE, MODULE_API_SLOT_GODOT_API_MAJOR,
-    MODULE_API_SLOT_GODOT_API_MINOR, MODULE_API_SLOT_POLL_TASKS, ModuleApiV1,
-    decode_node_field_class, decode_resource_uid_words,
+    MODULE_API_SLOT_GODOT_API_MINOR, MODULE_API_SLOT_POLL_TASKS, MODULE_API_SLOT_PREPARE_RELOAD,
+    ModuleApiV1, decode_node_field_class, decode_resource_uid_words,
 };
 use libloading::Library;
 use std::cell::Cell;
@@ -142,6 +142,7 @@ struct GenerationInner {
     drop_value: AbiDropValueFn,
     poll_tasks: AbiPollTasksFn,
     cancel_tasks: AbiCancelTasksFn,
+    prepare_reload: AbiCancelTasksFn,
     scripts: Vec<LoadedScript>,
     library: Option<Library>,
 }
@@ -165,6 +166,7 @@ struct ModuleExtensions {
     godot_api: ModuleGodotApi,
     poll_tasks: AbiPollTasksFn,
     cancel_tasks: AbiCancelTasksFn,
+    prepare_reload: AbiCancelTasksFn,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -565,6 +567,7 @@ impl ModuleGeneration {
                 drop_value: extensions.drop_value,
                 poll_tasks: extensions.poll_tasks,
                 cancel_tasks: extensions.cancel_tasks,
+                prepare_reload: extensions.prepare_reload,
                 scripts,
                 library: Some(library),
             }),
@@ -610,6 +613,14 @@ impl ModuleGeneration {
         // SAFETY: The callback belongs to this retained generation and the
         // ScriptLanguage frame callback runs it on the Godot main thread.
         status_result(unsafe { callback() }, "project task polling failed")
+    }
+
+    pub(crate) fn prepare_reload(&self) -> Result<(), ModuleCallError> {
+        let Some(callback) = self.inner.prepare_reload else {
+            return Ok(());
+        };
+        // SAFETY: This check belongs to the retained generation and does not cancel tasks.
+        status_result(unsafe { callback() }, "project generation is busy")
     }
 
     pub(crate) fn cancel_tasks(&self) -> Result<(), ModuleCallError> {
@@ -853,6 +864,7 @@ fn validate_module_extensions(api: &ModuleApiV1) -> Result<ModuleExtensions, Mod
             MODULE_API_SLOT_DROP_VALUE
                 | MODULE_API_SLOT_GODOT_API_MAJOR
                 | MODULE_API_SLOT_GODOT_API_MINOR
+                | MODULE_API_SLOT_PREPARE_RELOAD
                 | MODULE_API_SLOT_POLL_TASKS
                 | MODULE_API_SLOT_CANCEL_TASKS
         ) && *value != 0
@@ -861,11 +873,32 @@ fn validate_module_extensions(api: &ModuleApiV1) -> Result<ModuleExtensions, Mod
             "unknown extension slots are populated".into(),
         ));
     }
+    let prepare_reload = if api.reserved_flags & ABI_MODULE_EXTENSION_TASKS != 0 {
+        if api.reserved[MODULE_API_SLOT_PREPARE_RELOAD] == 0 {
+            return Err(ModuleLoadError::InvalidModuleTable(
+                "task extension has no reload preflight callback".into(),
+            ));
+        }
+        // SAFETY: This authenticated slot has the same signature as task cancellation.
+        unsafe {
+            core::mem::transmute::<usize, AbiCancelTasksFn>(
+                api.reserved[MODULE_API_SLOT_PREPARE_RELOAD],
+            )
+        }
+    } else {
+        if api.reserved[MODULE_API_SLOT_PREPARE_RELOAD] != 0 {
+            return Err(ModuleLoadError::InvalidModuleTable(
+                "reload preflight requires the task extension".into(),
+            ));
+        }
+        None
+    };
     Ok(ModuleExtensions {
         drop_value,
         godot_api: ModuleGodotApi { major, minor },
         poll_tasks,
         cancel_tasks,
+        prepare_reload,
     })
 }
 
@@ -1221,6 +1254,21 @@ impl ModuleState {
     }
 
     pub(crate) fn get_field(&self, field: &ModuleField) -> Result<ModuleValue, ModuleCallError> {
+        self.get_field_impl(field, false)
+    }
+
+    pub(crate) fn get_field_storage(
+        &self,
+        field: &ModuleField,
+    ) -> Result<ModuleValue, ModuleCallError> {
+        self.get_field_impl(field, true)
+    }
+
+    fn get_field_impl(
+        &self,
+        field: &ModuleField,
+        storage: bool,
+    ) -> Result<ModuleValue, ModuleCallError> {
         let state = self.validate_field_handle(field)?;
         let callback = self.states[state]
             .script
@@ -1234,6 +1282,12 @@ impl ModuleState {
             status: AbiStatus::InvalidArgument,
             message: "field index exceeds the project ABI".into(),
         })?;
+        let field_index = field_index
+            | if storage {
+                godot_api::abi::ABI_FIELD_STORAGE_ACCESS
+            } else {
+                0
+            };
         let mut output = AbiValueV1::NIL;
         let _scope = CallbackScriptScope::enter(self.states[state].script.resource_uid());
         // SAFETY: State and field belong to the retained generation and output
@@ -1255,6 +1309,23 @@ impl ModuleState {
         field: &ModuleField,
         value: AbiValueV1,
     ) -> Result<(), ModuleCallError> {
+        self.set_field_impl(field, value, false)
+    }
+
+    pub(crate) fn set_field_storage(
+        &mut self,
+        field: &ModuleField,
+        value: AbiValueV1,
+    ) -> Result<(), ModuleCallError> {
+        self.set_field_impl(field, value, true)
+    }
+
+    fn set_field_impl(
+        &mut self,
+        field: &ModuleField,
+        value: AbiValueV1,
+        storage: bool,
+    ) -> Result<(), ModuleCallError> {
         let state = self.validate_field_handle(field)?;
         let expected = field.value_type().ok_or_else(|| ModuleCallError {
             status: AbiStatus::Unsupported,
@@ -1273,6 +1344,12 @@ impl ModuleState {
             status: AbiStatus::InvalidArgument,
             message: "field index exceeds the project ABI".into(),
         })?;
+        let field_index = field_index
+            | if storage {
+                godot_api::abi::ABI_FIELD_STORAGE_ACCESS
+            } else {
+                0
+            };
         let _scope = CallbackScriptScope::enter(self.states[state].script.resource_uid());
         // SAFETY: State and field belong to the retained generation and the
         // value was validated against the field schema.

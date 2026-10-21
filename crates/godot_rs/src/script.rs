@@ -411,6 +411,8 @@ super_arguments!(
 );
 
 /// Generated indexed access to Godot-visible script fields.
+/// ABI_FIELD_STORAGE_ACCESS selects backing storage during migration and
+/// bypasses user getters/setters, including writes to read-only properties.
 #[doc(hidden)]
 pub trait ScriptFieldAccess: ScriptClass {
     unsafe fn __godot_rs_get_field(

@@ -18,7 +18,7 @@ use godot_api::abi::{
     HOST_API_SLOT_RETAIN_CALLABLE_VALUE, HOST_API_SLOT_RETAIN_DYNAMIC_VALUE,
     HOST_API_SLOT_WATCH_SIGNAL, HostApiV1, MODULE_API_SLOT_CANCEL_TASKS,
     MODULE_API_SLOT_DROP_VALUE, MODULE_API_SLOT_GODOT_API_MAJOR, MODULE_API_SLOT_GODOT_API_MINOR,
-    MODULE_API_SLOT_POLL_TASKS, ModuleApiV1,
+    MODULE_API_SLOT_POLL_TASKS, MODULE_API_SLOT_PREPARE_RELOAD, ModuleApiV1,
 };
 
 use crate::error::{EngineError, EngineResult};
@@ -298,6 +298,7 @@ pub unsafe fn initialize(
     reserved[MODULE_API_SLOT_GODOT_API_MINOR] = godot_api::SELECTED_GODOT_API_MINOR as usize;
     reserved[MODULE_API_SLOT_POLL_TASKS] = poll_tasks as *const () as usize;
     reserved[MODULE_API_SLOT_CANCEL_TASKS] = cancel_tasks as *const () as usize;
+    reserved[MODULE_API_SLOT_PREPARE_RELOAD] = prepare_reload as *const () as usize;
     let module = ModuleApiV1 {
         header: AbiHeader::new(ModuleApiV1::MINIMUM_SIZE),
         context: ptr::null_mut(),
@@ -333,6 +334,14 @@ pub unsafe extern "C" fn shutdown(_context: *mut c_void) -> AbiStatus {
 unsafe extern "C" fn poll_tasks() -> AbiStatus {
     match std::panic::catch_unwind(crate::task::poll_frame) {
         Ok(()) => AbiStatus::Ok,
+        Err(_) => AbiStatus::Panic,
+    }
+}
+
+unsafe extern "C" fn prepare_reload() -> AbiStatus {
+    match std::panic::catch_unwind(crate::task::blocking_workers_finished) {
+        Ok(true) => AbiStatus::Ok,
+        Ok(false) => AbiStatus::Unsupported,
         Err(_) => AbiStatus::Panic,
     }
 }

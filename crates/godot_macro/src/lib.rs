@@ -766,18 +766,27 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                     );
                     field_getters.push(quote! {
                         #index => {
-                            let field_value: #field_type = #field_value;
+                            let field_value: #field_type = if reloading {
+                                ::core::clone::Clone::clone(&self.#name)
+                            } else { #field_value };
                             /* SAFETY: The field ABI caller supplies a writable output slot. */
                             unsafe { ::godot_rs::script::encode_method_result(field_value, output) }
                         },
                     });
-                    if !metadata.property_read_only {
+                    {
+                        let read_only = metadata.property_read_only;
                         let assignment = metadata.property_setter.as_ref().map_or_else(
                             || quote!(self.#name = decoded;),
                             |setter| quote!(self.#setter(decoded);),
                         );
                         field_setters.push(quote! {
                             #index => {
+                                if #read_only && !reloading {
+                                    return ::godot_rs::abi::AbiCallResult::failure(
+                                        ::godot_rs::abi::AbiStatus::Unsupported,
+                                        "Rust property is read-only",
+                                    );
+                                }
                                 let Some(decoded) =
                                     (unsafe { <#field_type as ::godot_rs::script::FromAbiValue>::from_abi(value) })
                                 else {
@@ -786,7 +795,7 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                                         "Host value does not match the generated Rust field type",
                                     );
                                 };
-                                #assignment
+                                if reloading { self.#name = decoded; } else { #assignment }
                                 ::godot_rs::abi::AbiCallResult::OK
                             }
                         });
@@ -915,6 +924,8 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                 field_index: u32,
                 output: *mut ::godot_rs::abi::AbiValueV1,
             ) -> ::godot_rs::abi::AbiCallResult {
+                let reloading = field_index & ::godot_rs::abi::ABI_FIELD_STORAGE_ACCESS != 0;
+                let field_index = field_index & !::godot_rs::abi::ABI_FIELD_STORAGE_ACCESS;
                 match field_index {
                     #(#field_getters)*
                     _ => ::godot_rs::abi::AbiCallResult::failure(
@@ -929,6 +940,8 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                 field_index: u32,
                 value: ::godot_rs::abi::AbiValueV1,
             ) -> ::godot_rs::abi::AbiCallResult {
+                let reloading = field_index & ::godot_rs::abi::ABI_FIELD_STORAGE_ACCESS != 0;
+                let field_index = field_index & !::godot_rs::abi::ABI_FIELD_STORAGE_ACCESS;
                 match field_index {
                     #(#field_setters,)*
                     _ => ::godot_rs::abi::AbiCallResult::failure(
@@ -3000,6 +3013,74 @@ impl VisitMut for ExplicitSelfType<'_> {
     }
 }
 
+fn validate_object_hook(method: &ImplItemFn) -> syn::Result<()> {
+    fn type_name(ty: &Type) -> String {
+        match ty {
+            Type::Tuple(tuple) if tuple.elems.is_empty() => "()".into(),
+            Type::Path(path) => {
+                let Some(segment) = path.path.segments.last() else {
+                    return String::new();
+                };
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        if segment.ident == "ScriptResult" || segment.ident == "EngineResult" {
+                            return type_name(inner);
+                        }
+                        return format!("{}<{}>", segment.ident, type_name(inner));
+                    }
+                }
+                segment.ident.to_string()
+            }
+            _ => token_string(ty).value(),
+        }
+    }
+    let (arguments, result): (&[&str], &str) = match method.sig.ident.to_string().as_str() {
+        "_notification" => (&["i32"], "()"),
+        "_to_string" => (&[], "String"),
+        "_get" | "_property_get_revert" => (&["StringName"], "Variant"),
+        "_set" => (&["StringName", "Variant"], "bool"),
+        "_get_property_list" => (&[], "Array<Dictionary>"),
+        "_validate_property" => (&["Dictionary"], "()"),
+        "_property_can_revert" => (&["StringName"], "bool"),
+        "_reloaded" => (&[], "()"),
+        _ => unreachable!(),
+    };
+    let actual = method
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| {
+            if let FnArg::Typed(arg) = arg {
+                Some(type_name(&arg.ty))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let actual_return = match &method.sig.output {
+        ReturnType::Default => "()".into(),
+        ReturnType::Type(_, ty) => type_name(ty),
+    };
+    if receiver_kind(method)? == Receiver::Static
+        || actual
+            .iter()
+            .map(String::as_str)
+            .ne(arguments.iter().copied())
+        || actual_return != result
+    {
+        return Err(Error::new_spanned(
+            &method.sig,
+            format!(
+                "{} callback requires an instance receiver, arguments ({}) and return type {}",
+                method.sig.ident,
+                arguments.join(", "),
+                result
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn method_descriptor(
     self_type: &Type,
     type_name: &syn::Ident,
@@ -3037,7 +3118,33 @@ fn method_descriptor(
             "Godot lifecycle callbacks are registered automatically",
         ));
     }
-    if lifecycle.is_none() && func.is_none() && rpc.is_none() && virtual_trait.is_none() {
+    let object_hook = matches!(
+        method.sig.ident.to_string().as_str(),
+        "_notification"
+            | "_to_string"
+            | "_get"
+            | "_set"
+            | "_get_property_list"
+            | "_validate_property"
+            | "_property_can_revert"
+            | "_property_get_revert"
+            | "_reloaded"
+    );
+    if object_hook {
+        if func.is_some() || rpc.is_some() || virtual_trait.is_some() {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "Object and reload callbacks are registered automatically in an inherent #[script] impl",
+            ));
+        }
+        validate_object_hook(method)?;
+    }
+    if lifecycle.is_none()
+        && func.is_none()
+        && rpc.is_none()
+        && virtual_trait.is_none()
+        && !object_hook
+    {
         let message = match method.sig.ident.to_string().as_str() {
             "_init" => Some(
                 "`_init` is not a Rust script callback; initialize state with `#[init(default = expression)]` and access scene nodes in `_ready`",
@@ -3115,7 +3222,9 @@ fn method_descriptor(
             "default arguments must be trailing; add defaults to every following fixed argument",
         ));
     }
-    if (!parameter_defaults.iter().all(Option::is_none) || is_vararg) && lifecycle.is_some() {
+    if (!parameter_defaults.iter().all(Option::is_none) || is_vararg)
+        && (lifecycle.is_some() || object_hook)
+    {
         return Err(Error::new_spanned(
             &method.sig.inputs,
             "Godot lifecycle callbacks cannot declare defaults or variable arguments",
@@ -4492,7 +4601,7 @@ mod tests {
                 fn _init(&mut self) {}
             ),
             parse_quote!(
-                fn _notification(&mut self, what: i32) {}
+                fn _unhandled_key_input(&mut self, event: ObjectRef<InputEvent>) {}
             ),
         ];
         for mut method in methods {

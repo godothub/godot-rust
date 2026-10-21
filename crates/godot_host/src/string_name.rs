@@ -174,7 +174,7 @@ pub(crate) fn read_utf8_string_name(
     string.to_utf8()
 }
 
-fn string_names_equal(
+pub(crate) fn string_names_equal(
     interface: EngineInterface,
     left: GDExtensionConstStringNamePtr,
     right: GDExtensionConstStringNamePtr,

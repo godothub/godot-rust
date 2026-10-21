@@ -16,6 +16,13 @@ pub(crate) fn install_generation(
         exports.apply();
         return Ok(0);
     };
+    current.prepare_reload().map_err(|error| {
+        if error.status == AbiStatus::Unsupported {
+            GenerationReloadError::Busy
+        } else {
+            rejected(format!("reload preflight failed: {}", error.message))
+        }
+    })?;
     let slots = {
         let registry = LIVE_INSTANCES
             .get_or_init(|| Mutex::new(HashSet::new()))
@@ -114,16 +121,11 @@ pub(crate) fn install_generation(
         prepared.push(Arc::new(next));
         refreshes.push(refresh);
     }
-    // Cancellation runs only after migration succeeds. Futures may release
-    // owners; validate the registry again afterwards, outside any registry lock.
-    current.cancel_tasks().map_err(|error| {
+    current.prepare_reload().map_err(|error| {
         if error.status == AbiStatus::Unsupported {
             GenerationReloadError::Busy
         } else {
-            rejected(format!(
-                "could not cancel active tasks: {:?}: {}",
-                error.status, error.message
-            ))
+            rejected(format!("reload preflight failed: {}", error.message))
         }
     })?;
     for instance in &instances {
@@ -174,6 +176,20 @@ pub(crate) fn install_generation(
         refresh.apply(instance);
     }
     exports.apply();
+    // Publication has committed. Task destructors may call Godot or release
+    // owners, so run them outside registry/state/slot locks and never reject
+    // an already committed generation because of their side effects.
+    if let Err(error) = current.cancel_tasks() {
+        host_eprintln!(
+            "godot-rust: retired generation task cleanup: {}",
+            error.message
+        );
+    }
+    for instance in &prepared {
+        if ensure_instance_attached(instance).is_ok() {
+            super::hooks::invoke(instance, "_reloaded", &[]);
+        }
+    }
     Ok(prepared.len())
 }
 
@@ -355,7 +371,7 @@ fn migrate_state(
                     field.name()
                 )));
             }
-            let value = current.get_field(&field).map_err(|error| {
+            let value = current.get_field_storage(&field).map_err(|error| {
                 GenerationReloadError::Rejected(format!(
                     "could not capture `{}`: {:?}: {}",
                     field.name(),
@@ -424,14 +440,16 @@ fn migrate_state(
                         ))
                     })?;
             }
-            candidate.set_field(&next_field, decoded).map_err(|error| {
-                GenerationReloadError::Rejected(format!(
-                    "could not restore `{}`: {:?}: {}",
-                    field.name(),
-                    error.status,
-                    error.message
-                ))
-            })?;
+            candidate
+                .set_field_storage(&next_field, decoded)
+                .map_err(|error| {
+                    GenerationReloadError::Rejected(format!(
+                        "could not restore `{}`: {:?}: {}",
+                        field.name(),
+                        error.status,
+                        error.message
+                    ))
+                })?;
         }
         Ok(())
     })

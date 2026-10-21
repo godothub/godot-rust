@@ -1052,14 +1052,20 @@ impl VariantCodec {
         Ok(unsafe { value.cast::<f64>().read() })
     }
 
-    fn read_bool(&self, value: GDExtensionConstVariantPtr) -> Result<bool, VariantTypeMismatch> {
+    pub(crate) fn read_bool(
+        &self,
+        value: GDExtensionConstVariantPtr,
+    ) -> Result<bool, VariantTypeMismatch> {
         let expected = GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_BOOL;
         let value = self.read_internal(value, expected, self.bool_internal)?;
         // SAFETY: Godot's BOOL internal getter returns a live C++ bool.
         Ok(unsafe { value.cast::<u8>().read() } != 0)
     }
 
-    fn read_i64(&self, value: GDExtensionConstVariantPtr) -> Result<i64, VariantTypeMismatch> {
+    pub(crate) fn read_i64(
+        &self,
+        value: GDExtensionConstVariantPtr,
+    ) -> Result<i64, VariantTypeMismatch> {
         let expected = GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_INT;
         let value = self.read_internal(value, expected, self.int_internal)?;
         // SAFETY: Godot's INT internal getter returns a live `int64_t`.

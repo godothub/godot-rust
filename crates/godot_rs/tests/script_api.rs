@@ -1217,6 +1217,24 @@ fn exported_fields_dispatch_by_validated_index() {
         unsafe { player.__godot_rs_set_field(29, godot_rs::abi::AbiValueV1::from_i64(2)) };
     assert_eq!(rejected.status, godot_rs::abi::AbiStatus::Unsupported);
     assert_eq!(player.level, 1);
+
+    let storage = godot_rs::abi::ABI_FIELD_STORAGE_ACCESS;
+    // SAFETY: Migration writes validated backing storage without invoking the clamping setter.
+    let restored = unsafe {
+        player.__godot_rs_set_field(28 | storage, godot_rs::abi::AbiValueV1::from_i64(250))
+    };
+    assert_eq!(restored.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(player.health, 250);
+    // SAFETY: Storage mode also restores read-only backing fields; ordinary writes remain rejected.
+    let restored = unsafe {
+        player.__godot_rs_set_field(29 | storage, godot_rs::abi::AbiValueV1::from_i64(2))
+    };
+    assert_eq!(restored.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(player.level, 2);
+    // SAFETY: This reads the restored field into one writable ABI slot.
+    let restored = unsafe { player.__godot_rs_get_field(28 | storage, &mut output) };
+    assert_eq!(restored.status, godot_rs::abi::AbiStatus::Ok);
+    assert_eq!(output, godot_rs::abi::AbiValueV1::from_i64(250));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use core::ffi::c_void;
 mod connections;
+mod hooks;
 mod reload;
 mod typed;
 use core::mem::size_of;
@@ -64,8 +65,21 @@ struct InstanceIdentity {
 // one complete generation, including every pointer returned in its metadata.
 struct InstanceSlot {
     current: Mutex<Arc<RustScriptInstance>>,
-    property_lists: Mutex<Vec<Arc<RustScriptInstance>>>,
+    property_lists: Mutex<Vec<PropertyListLease>>,
     method_lists: Mutex<Vec<Arc<RustScriptInstance>>>,
+}
+
+enum PropertyListLease {
+    Static(Arc<RustScriptInstance>),
+    Dynamic(hooks::PropertyList),
+}
+impl PropertyListLease {
+    fn infos(&self) -> &[GDExtensionPropertyInfo] {
+        match self {
+            Self::Static(instance) => &instance.property_infos,
+            Self::Dynamic(list) => &list.infos,
+        }
+    }
 }
 
 struct RustScriptInstance {
@@ -83,6 +97,7 @@ struct RustScriptInstance {
     available: LifecycleAvailability,
     properties: Vec<ReflectedProperty>,
     property_infos: Vec<GDExtensionPropertyInfo>,
+    object_hooks: hooks::Methods,
     methods: Vec<ReflectedMethod>,
     method_infos: Vec<GDExtensionMethodInfo>,
     signals: Vec<ReflectedSignal>,
@@ -704,6 +719,7 @@ fn prepare_instance(
         available,
         properties,
         property_infos,
+        object_hooks: hooks::Methods::new(&methods),
         methods,
         method_infos,
         signals,
@@ -791,7 +807,7 @@ unsafe extern "C" fn set(
         return 0;
     }
     let Some(property) = resolve_property(Some(&instance), name) else {
-        return 0;
+        return u8::from(hooks::set(&instance, name, value));
     };
     let Some(field) = property.field.as_ref() else {
         return 0;
@@ -880,7 +896,7 @@ unsafe extern "C" fn get(
         return 0;
     }
     let Some(property) = resolve_property(Some(&instance), name) else {
-        return 0;
+        return u8::from(hooks::get(&instance, name, result));
     };
     let Some(field) = property.field.as_ref() else {
         return 0;
@@ -938,21 +954,27 @@ unsafe extern "C" fn get_property_list(
     let Some(slot) = slot(instance) else {
         return ptr::null();
     };
-    let Ok(current) = slot.current.lock() else {
-        return ptr::null();
+    let current = match slot.current.lock() {
+        Ok(current) => current.clone(),
+        Err(_) => return ptr::null(),
     };
-    if current.property_infos.is_empty() {
+    let lease = hooks::property_list(&current).map_or_else(
+        || PropertyListLease::Static(current.clone()),
+        PropertyListLease::Dynamic,
+    );
+    if lease.infos().is_empty() {
         return ptr::null();
     }
+    let pointer = lease.infos().as_ptr();
+    let length = lease.infos().len();
     let Ok(mut lists) = slot.property_lists.lock() else {
         return ptr::null();
     };
+    lists.push(lease);
     if !count.is_null() {
-        // SAFETY: The metadata count is bounded when the module is loaded.
-        unsafe { count.write(current.property_infos.len() as u32) };
+        // SAFETY: The bounded list length fits Godot's count output.
+        unsafe { count.write(length as u32) };
     }
-    let pointer = current.property_infos.as_ptr();
-    lists.push(current.clone());
     pointer
 }
 
@@ -968,7 +990,7 @@ unsafe extern "C" fn free_property_list(
         };
         lists
             .iter()
-            .position(|payload| payload.property_infos.as_ptr() == list)
+            .position(|payload| payload.infos().as_ptr() == list)
             .map(|index| lists.swap_remove(index))
     };
     // State destructors may call Godot; release them outside the lease lock.
@@ -987,6 +1009,13 @@ unsafe extern "C" fn property_can_revert(
     name: GDExtensionConstStringNamePtr,
 ) -> GDExtensionBool {
     let instance = data(instance);
+    if instance
+        .as_ref()
+        .and_then(|instance| hooks::can_revert(instance, name))
+        == Some(true)
+    {
+        return 1;
+    }
     u8::from(
         resolve_property(instance.as_deref(), name)
             .and_then(|property| property.field.as_ref())
@@ -1003,10 +1032,13 @@ unsafe extern "C" fn property_get_revert(
     let Some(instance) = data(instance) else {
         return 0;
     };
+    if hooks::can_revert(&instance, name) == Some(true) {
+        return u8::from(hooks::get_revert(&instance, name, result));
+    }
     let Some(field) =
         resolve_property(Some(&instance), name).and_then(|property| property.field.as_ref())
     else {
-        return 0;
+        return u8::from(hooks::get_revert(&instance, name, result));
     };
     let Some(value) = field.property_default_value() else {
         return 0;
@@ -1071,6 +1103,23 @@ unsafe extern "C" fn get_property_state(
         // Godot-owned property-state callback.
         unsafe { add(property.name.as_ptr(), value.as_ptr(), userdata) };
     }
+    if let Some(list) = hooks::property_list(&instance) {
+        for property in list
+            .infos
+            .iter()
+            .skip(instance.property_infos.len())
+            .filter(|property| property.usage & ABI_PROPERTY_USAGE_STORAGE != 0)
+        {
+            let Ok(mut value) = OwnedVariant::from_abi(codec, AbiValueV1::NIL) else {
+                continue;
+            };
+            if hooks::get(&instance, property.name, value.as_mut_ptr()) {
+                value.mark_initialized();
+                // SAFETY: The property lease, initialized Variant and callback are live synchronously.
+                unsafe { add(property.name, value.as_ptr(), userdata) };
+            }
+        }
+    }
 }
 
 unsafe extern "C" fn get_method_list(
@@ -1127,18 +1176,28 @@ unsafe extern "C" fn get_property_type(
     is_valid: *mut GDExtensionBool,
 ) -> GDExtensionVariantType {
     let instance = data(instance);
-    let property = resolve_property(instance.as_deref(), name);
-    write_bool(is_valid, property.is_some());
-    property
+    let type_ = resolve_property(instance.as_deref(), name)
         .map(|property| property.type_)
-        .unwrap_or(GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_NIL)
+        .or_else(|| {
+            let instance = instance.as_ref()?;
+            let list = hooks::property_list(instance)?;
+            let interface = instance.interface?;
+            list.infos
+                .iter()
+                .find(|property| {
+                    crate::string_name::string_names_equal(interface, property.name, name)
+                })
+                .map(|property| property.type_)
+        });
+    write_bool(is_valid, type_.is_some());
+    type_.unwrap_or(GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_NIL)
 }
 
 unsafe extern "C" fn validate_property(
-    _instance: GDExtensionScriptInstanceDataPtr,
-    _property: *mut GDExtensionPropertyInfo,
+    instance: GDExtensionScriptInstanceDataPtr,
+    property: *mut GDExtensionPropertyInfo,
 ) -> GDExtensionBool {
-    0
+    u8::from(data(instance).is_some_and(|instance| hooks::validate(&instance, property)))
 }
 
 unsafe extern "C" fn has_method(
@@ -1775,18 +1834,24 @@ impl RustScriptInstance {
 }
 
 unsafe extern "C" fn notification(
-    _instance: GDExtensionScriptInstanceDataPtr,
-    _what: i32,
+    instance: GDExtensionScriptInstanceDataPtr,
+    what: i32,
     _reversed: GDExtensionBool,
 ) {
+    if let Some(instance) = data(instance) {
+        hooks::notification(&instance, what);
+    }
 }
 
 unsafe extern "C" fn to_string(
-    _instance: GDExtensionScriptInstanceDataPtr,
+    instance: GDExtensionScriptInstanceDataPtr,
     is_valid: *mut GDExtensionBool,
-    _result: GDExtensionStringPtr,
+    result: GDExtensionStringPtr,
 ) {
-    write_bool(is_valid, false);
+    write_bool(
+        is_valid,
+        data(instance).is_some_and(|instance| hooks::to_string(&instance, result)),
+    );
 }
 
 unsafe extern "C" fn refcount_incremented(_instance: GDExtensionScriptInstanceDataPtr) {}
@@ -2340,6 +2405,7 @@ mod tests {
             },
             properties: Vec::new(),
             property_infos: Vec::new(),
+            object_hooks: hooks::Methods::new(&[]),
             methods: Vec::new(),
             method_infos: Vec::new(),
             signals: Vec::new(),

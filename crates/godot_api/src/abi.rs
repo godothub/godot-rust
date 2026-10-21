@@ -10,7 +10,11 @@ pub const ABI_MAGIC: [u8; 8] = *b"GDRSABI\0";
 pub const ABI_DYNAMIC_MAGIC: [u8; 8] = *b"GDRSVAR\0";
 
 /// Current dynamic-value wire revision.
-pub const ABI_DYNAMIC_VERSION: u16 = 2;
+pub const ABI_DYNAMIC_VERSION: u16 = 3;
+
+/// A container node carries one process-local shared-container token.
+/// Tokens are validated by the owning runtime, never interpreted as pointers.
+pub const ABI_DYNAMIC_NODE_CONTAINER: u32 = 1;
 
 /// Magic prefix for stable [`AbiValueType::CALLABLE`] payloads.
 pub const ABI_CALLABLE_MAGIC: [u8; 8] = *b"GDRSCAL\0";
@@ -48,10 +52,14 @@ pub const ABI_VALUE_OWNED_DYNAMIC_GROUP: u32 = 1 << 3;
 pub const ABI_VALUE_OWNED_CALLABLE: u32 = 1 << 4;
 
 /// Current incompatible ABI generation.
-pub const ABI_MAJOR: u16 = 3;
+pub const ABI_MAJOR: u16 = 4;
 
 /// Current backward-compatible ABI revision.
-pub const ABI_MINOR: u16 = 37;
+pub const ABI_MINOR: u16 = 39;
+
+/// Field access during migration reads/writes backing storage without invoking
+/// user property accessors. The low bits remain the descriptor's field index.
+pub const ABI_FIELD_STORAGE_ACCESS: u32 = 1 << 31;
 
 /// Header at the beginning of every versioned ABI table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,7 +276,7 @@ pub fn validate_signal_value(bytes: &[u8]) -> bool {
 /// `VARIANT` accepts any supported Godot value at the root. `ARRAY` and
 /// `DICTIONARY` additionally require the corresponding root container type.
 /// The validator performs no allocation and rejects trailing bytes,
-/// non-zero extension flags, excessive nesting, oversized containers, invalid
+/// unsupported node flags, excessive nesting, oversized containers, invalid
 /// UTF-8, and malformed packed-array payloads.
 #[must_use]
 pub fn validate_dynamic_value(expected: AbiValueType, bytes: &[u8]) -> bool {
@@ -363,6 +371,11 @@ fn visit_dynamic_callable_node(
     };
     *offset = payload_end;
 
+    if u32::from_le_bytes(header[4..8].try_into().expect("u32 width")) == ABI_DYNAMIC_NODE_CONTAINER
+    {
+        return true;
+    }
+
     if type_ == AbiValueType::CALLABLE.0 {
         return callable_value_ownership_token(payload).is_none_or(&mut *visitor);
     }
@@ -403,13 +416,20 @@ fn validate_dynamic_node(bytes: &[u8], offset: &mut usize, depth: usize) -> Opti
     let type_ = u32::from_le_bytes(header[..4].try_into().ok()?);
     let flags = u32::from_le_bytes(header[4..8].try_into().ok()?);
     let length = usize::try_from(u64::from_le_bytes(header[8..16].try_into().ok()?)).ok()?;
-    if flags != 0 {
+    if flags != 0 && flags != ABI_DYNAMIC_NODE_CONTAINER {
         return None;
     }
     let payload_start = header_end;
     let payload_end = payload_start.checked_add(length)?;
     let payload = bytes.get(payload_start..payload_end)?;
     *offset = payload_end;
+
+    if flags == ABI_DYNAMIC_NODE_CONTAINER {
+        return (matches!(type_, 37 | 38)
+            && payload.len() == 8
+            && read_dynamic_u64(payload, 0).is_some_and(|token| token != 0))
+        .then_some(type_);
+    }
 
     let valid = match type_ {
         0 => payload.is_empty(),
@@ -2047,6 +2067,29 @@ pub type AbiRetainObjectFn = Option<
 /// Host table slot containing [`AbiRetainObjectFn`] (ABI minor 37).
 pub const HOST_API_SLOT_RETAIN_OBJECT: usize = 14;
 
+/// Shared-container ownership, materialization and bulk access.
+pub const HOST_API_SLOT_CONTAINER: usize = 15;
+
+pub const ABI_CONTAINER_MATERIALIZE: u32 = 0;
+pub const ABI_CONTAINER_SNAPSHOT: u32 = 1;
+pub const ABI_CONTAINER_RETAIN: u32 = 2;
+pub const ABI_CONTAINER_RELEASE: u32 = 3;
+pub const ABI_CONTAINER_ASSIGN: u32 = 4;
+
+/// All input byte ranges are borrowed for this synchronous call. Successful
+/// outputs transfer ownership through the ordinary Host value-drop protocol.
+pub type AbiContainerFn = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        operation: u32,
+        kind: AbiValueType,
+        token: u64,
+        bytes: AbiByteSlice,
+        element: AbiByteSlice,
+        output: *mut AbiValueV1,
+    ) -> AbiCallResult,
+>;
+
 /// Adds one project-owned reference to a Host dynamic ownership group.
 pub type AbiRetainDynamicValueFn =
     Option<unsafe extern "C" fn(context: *mut c_void, token: u64) -> AbiStatus>;
@@ -2095,6 +2138,8 @@ pub const MODULE_API_SLOT_GODOT_API_MINOR: usize = 2;
 pub const MODULE_API_SLOT_POLL_TASKS: usize = 3;
 /// Module table slot containing [`AbiCancelTasksFn`].
 pub const MODULE_API_SLOT_CANCEL_TASKS: usize = 4;
+/// Task extension slot containing a non-destructive reload eligibility check.
+pub const MODULE_API_SLOT_PREPARE_RELOAD: usize = 5;
 /// Polls project futures once at the Godot frame safe point.
 pub type AbiPollTasksFn = Option<unsafe extern "C" fn() -> AbiStatus>;
 /// Cancels every cooperative task before a generation becomes inactive.
@@ -2481,6 +2526,34 @@ mod tests {
         bytes.extend_from_slice(&0_u64.to_le_bytes());
         bytes.extend_from_slice(&node);
         assert!(validate_dynamic_value(AbiValueType::VARIANT, &bytes));
+    }
+
+    #[test]
+    fn shared_container_nodes_are_bounded_opaque_leaves() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&ABI_DYNAMIC_MAGIC);
+        bytes.extend_from_slice(&ABI_DYNAMIC_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&AbiValueType::ARRAY.0.to_le_bytes());
+        bytes.extend_from_slice(&ABI_DYNAMIC_NODE_CONTAINER.to_le_bytes());
+        bytes.extend_from_slice(&8_u64.to_le_bytes());
+        bytes.extend_from_slice(&7_u64.to_le_bytes());
+        assert!(validate_dynamic_value(AbiValueType::ARRAY, &bytes));
+        assert!(visit_dynamic_callable_tokens(&bytes, |_| panic!(
+            "container handles are leaves"
+        )));
+        let mut malformed = bytes.clone();
+        malformed[36..44].fill(0);
+        assert!(!validate_dynamic_value(AbiValueType::ARRAY, &malformed));
+        malformed = bytes.clone();
+        malformed[20..24].copy_from_slice(&AbiValueType::STRING.0.to_le_bytes());
+        assert!(!validate_dynamic_value(AbiValueType::VARIANT, &malformed));
+        malformed = bytes.clone();
+        malformed[24..28].copy_from_slice(&2_u32.to_le_bytes());
+        assert!(!validate_dynamic_value(AbiValueType::ARRAY, &malformed));
+        bytes.push(0);
+        assert!(!validate_dynamic_value(AbiValueType::ARRAY, &bytes));
     }
 
     #[test]

@@ -8,6 +8,8 @@ const READY_FILE := "res://native-hot-reload.ready"
 const TRIGGER_FILE := "res://native-hot-reload.trigger"
 
 var _counter: Object
+var _shared_metadata: Dictionary
+var _shared_values: Array[int] = [10, 20]
 var _initialized := false
 var _completed := false
 
@@ -39,7 +41,8 @@ func _initialize_test() -> void:
 		_fail("Native class could not be instantiated before reload")
 		return
 	_counter.value = 64
-	_counter.metadata = {"preserved": true, "generation": 1}
+	_shared_metadata = {"preserved": true, "generation": 1, "values": _shared_values}
+	_counter.metadata = _shared_metadata
 	if _counter.generation() != "before":
 		_fail("initial Native generation returned the wrong code")
 		return
@@ -75,8 +78,19 @@ func _process(_delta: float) -> void:
 	if _counter.value != 64:
 		_fail("Native reload did not restore the Storage property")
 		return
-	if _counter.metadata != {"preserved": true, "generation": 1}:
+	if (
+		not is_same(_counter.metadata, _shared_metadata)
+		or not is_same((_counter.metadata as Dictionary)["values"], _shared_values)
+	):
 		_fail("Native reload did not restore the owned Dictionary property")
+		return
+	_shared_values.append(30)
+	_shared_metadata["external"] = true
+	if (
+		(_counter.metadata as Dictionary)["values"].back() != 30
+		or not (_counter.metadata as Dictionary).get("external", false)
+	):
+		_fail("Native reload broke external container aliases")
 		return
 	if _counter.reload_marker() != 99:
 		_fail("Native reload hook did not rebuild runtime-only state")

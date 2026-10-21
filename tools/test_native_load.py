@@ -69,7 +69,8 @@ def stage_fixture(directory: Path, api: str) -> None:
     shutil.copy2(FIXTURE / "main.tscn", directory / "main.tscn")
     source_directory = directory / "src"
     source_directory.mkdir()
-    shutil.copy2(FIXTURE / "src" / "lib.rs", source_directory / "lib.rs")
+    for source in (FIXTURE / "src").glob("*.rs"):
+        shutil.copy2(source, source_directory / source.name)
     (directory / "Cargo.toml").write_text(
         render_manifest(api, ROOT / "crates" / "godot_rs"),
         encoding="utf-8",

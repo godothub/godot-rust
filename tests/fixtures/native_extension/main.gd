@@ -102,6 +102,22 @@ func _ready() -> void:
 	if not counter.generated_dynamic_api_round_trip():
 		_fail("generated Variant, container, keyed, or vararg API failed in Native mode")
 		return
+	var shared_numbers: Array[int] = [1, 2]
+	var shared_dictionary := {"original": true}
+	var readonly_container := [1]
+	readonly_container.make_read_only()
+	var typed_dictionary: Dictionary[String, int] = {"original": 1}
+	if (
+		not counter.verify_shared_containers(shared_numbers, shared_dictionary, readonly_container, typed_dictionary)
+		or shared_numbers != [10, 20]
+		or shared_dictionary.get("rust") != 43
+		or typed_dictionary.get("valid") != 5
+		or typed_dictionary.has("invalid")
+	):
+		_fail("Native shared containers lost identity, constraints, snapshots, or bulk access")
+		return
+	print("GODOT_RS_NATIVE_SHARED_CONTAINERS")
+	print("GODOT_RS_NATIVE_ENGINE_BENCH_SECONDS %s" % str(counter.call("benchmark_engine_calls", 20_000)))
 	var typed_signal_values: Array = []
 	counter.connect(&"offset_described", func(label: String, offset: Vector2):
 		typed_signal_values.append([label, offset])

@@ -16,6 +16,7 @@ use godot_rs::prelude::{
 };
 
 const NATIVE_GENERATION: &str = "before";
+mod container_checks;
 
 #[godot_enum]
 enum NativeMovementMode {
@@ -41,6 +42,18 @@ struct GodotRsNativeSmoke {
 }
 
 impl GodotRsNativeSmoke {
+    fn benchmark_engine_calls(&self, iterations: i64) -> f64 {
+        let start = std::time::Instant::now();
+        for _ in 0..iterations.clamp(0, 100_000) {
+            std::hint::black_box(
+                self.base
+                    .get_process_delta_time()
+                    .expect("engine benchmark"),
+            );
+        }
+        start.elapsed().as_secs_f64()
+    }
+
     fn add(&mut self, amount: i64) -> i64 {
         self.value += amount;
         self.value
@@ -197,7 +210,13 @@ impl GodotRsNativeSmoke {
     }
 
     fn generated_dynamic_api_round_trip(&self) -> bool {
-        let mut array = Array::from_vec(vec![Variant::from(11_i64)]);
+        let mut array = match Array::from_vec(vec![Variant::from(11_i64)]) {
+            Ok(array) => array,
+            Err(error) => {
+                eprintln!("GODOT_RS_NATIVE_DYNAMIC_ERROR array creation: {error}");
+                return false;
+            }
+        };
         if let Err(error) = builtin::array::append(&mut array, &Variant::from("dynamic")) {
             eprintln!("GODOT_RS_NATIVE_DYNAMIC_ERROR array.append: {error}");
             return false;
@@ -233,7 +252,7 @@ impl GodotRsNativeSmoke {
                 return false;
             }
         };
-        let valid = array.len() == 2
+        let valid = array.len().ok() == Some(2)
             && matches!(last.kind(), VariantKind::String("dynamic"))
             && matches!(answer.kind(), VariantKind::Int(42))
             && matches!(
@@ -242,7 +261,7 @@ impl GodotRsNativeSmoke {
             );
         if !valid {
             eprintln!(
-                "GODOT_RS_NATIVE_DYNAMIC_VALUES len={} last={:?} answer={:?} name={:?}",
+                "GODOT_RS_NATIVE_DYNAMIC_VALUES len={:?} last={:?} answer={:?} name={:?}",
                 array.len(),
                 last.kind(),
                 answer.kind(),
@@ -250,6 +269,22 @@ impl GodotRsNativeSmoke {
             );
         }
         valid
+    }
+
+    fn verify_shared_containers(
+        &self,
+        numbers: Array<i64>,
+        dictionary: Dictionary,
+        readonly: Array,
+        typed_dictionary: Dictionary,
+    ) -> bool {
+        match container_checks::verify(numbers, dictionary, readonly, typed_dictionary) {
+            Ok(valid) => valid,
+            Err(error) => {
+                eprintln!("GODOT_RS_NATIVE_SHARED_CONTAINERS_ERROR {error}");
+                false
+            }
+        }
     }
 
     fn generated_callable_signal_round_trip(&self) -> bool {
@@ -279,7 +314,7 @@ impl GodotRsNativeSmoke {
             let mut nested = Array::from_vec(vec![
                 Variant::from(bound.clone()),
                 Variant::from(signal.clone()),
-            ]);
+            ])?;
             let nested_callable = builtin::array::pop_front(&mut nested)?;
             let nested_result = match nested_callable.kind() {
                 VariantKind::Callable(callable) => builtin::callable::call(callable, &[])?,
@@ -319,8 +354,9 @@ impl GodotRsNativeSmoke {
         path: NodePath,
         name: StringName,
     ) -> bool {
-        values.len() == 2
-            && dictionary.get(&Variant::from("answer")) == Some(&Variant::from(42_i64))
+        values.len().ok() == Some(2)
+            && dictionary.get(&Variant::from("answer")).ok().flatten()
+                == Some(Variant::from(42_i64))
             && packed.as_ref() == [3, 5, 8]
             && callable.method().as_str() == "current"
             && signal.name() == "offset_described"
@@ -419,6 +455,8 @@ impl NativeClass for GodotRsNativeSmoke {
     }
 
     fn register_methods(registrar: &mut ClassRegistrar<'_, Self>) -> NativeResult {
+        registrar.method("verify_shared_containers", Self::verify_shared_containers)?;
+        registrar.method("benchmark_engine_calls", Self::benchmark_engine_calls)?;
         registrar
             .method_with_arguments("add", ["amount"], Self::add)?
             .method("current", Self::current)?

@@ -10,6 +10,9 @@ pub use generator::*;
 /// Stable project-module ABI shared by the Script Host and Rust SDK.
 pub mod abi;
 
+#[doc(hidden)]
+pub mod call_buffer;
+
 mod target;
 pub use target::{
     DEFAULT_GODOT_API, GODOT_API_ENV, GodotApiVersion, GodotApiVersionError, SUPPORTED_API_TARGETS,

@@ -291,7 +291,8 @@ pub trait ScriptSuper: ScriptClass {
     {
         let arguments = arguments.encode()?;
         let output = crate::module::call_super_method(method, arguments.values())?;
-        let decoded = R::from_abi(borrow_module_output(output)).ok_or_else(|| {
+        // SAFETY: The caller retains the validated ABI payload during decoding.
+        let decoded = unsafe { R::from_abi(borrow_module_output(output)) }.ok_or_else(|| {
             crate::error::EngineError::invalid_result(
                 "base Rust script returned an incompatible value",
             )
@@ -623,7 +624,7 @@ pub trait ScriptMethods: ScriptClass + ScriptFieldAccess {}
 
 /// Generated dispatch function for one `#[script] impl` block.
 #[doc(hidden)]
-pub type MethodBlockInvoker = fn(
+pub type MethodBlockInvoker = unsafe fn(
     state: *mut c_void,
     method_id: u64,
     arguments: *const AbiValueV1,
@@ -752,19 +753,23 @@ fn method_registry_is_valid<T: ScriptMethods>() -> bool {
 /// Decodes one fixed-layout project-module method argument.
 #[doc(hidden)]
 pub trait FromAbiValue: Sized {
-    fn from_abi(value: AbiValueV1) -> Option<Self>;
+    /// # Safety
+    /// Every pointer-backed payload must refer to live, aligned storage of the
+    /// advertised length for the duration of decoding. Ownership tokens must
+    /// originate from the active Host or this module.
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self>;
 }
 
 /// Encodes one supported reflected method return value.
 #[doc(hidden)]
 pub trait IntoMethodResult {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult;
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult;
 }
 
 macro_rules! integer_value {
     ($type:ty) => {
         impl FromAbiValue for $type {
-            fn from_abi(value: AbiValueV1) -> Option<Self> {
+            unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
                 if value.type_ != AbiValueType::I64
                     || value.reserved_flags != 0
                     || value.payload[1] != 0
@@ -776,13 +781,13 @@ macro_rules! integer_value {
         }
 
         impl IntoMethodResult for $type {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 write_method_value(output, AbiValueV1::from_i64(self.into()))
             }
         }
 
         impl IntoMethodResult for ScriptResult<$type> {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 match self {
                     Ok(value) => value.write_result(output),
                     Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -800,7 +805,7 @@ integer_value!(i16);
 macro_rules! unsigned_integer_value {
     ($type:ty) => {
         impl FromAbiValue for $type {
-            fn from_abi(value: AbiValueV1) -> Option<Self> {
+            unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
                 if value.type_ != AbiValueType::U64
                     || value.reserved_flags != 0
                     || value.payload[1] != 0
@@ -812,13 +817,13 @@ macro_rules! unsigned_integer_value {
         }
 
         impl IntoMethodResult for $type {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 write_method_value(output, AbiValueV1::from_u64(self.into()))
             }
         }
 
         impl IntoMethodResult for ScriptResult<$type> {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 match self {
                     Ok(value) => value.write_result(output),
                     Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -834,20 +839,21 @@ unsigned_integer_value!(u32);
 unsigned_integer_value!(u64);
 
 impl FromAbiValue for char {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
-        let value = u32::from_abi(value)?;
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
+        // SAFETY: The caller retains the validated ABI payload during decoding.
+        let value = unsafe { u32::from_abi(value) }?;
         char::from_u32(value)
     }
 }
 
 impl IntoMethodResult for char {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         u32::from(self).write_result(output)
     }
 }
 
 impl IntoMethodResult for ScriptResult<char> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -856,7 +862,7 @@ impl IntoMethodResult for ScriptResult<char> {
 }
 
 impl<T: crate::engine::GodotIntegerValue> FromAbiValue for T {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let expected = reflected_integer_value_type::<T>();
         (value.type_ == expected && value.reserved_flags == 0 && value.payload[1] == 0)
             .then(|| T::__from_raw(value.payload[0]))
@@ -864,7 +870,7 @@ impl<T: crate::engine::GodotIntegerValue> FromAbiValue for T {
 }
 
 impl<T: crate::engine::GodotIntegerValue> IntoMethodResult for T {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             if T::SIGNED {
@@ -888,7 +894,7 @@ pub const fn reflected_integer_value_type<T: crate::engine::GodotIntegerValue>()
 }
 
 impl FromAbiValue for bool {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         if value.type_ != AbiValueType::BOOL || value.reserved_flags != 0 || value.payload[1] != 0 {
             return None;
         }
@@ -901,13 +907,13 @@ impl FromAbiValue for bool {
 }
 
 impl IntoMethodResult for bool {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_bool(self))
     }
 }
 
 impl IntoMethodResult for ScriptResult<bool> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -916,40 +922,41 @@ impl IntoMethodResult for ScriptResult<bool> {
 }
 
 impl FromAbiValue for f64 {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         (value.type_ == AbiValueType::F64 && value.reserved_flags == 0 && value.payload[1] == 0)
             .then(|| f64::from_bits(value.payload[0]))
     }
 }
 
 impl FromAbiValue for f32 {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
-        let value = f64::from_abi(value)?;
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
+        // SAFETY: The caller retains the validated ABI payload during decoding.
+        let value = unsafe { f64::from_abi(value) }?;
         let converted = value as f32;
         (!value.is_finite() || converted.is_finite()).then_some(converted)
     }
 }
 
 impl FromAbiValue for String {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         borrowed_text(value, AbiValueType::STRING)
     }
 }
 
 impl FromAbiValue for StringName {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         borrowed_text(value, AbiValueType::STRING_NAME).map(Self::from)
     }
 }
 
 impl FromAbiValue for NodePath {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         borrowed_text(value, AbiValueType::NODE_PATH).map(Self::from)
     }
 }
 
 impl<T: GodotClass> FromAbiValue for ObjectRef<T> {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         if value.type_ != AbiValueType::OBJECT_ID
             || value.reserved_flags != 0
             || value.payload[0] == 0
@@ -965,17 +972,18 @@ impl<T: GodotClass> FromAbiValue for ObjectRef<T> {
 }
 
 impl<T: GodotClass> FromAbiValue for Option<ObjectRef<T>> {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         if value == AbiValueV1::from_object_id(0) {
             Some(None)
         } else {
-            ObjectRef::from_abi(value).map(Some)
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { ObjectRef::from_abi(value) }.map(Some)
         }
     }
 }
 
 impl<T: GodotClass> FromAbiValue for GodotRef<T> {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let object = if value.reserved_flags == godot_api::abi::ABI_VALUE_MODULE_OBJECT_REF {
             crate::module::clone_module_object_ref(value)?
         } else if value.type_ == AbiValueType::OBJECT_ID
@@ -997,23 +1005,24 @@ impl<T: GodotClass> FromAbiValue for GodotRef<T> {
 }
 
 impl<T: GodotClass> FromAbiValue for Option<GodotRef<T>> {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         if value == AbiValueV1::from_object_id(0) {
             Some(None)
         } else {
-            GodotRef::from_abi(value).map(Some)
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { GodotRef::from_abi(value) }.map(Some)
         }
     }
 }
 
 impl<T: GodotClass> IntoMethodResult for ObjectRef<T> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_object_id(self.instance_id()))
     }
 }
 
 impl<T: GodotClass> IntoMethodResult for Option<ObjectRef<T>> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_object_id(self.map_or(0, ObjectRef::instance_id)),
@@ -1022,13 +1031,7 @@ impl<T: GodotClass> IntoMethodResult for Option<ObjectRef<T>> {
 }
 
 impl<T: GodotClass> IntoMethodResult for GodotRef<T> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        if output.is_null() {
-            return AbiCallResult::failure(
-                AbiStatus::InvalidArgument,
-                "reflected method output pointer is null",
-            );
-        }
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match crate::module::owned_object_ref(self) {
             Ok(value) => write_method_value(output, value),
             Err(error) => error,
@@ -1037,7 +1040,7 @@ impl<T: GodotClass> IntoMethodResult for GodotRef<T> {
 }
 
 impl<T: GodotClass> IntoMethodResult for Option<GodotRef<T>> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Some(value) => value.write_result(output),
             None => write_method_value(output, AbiValueV1::from_object_id(0)),
@@ -1046,7 +1049,7 @@ impl<T: GodotClass> IntoMethodResult for Option<GodotRef<T>> {
 }
 
 impl<T: GodotClass> IntoMethodResult for ScriptResult<ObjectRef<T>> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1055,7 +1058,7 @@ impl<T: GodotClass> IntoMethodResult for ScriptResult<ObjectRef<T>> {
 }
 
 impl<T: GodotClass> IntoMethodResult for ScriptResult<Option<ObjectRef<T>>> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1076,25 +1079,25 @@ pub fn assert_export_resource<T: GodotClass + Inherits<Resource>>() {
 }
 
 impl IntoMethodResult for String {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_owned_method_string(output, self)
     }
 }
 
 impl IntoMethodResult for StringName {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_owned_method_text(output, AbiValueType::STRING_NAME, self.into_string())
     }
 }
 
 impl IntoMethodResult for NodePath {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_owned_method_text(output, AbiValueType::NODE_PATH, self.into_string())
     }
 }
 
 impl IntoMethodResult for ScriptResult<NodePath> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1103,7 +1106,7 @@ impl IntoMethodResult for ScriptResult<NodePath> {
 }
 
 impl IntoMethodResult for ScriptResult<StringName> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1112,7 +1115,7 @@ impl IntoMethodResult for ScriptResult<StringName> {
 }
 
 impl IntoMethodResult for ScriptResult<String> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1121,20 +1124,20 @@ impl IntoMethodResult for ScriptResult<String> {
 }
 
 impl FromAbiValue for Vector2 {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y] = value.vector2()?;
         Some(Self::new(x, y))
     }
 }
 
 impl IntoMethodResult for Vector2 {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_vector2(self.x, self.y))
     }
 }
 
 impl IntoMethodResult for ScriptResult<Vector2> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1143,20 +1146,20 @@ impl IntoMethodResult for ScriptResult<Vector2> {
 }
 
 impl FromAbiValue for Vector3 {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, z] = value.vector3()?;
         Some(Self::new(x, y, z))
     }
 }
 
 impl IntoMethodResult for Vector3 {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_vector3(self.x, self.y, self.z))
     }
 }
 
 impl IntoMethodResult for ScriptResult<Vector3> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1165,14 +1168,14 @@ impl IntoMethodResult for ScriptResult<Vector3> {
 }
 
 impl FromAbiValue for Color {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [r, g, b, a] = value.color()?;
         Some(Self::rgba(r, g, b, a))
     }
 }
 
 impl IntoMethodResult for Color {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_color(self.r, self.g, self.b, self.a),
@@ -1181,7 +1184,7 @@ impl IntoMethodResult for Color {
 }
 
 impl IntoMethodResult for ScriptResult<Color> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1190,20 +1193,20 @@ impl IntoMethodResult for ScriptResult<Color> {
 }
 
 impl FromAbiValue for Vector2i {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y] = value.vector2i()?;
         Some(Self::new(x, y))
     }
 }
 
 impl IntoMethodResult for Vector2i {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_vector2i(self.x, self.y))
     }
 }
 
 impl IntoMethodResult for ScriptResult<Vector2i> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1212,20 +1215,20 @@ impl IntoMethodResult for ScriptResult<Vector2i> {
 }
 
 impl FromAbiValue for Vector3i {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, z] = value.vector3i()?;
         Some(Self::new(x, y, z))
     }
 }
 
 impl IntoMethodResult for Vector3i {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_vector3i(self.x, self.y, self.z))
     }
 }
 
 impl IntoMethodResult for ScriptResult<Vector3i> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1234,14 +1237,14 @@ impl IntoMethodResult for ScriptResult<Vector3i> {
 }
 
 impl FromAbiValue for Rect2 {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, width, height] = value.rect2()?;
         Some(Self::from_components(x, y, width, height))
     }
 }
 
 impl IntoMethodResult for Rect2 {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_rect2(self.position.x, self.position.y, self.size.x, self.size.y),
@@ -1250,7 +1253,7 @@ impl IntoMethodResult for Rect2 {
 }
 
 impl IntoMethodResult for ScriptResult<Rect2> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1259,14 +1262,14 @@ impl IntoMethodResult for ScriptResult<Rect2> {
 }
 
 impl FromAbiValue for Rect2i {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, width, height] = value.rect2i()?;
         Some(Self::from_components(x, y, width, height))
     }
 }
 
 impl IntoMethodResult for Rect2i {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_rect2i(self.position.x, self.position.y, self.size.x, self.size.y),
@@ -1275,7 +1278,7 @@ impl IntoMethodResult for Rect2i {
 }
 
 impl IntoMethodResult for ScriptResult<Rect2i> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1284,14 +1287,14 @@ impl IntoMethodResult for ScriptResult<Rect2i> {
 }
 
 impl FromAbiValue for Quaternion {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, z, w] = value.quaternion()?;
         Some(Self::new(x, y, z, w))
     }
 }
 
 impl IntoMethodResult for Quaternion {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_quaternion(self.x, self.y, self.z, self.w),
@@ -1300,7 +1303,7 @@ impl IntoMethodResult for Quaternion {
 }
 
 impl IntoMethodResult for ScriptResult<Quaternion> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1309,14 +1312,14 @@ impl IntoMethodResult for ScriptResult<Quaternion> {
 }
 
 impl FromAbiValue for Plane {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, z, d] = value.plane()?;
         Some(Self::from_components(x, y, z, d))
     }
 }
 
 impl IntoMethodResult for Plane {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_plane(self.normal.x, self.normal.y, self.normal.z, self.d),
@@ -1325,7 +1328,7 @@ impl IntoMethodResult for Plane {
 }
 
 impl IntoMethodResult for ScriptResult<Plane> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1334,14 +1337,14 @@ impl IntoMethodResult for ScriptResult<Plane> {
 }
 
 impl FromAbiValue for Vector4 {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, z, w] = value.vector4()?;
         Some(Self::new(x, y, z, w))
     }
 }
 
 impl IntoMethodResult for Vector4 {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_vector4(self.x, self.y, self.z, self.w),
@@ -1350,7 +1353,7 @@ impl IntoMethodResult for Vector4 {
 }
 
 impl IntoMethodResult for ScriptResult<Vector4> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1359,14 +1362,14 @@ impl IntoMethodResult for ScriptResult<Vector4> {
 }
 
 impl FromAbiValue for Vector4i {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let [x, y, z, w] = value.vector4i()?;
         Some(Self::new(x, y, z, w))
     }
 }
 
 impl IntoMethodResult for Vector4i {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(
             output,
             AbiValueV1::from_vector4i(self.x, self.y, self.z, self.w),
@@ -1375,7 +1378,7 @@ impl IntoMethodResult for Vector4i {
 }
 
 impl IntoMethodResult for ScriptResult<Vector4i> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1386,13 +1389,13 @@ impl IntoMethodResult for ScriptResult<Vector4i> {
 macro_rules! reflected_fixed_math {
     ($type:ty, $abi_type:ident, $count:expr, $construct:path) => {
         impl FromAbiValue for $type {
-            fn from_abi(value: AbiValueV1) -> Option<Self> {
+            unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
                 copy_f32_components::<$count>(value, AbiValueType::$abi_type).map($construct)
             }
         }
 
         impl IntoMethodResult for $type {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 write_method_value(
                     output,
                     crate::module::owned_f32_components(
@@ -1404,7 +1407,7 @@ macro_rules! reflected_fixed_math {
         }
 
         impl IntoMethodResult for ScriptResult<$type> {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 match self {
                     Ok(value) => value.write_result(output),
                     Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1423,14 +1426,14 @@ reflected_fixed_math!(Projection, PROJECTION, 16, Projection::__from_components)
 macro_rules! reflected_packed_array {
     ($type:ty, $abi_type:ident) => {
         impl FromAbiValue for $type {
-            fn from_abi(value: AbiValueV1) -> Option<Self> {
+            unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
                 let bytes = copy_borrowed_bytes(value, AbiValueType::$abi_type)?;
                 Self::__from_bytes(&bytes)
             }
         }
 
         impl IntoMethodResult for $type {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 write_method_value(
                     output,
                     crate::module::owned_bytes(AbiValueType::$abi_type, self.__bytes().to_vec()),
@@ -1439,7 +1442,7 @@ macro_rules! reflected_packed_array {
         }
 
         impl IntoMethodResult for ScriptResult<$type> {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 match self {
                     Ok(value) => value.write_result(output),
                     Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1479,29 +1482,23 @@ fn copy_dynamic_value(
 }
 
 impl FromAbiValue for Variant {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let (bytes, ownership) = copy_dynamic_value(value, AbiValueType::VARIANT)?;
         Self::__from_host_bytes(&bytes, ownership)
     }
 }
 
 impl IntoMethodResult for Variant {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_dynamic_result(output, AbiValueType::VARIANT, self)
     }
 }
 
 fn write_dynamic_result(
-    output: *mut AbiValueV1,
+    output: &mut AbiValueV1,
     value_type: AbiValueType,
     value: Variant,
 ) -> AbiCallResult {
-    if output.is_null() {
-        return AbiCallResult::failure(
-            AbiStatus::InvalidArgument,
-            "reflected method output pointer is null",
-        );
-    }
     match crate::module::owned_dynamic_value(value_type, value) {
         Ok(value) => write_method_value(output, value),
         Err(error) => error,
@@ -1509,7 +1506,7 @@ fn write_dynamic_result(
 }
 
 impl IntoMethodResult for ScriptResult<Variant> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1518,20 +1515,20 @@ impl IntoMethodResult for ScriptResult<Variant> {
 }
 
 impl<T: VariantConvert> FromAbiValue for Array<T> {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let (bytes, ownership) = copy_dynamic_value(value, AbiValueType::ARRAY)?;
         Self::__from_host_bytes(&bytes, ownership)
     }
 }
 
 impl<T: VariantConvert> IntoMethodResult for Array<T> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_dynamic_result(output, AbiValueType::ARRAY, Variant::from(self))
     }
 }
 
 impl<T: VariantConvert> IntoMethodResult for ScriptResult<Array<T>> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1540,20 +1537,20 @@ impl<T: VariantConvert> IntoMethodResult for ScriptResult<Array<T>> {
 }
 
 impl FromAbiValue for Dictionary {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         let (bytes, ownership) = copy_dynamic_value(value, AbiValueType::DICTIONARY)?;
         Self::__from_host_bytes(&bytes, ownership)
     }
 }
 
 impl IntoMethodResult for Dictionary {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_dynamic_result(output, AbiValueType::DICTIONARY, Variant::from(self))
     }
 }
 
 impl IntoMethodResult for ScriptResult<Dictionary> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1562,7 +1559,7 @@ impl IntoMethodResult for ScriptResult<Dictionary> {
 }
 
 impl FromAbiValue for Callable {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         if value.type_ != AbiValueType::CALLABLE || value.reserved_flags != 0 {
             return None;
         }
@@ -1579,13 +1576,7 @@ impl FromAbiValue for Callable {
 }
 
 impl IntoMethodResult for Callable {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
-        if output.is_null() {
-            return AbiCallResult::failure(
-                AbiStatus::InvalidArgument,
-                "reflected method output pointer is null",
-            );
-        }
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match crate::module::owned_callable_value(self) {
             Ok(value) => write_method_value(output, value),
             Err(error) => error,
@@ -1594,7 +1585,7 @@ impl IntoMethodResult for Callable {
 }
 
 impl IntoMethodResult for ScriptResult<Callable> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1603,7 +1594,7 @@ impl IntoMethodResult for ScriptResult<Callable> {
 }
 
 impl<T> FromAbiValue for Signal<T> {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         if value.type_ != AbiValueType::SIGNAL || value.reserved_flags != 0 {
             return None;
         }
@@ -1616,7 +1607,7 @@ impl<T> FromAbiValue for Signal<T> {
 }
 
 impl<T> IntoMethodResult for Signal<T> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self.__bytes() {
             Ok(bytes) => write_method_value(
                 output,
@@ -1628,7 +1619,7 @@ impl<T> IntoMethodResult for Signal<T> {
 }
 
 impl<T> IntoMethodResult for ScriptResult<Signal<T>> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1637,19 +1628,19 @@ impl<T> IntoMethodResult for ScriptResult<Signal<T>> {
 }
 
 impl FromAbiValue for Rid {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         value.rid().map(Rid::from_raw)
     }
 }
 
 impl IntoMethodResult for Rid {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::from_rid(self.id()))
     }
 }
 
 impl IntoMethodResult for ScriptResult<Rid> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1660,13 +1651,13 @@ impl IntoMethodResult for ScriptResult<Rid> {
 macro_rules! float_result {
     ($type:ty) => {
         impl IntoMethodResult for $type {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 write_method_value(output, AbiValueV1::from_f64(self.into()))
             }
         }
 
         impl IntoMethodResult for ScriptResult<$type> {
-            fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+            fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
                 match self {
                     Ok(value) => value.write_result(output),
                     Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1680,19 +1671,19 @@ float_result!(f32);
 float_result!(f64);
 
 impl FromAbiValue for () {
-    fn from_abi(value: AbiValueV1) -> Option<Self> {
+    unsafe fn from_abi(value: AbiValueV1) -> Option<Self> {
         (value == AbiValueV1::NIL).then_some(())
     }
 }
 
 impl IntoMethodResult for () {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         write_method_value(output, AbiValueV1::NIL)
     }
 }
 
 impl IntoMethodResult for ScriptResult<()> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(()) => ().write_result(output),
             Err(error) => AbiCallResult::callback_failed(error.message()),
@@ -1701,7 +1692,7 @@ impl IntoMethodResult for ScriptResult<()> {
 }
 
 impl<T: IntoMethodResult> IntoMethodResult for EngineResult<T> {
-    fn write_result(self, output: *mut AbiValueV1) -> AbiCallResult {
+    fn write_result(self, output: &mut AbiValueV1) -> AbiCallResult {
         match self {
             Ok(value) => value.write_result(output),
             Err(error) => crate::error::engine_error_abi(error),
@@ -1713,7 +1704,9 @@ impl<T: IntoMethodResult> IntoMethodResult for EngineResult<T> {
 ///
 /// # Safety
 ///
-/// `arguments` must address `argument_count` initialized ABI values.
+/// `arguments` must address `argument_count` initialized ABI values. Every
+/// pointer-backed payload must remain readable and aligned for its advertised
+/// length, and ownership tokens must come from the active Host or module.
 #[doc(hidden)]
 pub unsafe fn decode_method_argument<T: FromAbiValue>(
     arguments: *const AbiValueV1,
@@ -1728,7 +1721,9 @@ pub unsafe fn decode_method_argument<T: FromAbiValue>(
     }
     // SAFETY: Bounds and null were checked against the caller's ABI count.
     let value = unsafe { arguments.add(index as usize).read() };
-    T::from_abi(value).ok_or_else(|| {
+
+    // SAFETY: The caller retains the validated ABI payload during decoding.
+    unsafe { T::from_abi(value) }.ok_or_else(|| {
         AbiCallResult::failure(
             AbiStatus::InvalidArgument,
             "reflected method argument type does not match its descriptor",
@@ -1737,45 +1732,40 @@ pub unsafe fn decode_method_argument<T: FromAbiValue>(
 }
 
 /// Encodes the generated method result into Host-owned ABI storage.
+///
+/// # Safety
+/// A non-null `output` must point to one writable, aligned ABI value.
 #[doc(hidden)]
-pub fn encode_method_result<T: IntoMethodResult>(
+pub unsafe fn encode_method_result<T: IntoMethodResult>(
     value: T,
     output: *mut AbiValueV1,
 ) -> AbiCallResult {
-    value.write_result(output)
-}
-
-fn write_method_value(output: *mut AbiValueV1, value: AbiValueV1) -> AbiCallResult {
     if output.is_null() {
-        crate::module::release_module_output(value);
         return AbiCallResult::failure(
             AbiStatus::InvalidArgument,
             "reflected method output pointer is null",
         );
     }
-    // SAFETY: The project-module ABI caller owns one writable output slot.
-    unsafe { output.write(value) };
+    // SAFETY: The ABI caller guarantees a writable output slot.
+    value.write_result(unsafe { &mut *output })
+}
+
+fn write_method_value(output: &mut AbiValueV1, value: AbiValueV1) -> AbiCallResult {
+    *output = value;
     AbiCallResult::OK
 }
 
-fn write_owned_method_string(output: *mut AbiValueV1, value: String) -> AbiCallResult {
+fn write_owned_method_string(output: &mut AbiValueV1, value: String) -> AbiCallResult {
     write_owned_method_text(output, AbiValueType::STRING, value)
 }
 
 fn write_owned_method_text(
-    output: *mut AbiValueV1,
+    output: &mut AbiValueV1,
     value_type: AbiValueType,
     value: String,
 ) -> AbiCallResult {
-    if output.is_null() {
-        return AbiCallResult::failure(
-            AbiStatus::InvalidArgument,
-            "reflected method output pointer is null",
-        );
-    }
     let value = crate::module::owned_text(value_type, value);
-    // SAFETY: Null was rejected before allocating the module-owned value.
-    unsafe { output.write(value) };
+    *output = value;
     AbiCallResult::OK
 }
 
@@ -2205,7 +2195,8 @@ pub unsafe extern "C" fn abi_call_method<T: ScriptMethods>(
                 "instance method received a null script state",
             );
         }
-        (block.invoke)(state, method_id, arguments, argument_count, output)
+        // SAFETY: The ABI caller retains initialized state, arguments and writable output for this dispatch.
+        unsafe { (block.invoke)(state, method_id, arguments, argument_count, output) }
     })
 }
 
@@ -2388,7 +2379,8 @@ mod tests {
         );
         assert_ne!(owned.reserved_flags, 0);
         assert_eq!(
-            String::from_abi(borrow_module_output(owned)),
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { String::from_abi(borrow_module_output(owned)) },
             Some("Hello, Godot!".to_owned())
         );
         assert_eq!(
@@ -2403,23 +2395,43 @@ mod tests {
         let vector2 = Vector2::new(12.0, -8.5);
         let mut encoded = AbiValueV1::NIL;
         assert_eq!(vector2.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(Vector2::from_abi(encoded), Some(vector2));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { Vector2::from_abi(encoded) },
+            Some(vector2)
+        );
 
         let vector3 = Vector3::new(1.0, 2.0, 3.0);
         assert_eq!(vector3.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(Vector3::from_abi(encoded), Some(vector3));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { Vector3::from_abi(encoded) },
+            Some(vector3)
+        );
 
         let color = Color::rgba(0.1, 0.2, 0.3, 0.4);
         assert_eq!(color.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(Color::from_abi(encoded), Some(color));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { Color::from_abi(encoded) },
+            Some(color)
+        );
 
         let vector2i = Vector2i::new(i32::MIN, i32::MAX);
         assert_eq!(vector2i.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(Vector2i::from_abi(encoded), Some(vector2i));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { Vector2i::from_abi(encoded) },
+            Some(vector2i)
+        );
 
         let vector3i = Vector3i::new(-1, 2, -3);
         assert_eq!(vector3i.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(Vector3i::from_abi(encoded), Some(vector3i));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { Vector3i::from_abi(encoded) },
+            Some(vector3i)
+        );
     }
 
     #[test]
@@ -2429,14 +2441,22 @@ mod tests {
             crate::abi::AbiValueType::PACKED_BYTE_ARRAY,
             bytes.__bytes(),
         );
-        assert_eq!(PackedByteArray::from_abi(borrowed), Some(bytes));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { PackedByteArray::from_abi(borrowed) },
+            Some(bytes)
+        );
 
         let strings = PackedStringArray::from(vec!["你好".into(), "Godot".into()]);
         let borrowed = AbiValueV1::from_borrowed_bytes(
             crate::abi::AbiValueType::PACKED_STRING_ARRAY,
             strings.__bytes(),
         );
-        assert_eq!(PackedStringArray::from_abi(borrowed), Some(strings));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { PackedStringArray::from_abi(borrowed) },
+            Some(strings)
+        );
 
         let vectors = PackedVector3Array::from(vec![
             Vector3::new(1.0, 2.0, 3.0),
@@ -2459,7 +2479,11 @@ mod tests {
         let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
         let borrowed =
             AbiValueV1::from_borrowed_bytes(crate::abi::AbiValueType::PACKED_VECTOR3_ARRAY, bytes);
-        assert_eq!(PackedVector3Array::from_abi(borrowed), Some(vectors));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { PackedVector3Array::from_abi(borrowed) },
+            Some(vectors)
+        );
         // SAFETY: This is the sole release of the module-owned result value.
         let released = unsafe { crate::module::drop_owned_value(encoded) };
         assert_eq!(released, AbiStatus::Ok);
@@ -2470,15 +2494,28 @@ mod tests {
         let object = ObjectRef::<Node>::__from_instance_id(42);
         let mut encoded = AbiValueV1::NIL;
         assert_eq!(object.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(ObjectRef::<Node>::from_abi(encoded), Some(object));
         assert_eq!(
-            Option::<ObjectRef<Node>>::from_abi(encoded),
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { ObjectRef::<Node>::from_abi(encoded) },
+            Some(object)
+        );
+        assert_eq!(
+            // SAFETY: This scalar ABI value contains no borrowed storage.
+            unsafe { Option::<ObjectRef<Node>>::from_abi(encoded) },
             Some(Some(object))
         );
 
         let null = AbiValueV1::from_object_id(0);
-        assert_eq!(ObjectRef::<Node>::from_abi(null), None);
-        assert_eq!(Option::<ObjectRef<Node>>::from_abi(null), Some(None));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { ObjectRef::<Node>::from_abi(null) },
+            None
+        );
+        assert_eq!(
+            // SAFETY: This scalar ABI value contains no borrowed storage.
+            unsafe { Option::<ObjectRef<Node>>::from_abi(null) },
+            Some(None)
+        );
     }
 
     #[test]
@@ -2486,17 +2523,26 @@ mod tests {
         let rid = Rid::from_raw(u64::MAX);
         let mut encoded = AbiValueV1::NIL;
         assert_eq!(rid.write_result(&mut encoded).status, AbiStatus::Ok);
-        assert_eq!(Rid::from_abi(encoded), Some(rid));
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { Rid::from_abi(encoded) },
+            Some(rid)
+        );
     }
 
     #[test]
     fn reflected_string_names_preserve_utf8_and_their_exact_type() {
         let borrowed = AbiValueV1::from_borrowed_string_name("玩家/生命值");
         assert_eq!(
-            StringName::from_abi(borrowed),
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { StringName::from_abi(borrowed) },
             Some(StringName::from("玩家/生命值"))
         );
-        assert_eq!(String::from_abi(borrowed), None);
+        assert_eq!(
+            // SAFETY: The caller retains the validated ABI payload during decoding.
+            unsafe { String::from_abi(borrowed) },
+            None
+        );
 
         let mut encoded = AbiValueV1::NIL;
         assert_eq!(

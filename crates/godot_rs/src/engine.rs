@@ -62,11 +62,14 @@ pub(crate) fn emit_signal_arguments(
     let mut values = [AbiValueV1::NIL; 9];
     values[0] = string_name_argument(name);
     values[1..1 + arguments.len()].copy_from_slice(arguments);
-    let status: global::Error = invoke_engine_method(
-        object,
-        generated_api::__godot_rs_emit_signal_spec(),
-        &values[..arguments.len() + 1],
-    )?;
+    /* SAFETY: This wrapper retains authenticated signal metadata and encoded arguments. */
+    let status: global::Error = unsafe {
+        invoke_engine_method(
+            object,
+            generated_api::__godot_rs_emit_signal_spec(),
+            &values[..arguments.len() + 1],
+        )
+    }?;
     if status == global::Error::OK {
         Ok(())
     } else {
@@ -442,7 +445,9 @@ pub trait EngineArgument {
 /// Decodes one generated method return from the stable project ABI.
 #[doc(hidden)]
 pub trait EngineReturn: Sized {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self>;
+    /// # Safety
+    /// Pointer-backed payloads must refer to valid storage and authentic ownership tokens.
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self>;
 
     #[doc(hidden)]
     fn __from_native_return(value: crate::native::NativeEngineValue) -> EngineResult<Self> {
@@ -452,12 +457,15 @@ pub trait EngineReturn: Sized {
                 "Native Godot API returned unexpected owned result storage",
             ));
         }
-        Self::__from_engine_return(abi)
+
+        // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+        unsafe { Self::__from_engine_return(abi) }
     }
 
     #[doc(hidden)]
     fn __from_host_return(value: crate::module::HostMethodValue) -> EngineResult<Self> {
-        Self::__from_engine_return(value.abi())
+        // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+        unsafe { Self::__from_engine_return(value.abi()) }
     }
 }
 
@@ -470,8 +478,11 @@ pub trait EngineReturn: Sized {
 pub trait EngineBuiltinValue: EngineReturn {
     fn __as_builtin_argument(&self) -> AbiValueV1;
 
-    fn __replace_native_builtin(&mut self, value: AbiValueV1) -> EngineResult<()> {
-        *self = Self::__from_engine_return(value)?;
+    /// # Safety
+    /// `value` must be a valid native result retained until decoding completes.
+    unsafe fn __replace_native_builtin(&mut self, value: AbiValueV1) -> EngineResult<()> {
+        // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+        *self = unsafe { Self::__from_engine_return(value) }?;
         Ok(())
     }
 
@@ -517,7 +528,7 @@ impl<T: GodotIntegerValue> EngineArgument for T {
 }
 
 impl<T: GodotIntegerValue> EngineReturn for T {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let expected = if T::SIGNED {
             AbiValueType::I64
         } else {
@@ -881,7 +892,7 @@ impl EngineArgument for bool {
 }
 
 impl EngineReturn for bool {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::BOOL)?;
         match value.payload[0] {
             0 => Ok(false),
@@ -913,7 +924,7 @@ macro_rules! signed_engine_value {
             }
 
             impl EngineReturn for $type {
-                fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+                unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
                     valid_value(value, AbiValueType::I64)?;
                     Self::try_from(value.payload[0] as i64).map_err(|_| invalid_return())
                 }
@@ -934,7 +945,7 @@ macro_rules! unsigned_engine_value {
             }
 
             impl EngineReturn for $type {
-                fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+                unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
                     valid_value(value, AbiValueType::U64)?;
                     Self::try_from(value.payload[0]).map_err(|_| invalid_return())
                 }
@@ -952,7 +963,7 @@ impl EngineArgument for char {
 }
 
 impl EngineReturn for char {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::U64)?;
         u32::try_from(value.payload[0])
             .ok()
@@ -968,7 +979,7 @@ impl EngineArgument for f32 {
 }
 
 impl EngineReturn for f32 {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::F64)?;
         let value = f64::from_bits(value.payload[0]);
         let narrowed = value as f32;
@@ -987,7 +998,7 @@ impl EngineArgument for f64 {
 }
 
 impl EngineReturn for f64 {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::F64)?;
         Ok(f64::from_bits(value.payload[0]))
     }
@@ -1016,19 +1027,19 @@ pub fn node_path_argument(value: &str) -> AbiValueV1 {
 }
 
 impl EngineReturn for String {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         owned_engine_text(value, AbiValueType::STRING)
     }
 }
 
 impl EngineReturn for StringName {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         owned_engine_text(value, AbiValueType::STRING_NAME).map(Self::from)
     }
 }
 
 impl EngineReturn for NodePath {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         owned_engine_text(value, AbiValueType::NODE_PATH).map(Self::from)
     }
 }
@@ -1058,7 +1069,7 @@ impl EngineArgument for Vector2 {
 }
 
 impl EngineReturn for Vector2 {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y] = value.vector2().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y))
     }
@@ -1071,7 +1082,7 @@ impl EngineArgument for Vector3 {
 }
 
 impl EngineReturn for Vector3 {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, z] = value.vector3().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y, z))
     }
@@ -1084,7 +1095,7 @@ impl EngineArgument for Color {
 }
 
 impl EngineReturn for Color {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [r, g, b, a] = value.color().ok_or_else(invalid_return)?;
         Ok(Self::rgba(r, g, b, a))
     }
@@ -1097,7 +1108,7 @@ impl EngineArgument for Vector2i {
 }
 
 impl EngineReturn for Vector2i {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y] = value.vector2i().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y))
     }
@@ -1110,7 +1121,7 @@ impl EngineArgument for Vector3i {
 }
 
 impl EngineReturn for Vector3i {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, z] = value.vector3i().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y, z))
     }
@@ -1123,7 +1134,7 @@ impl EngineArgument for Rect2 {
 }
 
 impl EngineReturn for Rect2 {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, width, height] = value.rect2().ok_or_else(invalid_return)?;
         Ok(Self::from_components(x, y, width, height))
     }
@@ -1136,7 +1147,7 @@ impl EngineArgument for Rect2i {
 }
 
 impl EngineReturn for Rect2i {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, width, height] = value.rect2i().ok_or_else(invalid_return)?;
         Ok(Self::from_components(x, y, width, height))
     }
@@ -1149,7 +1160,7 @@ impl EngineArgument for Quaternion {
 }
 
 impl EngineReturn for Quaternion {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, z, w] = value.quaternion().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y, z, w))
     }
@@ -1162,7 +1173,7 @@ impl EngineArgument for Plane {
 }
 
 impl EngineReturn for Plane {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, z, d] = value.plane().ok_or_else(invalid_return)?;
         Ok(Self::from_components(x, y, z, d))
     }
@@ -1175,7 +1186,7 @@ impl EngineArgument for Vector4 {
 }
 
 impl EngineReturn for Vector4 {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, z, w] = value.vector4().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y, z, w))
     }
@@ -1188,7 +1199,7 @@ impl EngineArgument for Vector4i {
 }
 
 impl EngineReturn for Vector4i {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let [x, y, z, w] = value.vector4i().ok_or_else(invalid_return)?;
         Ok(Self::new(x, y, z, w))
     }
@@ -1211,7 +1222,7 @@ macro_rules! fixed_math_engine_value {
         }
 
         impl EngineReturn for $type {
-            fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+            unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
                 fixed_f32_components::<$count>(value, AbiValueType::$abi_type).map($components)
             }
         }
@@ -1247,7 +1258,7 @@ macro_rules! packed_engine_value {
         }
 
         impl EngineReturn for $type {
-            fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+            unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
                 let bytes = copy_owned_engine_bytes(value, AbiValueType::$abi_type)?;
                 Self::__from_bytes(&bytes).ok_or_else(invalid_return)
             }
@@ -1300,7 +1311,7 @@ impl EngineArgument for &Variant {
 }
 
 impl EngineReturn for Variant {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value, AbiValueType::VARIANT)?;
         Self::__from_bytes(&bytes).ok_or_else(invalid_return)
     }
@@ -1341,7 +1352,7 @@ impl<T: VariantConvert> EngineArgument for &Array<T> {
 }
 
 impl<T: VariantConvert> EngineReturn for Array<T> {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value, AbiValueType::ARRAY)?;
         Self::__from_bytes(&bytes).ok_or_else(invalid_return)
     }
@@ -1384,7 +1395,7 @@ impl EngineArgument for &Dictionary {
 }
 
 impl EngineReturn for Dictionary {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let bytes = copy_owned_engine_bytes(value, AbiValueType::DICTIONARY)?;
         Self::__from_bytes(&bytes).ok_or_else(invalid_return)
     }
@@ -1434,7 +1445,7 @@ impl EngineArgument for &Callable {
 }
 
 impl EngineReturn for Callable {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let (pointer, length) = value
             .byte_range(AbiValueType::CALLABLE)
             .ok_or_else(invalid_return)?;
@@ -1485,7 +1496,7 @@ impl<T> EngineArgument for &Signal<T> {
 }
 
 impl<T> EngineReturn for Signal<T> {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         let (pointer, length) = value
             .byte_range(AbiValueType::SIGNAL)
             .ok_or_else(invalid_return)?;
@@ -1526,7 +1537,7 @@ impl EngineArgument for Rid {
 }
 
 impl EngineReturn for Rid {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         value.rid().map(Rid::from_raw).ok_or_else(invalid_return)
     }
 }
@@ -1556,7 +1567,7 @@ impl<T: GodotClass> EngineArgument for &GodotRef<T> {
 }
 
 impl<T: GodotClass> EngineReturn for ObjectRef<T> {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::OBJECT_ID)?;
         if value.payload[0] == 0 {
             return Err(EngineError::invalid_result(
@@ -1571,17 +1582,19 @@ impl<T: GodotClass> EngineReturn for ObjectRef<T> {
 }
 
 impl<T: GodotClass> EngineReturn for Option<ObjectRef<T>> {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::OBJECT_ID)?;
         if value.payload[0] == 0 {
             return Ok(None);
         }
-        ObjectRef::<T>::__from_engine_return(value).map(Some)
+
+        // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+        unsafe { ObjectRef::<T>::__from_engine_return(value) }.map(Some)
     }
 }
 
 impl<T: GodotClass> EngineReturn for GodotRef<T> {
-    fn __from_engine_return(_value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(_value: AbiValueV1) -> EngineResult<Self> {
         Err(EngineError::invalid_result(
             "Godot returned a RefCounted object without ownership",
         ))
@@ -1621,7 +1634,7 @@ impl<T: GodotClass> EngineReturn for GodotRef<T> {
 }
 
 impl<T: GodotClass> EngineReturn for Option<GodotRef<T>> {
-    fn __from_engine_return(_value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(_value: AbiValueV1) -> EngineResult<Self> {
         Err(EngineError::invalid_result(
             "Godot returned a RefCounted object without ownership",
         ))
@@ -1664,14 +1677,18 @@ impl<T: GodotClass> EngineReturn for Option<GodotRef<T>> {
 }
 
 impl EngineReturn for () {
-    fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
+    unsafe fn __from_engine_return(value: AbiValueV1) -> EngineResult<Self> {
         valid_value(value, AbiValueType::NIL)
     }
 }
 
 /// Invokes one statically generated Godot MethodBind contract.
+/// # Safety
+/// The descriptor and every pointer-backed argument must remain valid for the
+/// synchronous call. Generated descriptors must be immutable for the entire
+/// loaded module generation and match the engine's authenticated API.
 #[doc(hidden)]
-pub fn invoke_engine_method<T: GodotClass, R: EngineReturn>(
+pub unsafe fn invoke_engine_method<T: GodotClass, R: EngineReturn>(
     receiver: ObjectRef<T>,
     method: &'static AbiGodotMethodSpecV1,
     arguments: &[AbiValueV1],
@@ -1685,8 +1702,12 @@ pub fn invoke_engine_method<T: GodotClass, R: EngineReturn>(
 
 /// Invokes a generated receiver-free utility, constructor, singleton, or
 /// static builtin contract.
+/// # Safety
+/// The descriptor and every pointer-backed argument must remain valid for the
+/// synchronous call. Generated descriptors must be immutable for the entire
+/// loaded module generation and match the engine's authenticated API.
 #[doc(hidden)]
-pub fn invoke_godot_api<R: EngineReturn>(
+pub unsafe fn invoke_godot_api<R: EngineReturn>(
     spec: &'static AbiGodotApiSpecV1,
     arguments: &[AbiValueV1],
 ) -> EngineResult<R> {
@@ -1701,8 +1722,12 @@ pub fn invoke_godot_api<R: EngineReturn>(
 }
 
 /// Invokes a generated const builtin method, operator, member, or index.
+/// # Safety
+/// The descriptor and every pointer-backed argument must remain valid for the
+/// synchronous call. Generated descriptors must be immutable for the entire
+/// loaded module generation and match the engine's authenticated API.
 #[doc(hidden)]
-pub fn invoke_builtin_api<B: EngineBuiltinValue, R: EngineReturn>(
+pub unsafe fn invoke_builtin_api<B: EngineBuiltinValue, R: EngineReturn>(
     base: &B,
     spec: &'static AbiGodotApiSpecV1,
     arguments: &[AbiValueV1],
@@ -1721,8 +1746,12 @@ pub fn invoke_builtin_api<B: EngineBuiltinValue, R: EngineReturn>(
 }
 
 /// Invokes a generated builtin operation that mutates its receiver.
+/// # Safety
+/// The descriptor and every pointer-backed argument must remain valid for the
+/// synchronous call. Generated descriptors must be immutable for the entire
+/// loaded module generation and match the engine's authenticated API.
 #[doc(hidden)]
-pub fn invoke_builtin_api_mut<B: EngineBuiltinValue, R: EngineReturn>(
+pub unsafe fn invoke_builtin_api_mut<B: EngineBuiltinValue, R: EngineReturn>(
     base: &mut B,
     spec: &'static AbiGodotApiSpecV1,
     arguments: &[AbiValueV1],
@@ -1744,7 +1773,8 @@ pub fn invoke_builtin_api_mut<B: EngineBuiltinValue, R: EngineReturn>(
         let replace = if let Some(dynamic) = dynamic {
             base.__replace_native_dynamic(dynamic)
         } else {
-            base.__replace_native_builtin(updated)
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { base.__replace_native_builtin(updated) }
         };
         release_native_engine_value(updated)?;
         replace?;
@@ -1917,46 +1947,78 @@ mod tests {
 
     #[test]
     fn normalized_engine_values_validate_exact_return_types() {
-        assert!(bool::__from_engine_return(AbiValueV1::from_bool(true)).expect("bool"));
+        assert!(
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { bool::__from_engine_return(AbiValueV1::from_bool(true)) }.expect("bool")
+        );
         assert_eq!(
-            u32::__from_engine_return(AbiValueV1::from_u64(u32::MAX.into())).expect("u32"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { u32::__from_engine_return(AbiValueV1::from_u64(u32::MAX.into())) }
+                .expect("u32"),
             u32::MAX
         );
         assert!(
-            u8::__from_engine_return(AbiValueV1::from_u64(u16::from(u8::MAX) as u64 + 1)).is_err()
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe {
+                u8::__from_engine_return(AbiValueV1::from_u64(u16::from(u8::MAX) as u64 + 1))
+            }
+            .is_err()
         );
         assert_eq!(
-            char::__from_engine_return(AbiValueV1::from_u64(u64::from(u32::from('界'))))
-                .expect("char32"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe {
+                char::__from_engine_return(AbiValueV1::from_u64(u64::from(u32::from('界'))))
+            }
+            .expect("char32"),
             '界'
         );
-        assert!(char::__from_engine_return(AbiValueV1::from_u64(0xD800)).is_err());
-        assert!(ObjectRef::<Node>::__from_engine_return(AbiValueV1::from_object_id(0)).is_err());
+        assert!(
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { char::__from_engine_return(AbiValueV1::from_u64(0xD800)) }.is_err()
+        );
+        assert!(
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { ObjectRef::<Node>::__from_engine_return(AbiValueV1::from_object_id(0)) }
+                .is_err()
+        );
         assert_eq!(
-            Option::<ObjectRef<Node>>::__from_engine_return(AbiValueV1::from_object_id(0))
-                .expect("nullable object"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe {
+                Option::<ObjectRef<Node>>::__from_engine_return(AbiValueV1::from_object_id(0))
+            }
+            .expect("nullable object"),
             None
         );
         assert_eq!(
-            Vector2::__from_engine_return(AbiValueV1::from_vector2(1.5, -2.0)).expect("Vector2"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Vector2::__from_engine_return(AbiValueV1::from_vector2(1.5, -2.0)) }
+                .expect("Vector2"),
             Vector2::new(1.5, -2.0)
         );
         assert_eq!(
-            Vector3::__from_engine_return(AbiValueV1::from_vector3(1.0, 2.0, 3.0))
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Vector3::__from_engine_return(AbiValueV1::from_vector3(1.0, 2.0, 3.0)) }
                 .expect("Vector3"),
             Vector3::new(1.0, 2.0, 3.0)
         );
         assert_eq!(
-            Color::__from_engine_return(AbiValueV1::from_color(0.1, 0.2, 0.3, 0.4)).expect("Color"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Color::__from_engine_return(AbiValueV1::from_color(0.1, 0.2, 0.3, 0.4)) }
+                .expect("Color"),
             Color::rgba(0.1, 0.2, 0.3, 0.4)
         );
         let text = "你好，Godot";
         let mut encoded = AbiValueV1::from_borrowed_utf8(text);
         encoded.reserved_flags = godot_api::abi::ABI_VALUE_OWNED_UTF8;
-        assert_eq!(String::__from_engine_return(encoded).expect("String"), text);
+        assert_eq!(
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { String::__from_engine_return(encoded) }.expect("String"),
+            text
+        );
         encoded.type_ = AbiValueType::STRING_NAME;
         assert_eq!(
-            StringName::__from_engine_return(encoded).expect("StringName"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { StringName::__from_engine_return(encoded) }.expect("StringName"),
             StringName::from(text)
         );
         assert_eq!(
@@ -1964,37 +2026,52 @@ mod tests {
             AbiValueV1::from_borrowed_string_name(text)
         );
         assert_eq!(
-            Vector2i::__from_engine_return(AbiValueV1::from_vector2i(-1, 2)).expect("Vector2i"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Vector2i::__from_engine_return(AbiValueV1::from_vector2i(-1, 2)) }
+                .expect("Vector2i"),
             Vector2i::new(-1, 2)
         );
         assert_eq!(
-            Vector3i::__from_engine_return(AbiValueV1::from_vector3i(3, -4, 5)).expect("Vector3i"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Vector3i::__from_engine_return(AbiValueV1::from_vector3i(3, -4, 5)) }
+                .expect("Vector3i"),
             Vector3i::new(3, -4, 5)
         );
         assert_eq!(
-            Rect2::__from_engine_return(AbiValueV1::from_rect2(1.0, 2.0, 3.0, 4.0)).expect("Rect2"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Rect2::__from_engine_return(AbiValueV1::from_rect2(1.0, 2.0, 3.0, 4.0)) }
+                .expect("Rect2"),
             Rect2::from_components(1.0, 2.0, 3.0, 4.0)
         );
         assert_eq!(
-            Rect2i::__from_engine_return(AbiValueV1::from_rect2i(1, 2, 3, 4)).expect("Rect2i"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Rect2i::__from_engine_return(AbiValueV1::from_rect2i(1, 2, 3, 4)) }
+                .expect("Rect2i"),
             Rect2i::from_components(1, 2, 3, 4)
         );
         assert_eq!(
-            Quaternion::__from_engine_return(AbiValueV1::from_quaternion(0.0, 0.5, 0.0, 1.0))
-                .expect("Quaternion"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe {
+                Quaternion::__from_engine_return(AbiValueV1::from_quaternion(0.0, 0.5, 0.0, 1.0))
+            }
+            .expect("Quaternion"),
             Quaternion::new(0.0, 0.5, 0.0, 1.0)
         );
         assert_eq!(
-            Plane::__from_engine_return(AbiValueV1::from_plane(0.0, 1.0, 0.0, 5.0)).expect("Plane"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Plane::__from_engine_return(AbiValueV1::from_plane(0.0, 1.0, 0.0, 5.0)) }
+                .expect("Plane"),
             Plane::from_components(0.0, 1.0, 0.0, 5.0)
         );
         assert_eq!(
-            Vector4::__from_engine_return(AbiValueV1::from_vector4(1.0, 2.0, 3.0, 4.0))
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Vector4::__from_engine_return(AbiValueV1::from_vector4(1.0, 2.0, 3.0, 4.0)) }
                 .expect("Vector4"),
             Vector4::new(1.0, 2.0, 3.0, 4.0)
         );
         assert_eq!(
-            Vector4i::__from_engine_return(AbiValueV1::from_vector4i(1, 2, 3, 4))
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { Vector4i::__from_engine_return(AbiValueV1::from_vector4i(1, 2, 3, 4)) }
                 .expect("Vector4i"),
             Vector4i::new(1, 2, 3, 4)
         );
@@ -2008,7 +2085,8 @@ mod tests {
         assert_eq!(encoded.type_, AbiValueType::I64);
         assert_eq!(encoded.payload, [9_999, 0]);
         assert_eq!(
-            global::Error::__from_engine_return(encoded).expect("unknown enum value"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { global::Error::__from_engine_return(encoded) }.expect("unknown enum value"),
             future_error
         );
 
@@ -2020,7 +2098,9 @@ mod tests {
         let encoded = future_flags.__into_engine_argument();
         assert_eq!(encoded.type_, AbiValueType::U64);
         assert_eq!(
-            global::MouseButtonMask::__from_engine_return(encoded).expect("unknown bitfield value"),
+            // SAFETY: Generated metadata and owned ABI backing remain live during the synchronous call.
+            unsafe { global::MouseButtonMask::__from_engine_return(encoded) }
+                .expect("unknown bitfield value"),
             future_flags
         );
     }

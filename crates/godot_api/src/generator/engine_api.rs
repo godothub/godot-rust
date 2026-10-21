@@ -2961,7 +2961,7 @@ fn emit_singletons_and_constructors(
         .unwrap();
         writeln!(
             output,
-            "        crate::engine::invoke_godot_api(&__GODOT_RS_API_{:016X}, &[])",
+            "        // SAFETY: Immutable generated contract and arguments stay live for the call.\n        unsafe {{ crate::engine::invoke_godot_api(&__GODOT_RS_API_{:016X}, &[]) }}",
             binding.id
         )
         .unwrap();
@@ -2983,7 +2983,7 @@ fn emit_singletons_and_constructors(
         .unwrap();
         writeln!(
             output,
-            "        crate::engine::invoke_godot_api(&__GODOT_RS_API_{:016X}, &[])",
+            "        // SAFETY: Immutable generated contract and arguments stay live for the call.\n        unsafe {{ crate::engine::invoke_godot_api(&__GODOT_RS_API_{:016X}, &[]) }}",
             binding.id
         )
         .unwrap();
@@ -3141,13 +3141,13 @@ fn emit_free_api_function(
     if base_name.is_some() {
         writeln!(
             output,
-            "{indent}    crate::engine::{invocation}(base, &{contract}, &arguments)"
+            "{indent}    // SAFETY: Immutable generated contract and arguments stay live for the call.\n{indent}    unsafe {{ crate::engine::{invocation}(base, &{contract}, &arguments) }}"
         )
         .unwrap();
     } else {
         writeln!(
             output,
-            "{indent}    crate::engine::{invocation}(&{contract}, &arguments)"
+            "{indent}    // SAFETY: Immutable generated contract and arguments stay live for the call.\n{indent}    unsafe {{ crate::engine::{invocation}(&{contract}, &arguments) }}"
         )
         .unwrap();
     }
@@ -3368,7 +3368,7 @@ fn emit_trait(output: &mut String, class: &ApiClass, methods: &[&MethodBinding<'
         emit_argument_array(output, binding, "        ");
         writeln!(
             output,
-            "        super::invoke_engine_method(receiver, &__GODOT_RS_METHOD_{:016X}, &arguments)",
+            "        // SAFETY: Immutable generated contract and arguments stay live for the call.\n        unsafe {{ super::invoke_engine_method(receiver, &__GODOT_RS_METHOD_{:016X}, &arguments) }}",
             binding.id
         )
         .unwrap();
@@ -3425,7 +3425,7 @@ fn emit_static_impl(output: &mut String, class: &ApiClass, methods: &[&MethodBin
         emit_argument_array(output, binding, "        ");
         writeln!(
             output,
-            "        super::invoke_engine_method(super::ObjectRef::<super::{}>::unresolved(), &__GODOT_RS_METHOD_{:016X}, &arguments)",
+            "        // SAFETY: Immutable generated contract and arguments stay live for the call.\n        unsafe {{ super::invoke_engine_method(super::ObjectRef::<super::{}>::unresolved(), &__GODOT_RS_METHOD_{:016X}, &arguments) }}",
             class.name, binding.id
         )
         .unwrap();

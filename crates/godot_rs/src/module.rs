@@ -1421,8 +1421,12 @@ mod tests {
         };
         assert_eq!(drop_module_object_ref(wrong_id), AbiStatus::InvalidArgument);
         assert!(!released);
-        let decoded = <crate::engine::GodotRef<crate::engine::RefCounted>
-            as crate::script::FromAbiValue>::from_abi(output).expect("same-module super result");
+        // SAFETY: The module-owned output remains live throughout decoding.
+        let decoded = unsafe {
+            <crate::engine::GodotRef<crate::engine::RefCounted>
+            as crate::script::FromAbiValue>::from_abi(output)
+        }
+        .expect("same-module super result");
         // SAFETY: output transfers exactly one registered module return reference.
         assert_eq!(unsafe { drop_owned_value(output) }, AbiStatus::Ok);
         assert!(!released, "decoded super result retains its own reference");
@@ -1556,7 +1560,8 @@ mod tests {
         };
         let (_, value) = object_container(1, &host);
         assert_eq!(
-            value.write_result(ptr::null_mut()).status,
+            // SAFETY: Null is explicitly allowed and rejected by the ABI encoder.
+            unsafe { crate::script::encode_method_result(value, ptr::null_mut()) }.status,
             AbiStatus::InvalidArgument
         );
         assert!(released);

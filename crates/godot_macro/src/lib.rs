@@ -768,10 +768,8 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                     field_getters.push(quote! {
                         #index => {
                             let field_value: #field_type = #field_value;
-                            ::godot_rs::script::IntoMethodResult::write_result(
-                                field_value,
-                                output,
-                            )
+                            /* SAFETY: The field ABI caller supplies a writable output slot. */
+                            unsafe { ::godot_rs::script::encode_method_result(field_value, output) }
                         },
                     });
                     if !metadata.property_read_only {
@@ -782,7 +780,7 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                         field_setters.push(quote! {
                             #index => {
                                 let Some(decoded) =
-                                    <#field_type as ::godot_rs::script::FromAbiValue>::from_abi(value)
+                                    (unsafe { <#field_type as ::godot_rs::script::FromAbiValue>::from_abi(value) })
                                 else {
                                     return ::godot_rs::abi::AbiCallResult::failure(
                                         ::godot_rs::abi::AbiStatus::InvalidArgument,
@@ -799,8 +797,8 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                     field_setters.push(quote! {
                         #index => {
                             let Ok(decoded) =
-                                <#field_type as ::godot_rs::engine::EngineReturn>::
-                                    __from_engine_return(value)
+                                (unsafe { <#field_type as ::godot_rs::engine::EngineReturn>::
+                                    __from_engine_return(value) })
                             else {
                                 return ::godot_rs::abi::AbiCallResult::failure(
                                     ::godot_rs::abi::AbiStatus::InvalidArgument,
@@ -2962,7 +2960,7 @@ fn constant_descriptor(self_type: &Type, constant: &ImplItemConst) -> syn::Resul
                     "script constants do not accept arguments",
                 );
             }
-            ::godot_rs::script::encode_method_result(#result, output)
+            unsafe { ::godot_rs::script::encode_method_result(#result, output) }
         }
     };
     Ok(MethodExpansion {
@@ -3323,7 +3321,7 @@ fn method_descriptor(
                     ) -> ::godot_rs::abi::AbiCallResult {
                         ::godot_rs::script::catch_abi_panic(|| {
                             let value: #argument_type = #default;
-                            ::godot_rs::script::encode_method_result(value, output)
+                            unsafe { ::godot_rs::script::encode_method_result(value, output) }
                         })
                     }
                     default_argument
@@ -3530,7 +3528,7 @@ fn reflected_method_invocation(
             #(#decoders)*
             #vararg_decoder
             let result = #call;
-            ::godot_rs::script::encode_method_result(result, output)
+            unsafe { ::godot_rs::script::encode_method_result(result, output) }
         }
     };
     Ok((argument_types, return_type, invocation))

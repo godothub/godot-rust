@@ -248,13 +248,40 @@ impl PanickingScript {
 }
 
 #[script(base = Node)]
-struct RawIdentifierScript;
+struct RawIdentifierScript {
+    #[export(default = 7)]
+    r#type: i64,
+
+    #[property(default = 2)]
+    r#loop: i64,
+
+    #[signal]
+    r#match: Signal<fn(r#type: i64)>,
+
+    #[signal(args(r#async))]
+    r#yield: Signal<(bool,)>,
+}
+
+#[godot_enum]
+enum KeywordEnum {
+    r#type = 1,
+}
+
+#[godot_flags]
+enum KeywordFlags {
+    r#async = 1,
+}
 
 #[script]
 impl RawIdentifierScript {
     #[func]
     fn r#type(&self) -> String {
         "Rust".into()
+    }
+
+    #[func(name = "keyword_sum")]
+    fn r#async(&self, r#type: i64, #[default(3)] r#match: i64) -> i64 {
+        r#type + r#match
     }
 }
 
@@ -717,10 +744,64 @@ fn absent_optional_script_extensions_zero_their_abi_slots() {
 fn raw_identifiers_export_their_godot_method_name() {
     let method = registered_methods::<RawIdentifierScript>()
         .into_iter()
-        .next()
+        .find(|method| method.name == "type")
         .expect("raw identifier method");
     assert_eq!(method.name, "type");
     assert_eq!(method.id, godot_rs::script::method_id("type"));
+}
+
+#[test]
+fn raw_identifiers_use_godot_names_in_fields_and_argument_metadata() {
+    let fields = RawIdentifierScript::DESCRIPTOR.fields;
+    assert_eq!(
+        fields.iter().map(|field| field.name).collect::<Vec<_>>(),
+        ["type", "loop", "match", "yield"]
+    );
+    let script = RawIdentifierScript::__godot_rs_new();
+    assert_eq!(script.r#match.name(), fields[2].name);
+    assert_eq!(script.r#yield.name(), fields[3].name);
+
+    for (index, expected) in [(2, "type"), (3, "async")] {
+        let signal = fields[index].signal.expect("raw signal metadata");
+        assert_eq!(signal.arguments[0].name, expected);
+        let name = signal.abi_arguments[0].name;
+        // SAFETY: Generated argument names refer to static string literals.
+        let bytes = unsafe { core::slice::from_raw_parts(name.ptr, name.len) };
+        assert_eq!(core::str::from_utf8(bytes), Ok(expected));
+    }
+
+    let method = registered_methods::<RawIdentifierScript>()
+        .into_iter()
+        .find(|method| method.name == "keyword_sum")
+        .expect("explicit Godot method name");
+    assert_eq!(method.id, godot_rs::script::method_id("keyword_sum"));
+    assert_eq!(method.arguments[0].name, "type");
+    assert_eq!(method.arguments[1].name, "match");
+    assert_eq!(method.default_arguments.len(), 1);
+    for (argument, expected) in method.abi_arguments.iter().zip(["type", "match"]) {
+        // SAFETY: Generated argument names refer to static string literals.
+        let bytes = unsafe { core::slice::from_raw_parts(argument.name.ptr, argument.name.len) };
+        assert_eq!(core::str::from_utf8(bytes), Ok(expected));
+    }
+}
+
+#[test]
+fn raw_identifiers_use_godot_names_in_inspector_integer_options() {
+    for (options, expected) in [
+        (
+            <KeywordEnum as godot_rs::engine::GodotIntegerValue>::PROPERTY_OPTIONS,
+            "TYPE",
+        ),
+        (
+            <KeywordFlags as godot_rs::engine::GodotIntegerValue>::PROPERTY_OPTIONS,
+            "ASYNC",
+        ),
+    ] {
+        let name = options[0].name;
+        // SAFETY: Generated option names refer to static string literals.
+        let bytes = unsafe { core::slice::from_raw_parts(name.ptr, name.len) };
+        assert_eq!(core::str::from_utf8(bytes), Ok(expected));
+    }
 }
 
 #[test]

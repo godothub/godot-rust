@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span, TokenStream as TokenStream2, TokenTree};
 use quote::{ToTokens, format_ident, quote};
+use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream, Parser};
 use syn::punctuated::Punctuated;
 use syn::visit_mut::VisitMut;
@@ -135,7 +136,7 @@ fn custom_integer_tokens(item: ItemEnum, flags: bool) -> syn::Result<TokenStream
             ));
         }
         let option_name = LitStr::new(
-            &screaming_snake_case(&variant.ident.to_string()),
+            &screaming_snake_case(&variant.ident.unraw().to_string()),
             variant.ident.span(),
         );
         values.push((
@@ -690,9 +691,7 @@ fn expand_struct(arguments: TokenStream2, mut item: ItemStruct) -> syn::Result<T
                     Error::new_spanned(name, "script has too many fields for the project ABI")
                 })?;
                 let initializer = if metadata.kind == FieldKind::Signal {
-                    let rust_name = name.to_string();
-                    let godot_name = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
-                    let godot_name = LitStr::new(godot_name, name.span());
+                    let godot_name = godot_identifier(name);
                     quote!(::godot_rs::signal::Signal::new(#index, #godot_name))
                 } else if metadata.kind == FieldKind::Node {
                     let class = metadata.node_class.as_ref().expect("validated node class");
@@ -1851,7 +1850,7 @@ fn parse_signal_schema(
                         "name each signal argument, such as `Signal<fn(amount: i64)>`",
                     ));
                 };
-                if name == "_" || !names.insert(name.to_string()) {
+                if name == "_" || !names.insert(name.unraw().to_string()) {
                     return Err(Error::new_spanned(
                         name,
                         "signal argument names must be unique and cannot be `_`",
@@ -1906,7 +1905,7 @@ fn parse_signal_schema(
     }
     let mut unique_names = std::collections::HashSet::new();
     for name in &names {
-        if name == "_" || !unique_names.insert(name.to_string()) {
+        if name == "_" || !unique_names.insert(name.unraw().to_string()) {
             return Err(Error::new_spanned(
                 name,
                 "signal argument names must be unique and cannot be `_`",
@@ -2027,6 +2026,7 @@ fn field_descriptor(
     field_type: &Type,
     metadata: &FieldMetadata,
 ) -> syn::Result<TokenStream2> {
+    let exported_name = godot_identifier(name);
     let rust_type = token_string(field_type);
     let options = LitStr::new(&metadata.options, Span::call_site());
     let default = metadata.default.as_ref().map(|value| {
@@ -2675,23 +2675,23 @@ fn field_descriptor(
     };
     let signal = if metadata.kind == FieldKind::Signal {
         let arguments = metadata.signal_arguments.iter().map(|argument| {
-            let name = &argument.name;
+            let name = godot_identifier(&argument.name);
             let type_ = abi_value_type(&argument.type_)
                 .expect("signal argument type was validated before descriptor generation");
             quote! {
                 ::godot_rs::script::SignalArgumentDescriptor {
-                    name: stringify!(#name),
+                    name: #name,
                     type_: #type_,
                 }
             }
         });
         let abi_arguments = metadata.signal_arguments.iter().map(|argument| {
-            let name = &argument.name;
+            let name = godot_identifier(&argument.name);
             let type_ = abi_value_type(&argument.type_)
                 .expect("signal argument type was validated before descriptor generation");
             quote! {
                 ::godot_rs::abi::AbiSignalArgumentDescriptorV1 {
-                    name: ::godot_rs::abi::AbiByteSlice::from_static(stringify!(#name)),
+                    name: ::godot_rs::abi::AbiByteSlice::from_static(#name),
                     type_: #type_,
                     reserved_flags: 0,
                 }
@@ -2716,7 +2716,7 @@ fn field_descriptor(
     };
     Ok(quote! {
         ::godot_rs::script::FieldDescriptor {
-            name: stringify!(#name),
+            name: #exported_name,
             rust_type: #rust_type,
             kind: #kind,
             options: #options,
@@ -3273,13 +3273,14 @@ fn method_descriptor(
         .zip(&argument_types)
         .zip(&argument_classes)
         .map(|((name, type_), class_name)| {
+            let name = godot_identifier(name);
             let class_name = class_name.as_ref().map_or_else(
                 || quote!(::core::option::Option::None),
                 |class_name| quote!(::core::option::Option::Some(#class_name)),
             );
             quote! {
                 ::godot_rs::script::MethodArgumentDescriptor {
-                    name: stringify!(#name),
+                    name: #name,
                     type_: #type_,
                     class_name: #class_name,
                 }
@@ -3290,9 +3291,10 @@ fn method_descriptor(
         .iter()
         .zip(&argument_types)
         .map(|(name, type_)| {
+            let name = godot_identifier(name);
             quote! {
                 ::godot_rs::abi::AbiMethodArgumentDescriptorV1 {
-                    name: ::godot_rs::abi::AbiByteSlice::from_static(stringify!(#name)),
+                    name: ::godot_rs::abi::AbiByteSlice::from_static(#name),
                     type_: #type_,
                     reserved_flags: 0,
                 }
@@ -4288,6 +4290,10 @@ fn token_string(tokens: &impl ToTokens) -> LitStr {
     LitStr::new(&tokens.to_token_stream().to_string(), Span::call_site())
 }
 
+fn godot_identifier(name: &Ident) -> LitStr {
+    LitStr::new(&name.unraw().to_string(), name.span())
+}
+
 const fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut index = 0;
@@ -4457,6 +4463,7 @@ mod tests {
         for signature in [
             parse_quote!(Signal<fn(i64)>),
             parse_quote!(Signal<fn(value: i64, value: i64)>),
+            parse_quote!(Signal<fn(value: i64, r#value: i64)>),
             parse_quote!(Signal<fn(value: i64) -> bool>),
             parse_quote!(Signal<unsafe fn(value: i64)>),
         ] {
@@ -4466,6 +4473,13 @@ mod tests {
             parse_signal_schema(
                 &parse_quote!(#[signal(args(value))]),
                 &parse_quote!(Signal<fn(value: i64)>),
+            )
+            .is_err()
+        );
+        assert!(
+            parse_signal_schema(
+                &parse_quote!(#[signal(args(value, r#value))]),
+                &parse_quote!(Signal<(i64, i64)>),
             )
             .is_err()
         );

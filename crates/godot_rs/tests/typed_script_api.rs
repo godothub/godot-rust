@@ -300,3 +300,58 @@ fn proxies_share_object_identity_and_keep_connection_signatures() {
     }
     let _ = game_logic;
 }
+
+#[script(base = Node)]
+struct KeywordMembers {
+    #[export]
+    r#type: i64,
+
+    #[property]
+    r#loop: i64,
+
+    #[signal]
+    r#match: Signal<fn(r#type: i64)>,
+}
+
+#[script]
+impl KeywordMembers {
+    #[func]
+    fn r#type(&self, r#match: i64) -> i64 {
+        r#match
+    }
+
+    #[func(name = "keyword_callback")]
+    fn r#async(&self, r#type: i64) {
+        let _ = r#type;
+    }
+}
+
+#[test]
+fn raw_identifiers_keep_typed_proxies_consistent_with_reflection() {
+    let instance = KeywordMembers::__godot_rs_new();
+    let object = NodeRef::<KeywordMembers>::__from_instance_id(73);
+    let signal = object.signals().r#match();
+    assert_eq!(instance.r#match.name(), signal.name());
+    assert_eq!(signal.name(), KeywordMembers::DESCRIPTOR.fields[2].name);
+    assert_eq!(signal.name(), "match");
+    assert_eq!(signal.object_ref().expect("signal owner").instance_id(), 73);
+
+    let callback = object.callbacks().r#type();
+    let _: &godot_rs::callable::CallableMethod<(i64,)> = &callback;
+    assert_eq!(callback.as_callable().method().as_str(), "type");
+    assert_eq!(
+        object.callbacks().r#async().as_callable().method().as_str(),
+        "keyword_callback"
+    );
+
+    // Compile the property and method proxies without requiring a live Host.
+    fn access(object: NodeRef<KeywordMembers>) -> EngineResult<()> {
+        let _: i64 = object.r#type(4)?;
+        let _: i64 = object.properties().r#type()?;
+        object.properties().set_type(9)?;
+        let _: i64 = object.properties().r#loop()?;
+        object.properties().set_loop(2)?;
+        Ok(())
+    }
+    let _ = access;
+}

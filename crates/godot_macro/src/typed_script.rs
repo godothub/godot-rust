@@ -254,8 +254,7 @@ pub(super) fn property_api(name: &Ident, ty: &Type, index: u32, read_only: bool)
 }
 
 pub(super) fn signal_api(name: &Ident, ty: &Type) -> TokenStream2 {
-    let rust_name = name.to_string();
-    let signal_name = rust_name.strip_prefix("r#").unwrap_or(&rust_name);
+    let signal_name = godot_identifier(name);
     quote! {
         pub fn #name(&self) -> #ty {
             ::godot_rs::signal::Signal::__from_script(self.object, #signal_name)

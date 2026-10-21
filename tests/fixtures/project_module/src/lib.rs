@@ -1,4 +1,8 @@
 use godot_rs::prelude::*;
+use godot_rs::variant::VariantConvert;
+
+#[path = "../../native_extension/src/container_checks.rs"]
+mod container_checks;
 
 mod code_api;
 use code_api::{CodeApi, Health, Tuning, Watcher};
@@ -19,7 +23,21 @@ struct EngineSmokeState {
 
 #[script(base = Node2D)]
 pub struct HostSmoke {
+    #[export(default = 17)]
+    r#type: i64,
+
+    #[property(default = 3)]
+    r#loop: i64,
+
+    #[signal]
+    r#yield: Signal<fn(r#type: i64)>,
+
     virtual_draw_called: bool,
+    dynamic_amount: i64,
+    dynamic_validate_called: bool,
+    #[export]
+    validation_probe: i64,
+    last_notice: i32,
     detaching_for_test: bool,
 
     #[export(default = 3, group = "State", range(min = 0, max = 100, step = 1))]
@@ -158,6 +176,97 @@ pub struct HostSmoke {
 
 #[script]
 impl HostSmoke {
+    #[func]
+    fn emit_raw_signal(&self, r#type: i64) -> EngineResult<()> {
+        self.r#yield.emit(r#type)
+    }
+
+    fn _notification(&mut self, what: i32) {
+        if what == 9876 {
+            self.last_notice = what;
+        }
+    }
+    fn _to_string(&self) -> String {
+        format!("RustSmoke({})", self.counter)
+    }
+    fn _get(&self, name: StringName) -> Variant {
+        match name.as_str() {
+            "dynamic_amount" => Variant::from(self.dynamic_amount),
+            "last_notice" => Variant::from(i64::from(self.last_notice)),
+            "dynamic_validate_called" => Variant::from(self.dynamic_validate_called),
+            _ => Variant::nil(),
+        }
+    }
+    fn _set(&mut self, name: StringName, value: Variant) -> bool {
+        if name.as_str() == "dynamic_amount" {
+            if let Some(value) = i64::from_variant(value) {
+                self.dynamic_amount = value;
+                return true;
+            }
+        }
+        false
+    }
+    fn _get_property_list(&self) -> EngineResult<Array<Dictionary>> {
+        let property = Dictionary::from_entries(vec![
+            (Variant::from("name"), Variant::from("dynamic_amount")),
+            (Variant::from("type"), Variant::from(2_i64)),
+            (Variant::from("usage"), Variant::from(6_i64)),
+            (Variant::from("hint"), Variant::from(1_i64)),
+            (Variant::from("hint_string"), Variant::from("0,100,1")),
+        ])?;
+        Array::from_vec(vec![property])
+    }
+    fn _validate_property(&mut self, property: Dictionary) -> EngineResult<()> {
+        if property
+            .get(&Variant::from("name"))?
+            .and_then(String::from_variant)
+            .as_deref()
+            == Some("dynamic_amount")
+        {
+            self.dynamic_validate_called = true;
+        }
+        if property
+            .get(&Variant::from("name"))?
+            .and_then(String::from_variant)
+            .as_deref()
+            == Some("validation_probe")
+        {
+            property.insert(Variant::from("hint"), Variant::from(1_i64))?;
+            property.insert(Variant::from("hint_string"), Variant::from("0,100,1"))?;
+        }
+        Ok(())
+    }
+    fn _property_can_revert(&self, name: StringName) -> bool {
+        name.as_str() == "dynamic_amount"
+    }
+    fn _property_get_revert(&self, name: StringName) -> Variant {
+        if name.as_str() == "dynamic_amount" {
+            Variant::from(7_i64)
+        } else {
+            Variant::nil()
+        }
+    }
+    #[func]
+    fn noop(&self) {}
+    #[func]
+    fn benchmark_engine_calls(&self, iterations: i64) -> EngineResult<f64> {
+        let start = std::time::Instant::now();
+        for _ in 0..iterations.clamp(0, 100_000) {
+            std::hint::black_box(self.base().get_process_delta_time()?);
+        }
+        Ok(start.elapsed().as_secs_f64())
+    }
+
+    #[func]
+    fn verify_shared_containers(
+        &self,
+        numbers: Array<i64>,
+        dictionary: Dictionary,
+        readonly: Array,
+        typed_dictionary: Dictionary,
+    ) -> EngineResult<bool> {
+        container_checks::verify(numbers, dictionary, readonly, typed_dictionary)
+    }
     #[func]
     fn detach_for_test(&mut self) -> i64 {
         self.detaching_for_test = true;
@@ -697,7 +806,7 @@ impl HostSmoke {
 
     #[func]
     fn verify_refcounted_array(&self, images: Array<GodotRef<Image>>) -> ScriptResult<bool> {
-        let Some(image) = images.first().cloned() else {
+        let Some(image) = images.get(0)? else {
             return Ok(false);
         };
         drop(images);
@@ -708,6 +817,7 @@ impl HostSmoke {
     fn verify_dynamic_engine_api(&self) -> ScriptResult<bool> {
         let base = self.base();
         let children = base.get_children(false)?;
+        let children = children.to_vec()?;
         let expected_children = [self.target.instance_id(), self.target_3d.instance_id()];
         let children_match = expected_children.iter().all(|expected| {
             children
@@ -715,17 +825,18 @@ impl HostSmoke {
                 .any(|child| child.instance_id() == *expected)
         });
 
-        let mut metadata = Dictionary::new();
-        metadata.insert("message", "你好，Godot");
-        metadata.insert("position", Vector3::new(1.0, -2.0, 3.5));
+        let metadata = Dictionary::new();
+        metadata.insert("message", "你好，Godot")?;
+        metadata.insert("position", Vector3::new(1.0, -2.0, 3.5))?;
         metadata.insert(
             "values",
-            Array::from(vec![Variant::from(42_i64), Variant::from(true)]),
-        );
+            Array::from_vec(vec![Variant::from(42_i64), Variant::from(true)])?,
+        )?;
         let metadata = Variant::from(metadata);
         base.set_meta("_godot_rust_dynamic", &metadata)?;
         let restored = base.get_meta("_godot_rust_dynamic", &Variant::nil())?;
         let names = base.get_meta_list()?;
+        let names = names.to_vec()?;
         base.remove_meta("_godot_rust_dynamic")?;
 
         Ok(children_match

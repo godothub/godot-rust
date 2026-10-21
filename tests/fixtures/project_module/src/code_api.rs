@@ -52,22 +52,22 @@ impl Health {
     }
 
     #[func]
-    fn take_configs(&mut self) -> Array<GodotRef<Tuning>> {
+    fn take_configs(&mut self) -> EngineResult<Array<GodotRef<Tuning>>> {
         Array::from_vec(self.config.take().into_iter().collect())
     }
 
     #[func]
-    fn take_config_variant(&mut self) -> Variant {
-        Variant::from(self.take_configs())
+    fn take_config_variant(&mut self) -> EngineResult<Variant> {
+        Ok(Variant::from(self.take_configs()?))
     }
 
     #[func]
-    fn take_config_dictionary(&mut self) -> Dictionary {
-        let mut values = Dictionary::new();
+    fn take_config_dictionary(&mut self) -> EngineResult<Dictionary> {
+        let values = Dictionary::new();
         if let Some(config) = self.config.take() {
-            values.insert("config", config);
+            values.insert("config", config)?;
         }
-        values
+        Ok(values)
     }
 
     #[func]
@@ -85,7 +85,7 @@ impl Health {
         };
         if dynamic {
             self.config_dynamic
-                .emit(Variant::from(Array::from_vec(vec![config])))?;
+                .emit(Variant::from(Array::from_vec(vec![config])?))?;
         } else {
             self.config_sent.emit(config)?;
         }
@@ -127,8 +127,8 @@ impl Watcher {
 
     #[func]
     fn receive_dynamic_config(&mut self, config: Variant) -> EngineResult<()> {
-        if let Some(config) =
-            Array::<GodotRef<Tuning>>::from_variant(config).and_then(|mut values| values.pop())
+        if let Some(config) = Array::<GodotRef<Tuning>>::from_variant(config)
+            .and_then(|values| values.get(0).ok().flatten())
         {
             self.receive_config(config)?;
         }
@@ -200,13 +200,13 @@ impl CodeApi {
     fn retain_returned_resource(&mut self, mode: i64) -> EngineResult<i64> {
         let config = match mode {
             0 => self.health.take_config()?,
-            1 => self.health.take_configs()?.pop(),
+            1 => self.health.take_configs()?.pop()?,
             2 => Array::<GodotRef<Tuning>>::from_variant(self.health.take_config_variant()?)
-                .and_then(|mut values| values.pop()),
+                .and_then(|values| values.get(0).ok().flatten()),
             3 => self
                 .health
                 .take_config_dictionary()?
-                .remove(&Variant::from("config"))
+                .remove(&Variant::from("config"))?
                 .and_then(GodotRef::<Tuning>::from_variant),
             _ => None,
         };
@@ -293,7 +293,7 @@ impl CodeApi {
                     Ok((value,)) => Self::record_config(
                         received,
                         Array::<GodotRef<Tuning>>::from_variant(value)
-                            .and_then(|mut values| values.pop()),
+                            .and_then(|values| values.get(0).ok().flatten()),
                     ),
                     Err(error) => godot_error!("dynamic resource wait failed: {error}"),
                 }

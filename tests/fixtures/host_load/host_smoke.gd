@@ -92,6 +92,47 @@ func _init() -> void:
 		_fail("Rust script could not be attached to a Godot object")
 		return
 	get_root().add_child(owner)
+	if not _verify_raw_identifiers(owner, loaded):
+		owner.free()
+		_fail("Rust raw identifiers did not preserve their Godot names")
+		return
+	print("GODOT_RUST_RAW_IDENTIFIERS_OK")
+	owner.notification(9876)
+	if owner.get("last_notice") != 9876 or not str(owner).begins_with("RustSmoke("):
+		_fail("Rust Object notification or string callback was not dispatched")
+		return
+	owner.set("dynamic_amount", 42)
+	if owner.get("dynamic_amount") != 42 or not owner.property_can_revert("dynamic_amount") or owner.property_get_revert("dynamic_amount") != 7:
+		_fail("Rust dynamic property or revert callback was not dispatched")
+		return
+	var dynamic_found := false
+	var validation_found := false
+	for info in owner.get_property_list():
+		if info.name == "dynamic_amount":
+			dynamic_found = info.type == TYPE_INT and info.hint == PROPERTY_HINT_RANGE and info.hint_string == "0,100,1"
+		if info.name == "validation_probe":
+			validation_found = info.hint == PROPERTY_HINT_RANGE and info.hint_string == "0,100,1"
+	if not dynamic_found or not validation_found or owner.get("dynamic_validate_called"):
+		_fail("Rust dynamic property list or validation lost property metadata")
+		return
+	print("GODOT_RUST_OBJECT_HOOKS_OK")
+	var original_source: String = loaded.source_code
+	var callback_times: Array[int] = []
+	for padding in [0, 64 * 1024, 256 * 1024]:
+		loaded.source_code = "//" + " ".repeat(padding) + "\n" + original_source
+		for _warmup in 100:
+			owner.call("noop")
+		var started := Time.get_ticks_usec()
+		for _iteration in 10_000:
+			owner.call("noop")
+		callback_times.append(Time.get_ticks_usec() - started)
+	loaded.source_code = original_source
+	print("GODOT_RUST_CALLBACK_BENCH_USEC %s" % str(callback_times))
+	if callback_times[2] > callback_times[0] * 4 + 10_000:
+		_fail("Callback time scales with source size; source scanning returned to the hot path")
+		return
+	print("GODOT_RUST_ENGINE_BENCH_SECONDS %s" % str(owner.call("benchmark_engine_calls", 20_000)))
+
 	target.owner = owner
 	if not owner.has_method(&"_process"):
 		owner.free()
@@ -310,6 +351,22 @@ func _init() -> void:
 		_fail("Rust dynamic values or typed arrays were not converted correctly")
 		return
 	print("GODOT_RUST_DYNAMIC_VALUES")
+	var shared_numbers: Array[int] = [1, 2]
+	var shared_dictionary := {"original": true}
+	var readonly_container := [1]
+	readonly_container.make_read_only()
+	var typed_dictionary: Dictionary[String, int] = {"original": 1}
+	if (
+		not owner.call("verify_shared_containers", shared_numbers, shared_dictionary, readonly_container, typed_dictionary)
+		or shared_numbers != [10, 20]
+		or shared_dictionary.get("rust") != 43
+		or typed_dictionary.get("valid") != 5
+		or typed_dictionary.has("invalid")
+	):
+		owner.free()
+		_fail("Rust shared containers lost identity, constraints, snapshots, or bulk access")
+		return
+	print("GODOT_RUST_SHARED_CONTAINERS")
 	var echoed_standard: Callable = owner.call("echo_callable", standard_callable)
 	var echoed_bound: Callable = owner.call("echo_callable", bound_callable)
 	if echoed_standard.call("玩家", 7) != "玩家:7":
@@ -1604,6 +1661,41 @@ func _init() -> void:
 
 	print("godot-rust Host smoke test passed")
 	quit(0)
+
+
+func _verify_raw_identifiers(owner: Node2D, rust_script: Script) -> bool:
+	if owner.get("type") != 17 or owner.get("loop") != 3:
+		return false
+	var property_names: Array[String] = []
+	for info in rust_script.get_script_property_list():
+		property_names.append(String(info.name))
+		if String(info.name).begins_with("r#"):
+			return false
+	if "type" not in property_names or "loop" not in property_names:
+		return false
+	owner.set("type", 23)
+	owner.set("loop", 5)
+	if owner.get("type") != 23 or owner.get("loop") != 5:
+		return false
+	var signal_found := false
+	for info in rust_script.get_script_signal_list():
+		if info.name == &"yield":
+			signal_found = info.args.size() == 1 and info.args[0].name == &"type"
+	if not signal_found or owner.has_signal(&"r#yield"):
+		return false
+	var method_found := false
+	for info in rust_script.get_script_method_list():
+		if info.name == &"emit_raw_signal":
+			method_found = info.args.size() == 1 and info.args[0].name == &"type"
+	if not method_found:
+		return false
+	var received: Array[int] = []
+	var callback := func(value: int) -> void: received.append(value)
+	if owner.connect(&"yield", callback) != OK:
+		return false
+	owner.call("emit_raw_signal", 29)
+	owner.disconnect(&"yield", callback)
+	return received == [29]
 
 
 func _resource_is_alive(reference: WeakRef) -> bool:

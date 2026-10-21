@@ -267,6 +267,67 @@ class RepositoryMarkerTests(unittest.TestCase):
                 self.assertTrue(is_ignored(path))
 
 
+class StageExamplePluginTests(unittest.TestCase):
+    def test_all_artifacts_use_the_configured_cargo_target_directory(self):
+        platforms = (
+            ("linux", "linux-x86_64", "libgodot_host.so", "godot_build", "godot_module_check"),
+            ("win32", "windows-x86_64", "godot_host.dll", "godot_build.exe", "godot_module_check.exe"),
+            ("darwin", "macos-universal", "libgodot_host.dylib", "godot_build", "godot_module_check"),
+        )
+        for system, platform_dir, *filenames in platforms:
+            for release in (False, True):
+                for absolute in (False, True):
+                    with self.subTest(system=system, release=release, absolute=absolute):
+                        with tempfile.TemporaryDirectory() as directory:
+                            root = Path(directory)
+                            profile = "release" if release else "debug"
+                            target = root / "custom cargo output"
+                            configured = str(target) if absolute else target.name
+                            current = target / profile
+                            stale = root / "target" / profile
+                            current.mkdir(parents=True)
+                            stale.mkdir(parents=True)
+                            for filename in filenames:
+                                (current / filename).write_bytes(f"current {filename}".encode())
+                                (stale / filename).write_bytes(f"stale {filename}".encode())
+                            plugin_bin = root / "addon" / "bin"
+                            with (
+                                mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": configured}),
+                                mock.patch.object(stage_example_plugin, "ROOT", root),
+                                mock.patch("stage_host.ROOT", root),
+                                mock.patch.object(stage_example_plugin, "PLUGIN_BIN", plugin_bin),
+                                mock.patch.object(sys, "platform", system),
+                                mock.patch.object(platform, "machine", return_value="AMD64"),
+                                mock.patch.object(subprocess, "run") as build,
+                                mock.patch.object(
+                                    stage_example_plugin,
+                                    "stage_macos_host",
+                                    wraps=stage_example_plugin.stage_macos_host,
+                                ) as macos_stage,
+                            ):
+                                staged = stage_example_plugin.stage_example_plugin(release)
+
+                            self.assertEqual(
+                                staged,
+                                [plugin_bin / platform_dir / name for name in filenames],
+                            )
+                            for destination, filename in zip(staged, filenames):
+                                self.assertEqual(
+                                    destination.read_bytes(),
+                                    f"current {filename}".encode(),
+                                )
+                            self.assertEqual(build.call_count, 2)
+                            for call in build.call_args_list:
+                                self.assertEqual(call.kwargs, {"cwd": root, "check": True})
+                                self.assertEqual("--release" in call.args[0], release)
+                            if system == "darwin":
+                                macos_stage.assert_called_once_with(
+                                    current / filenames[0], plugin_bin
+                                )
+                            else:
+                                macos_stage.assert_not_called()
+
+
 class StageHostTests(unittest.TestCase):
     def test_platform_library_names(self):
         self.assertEqual(

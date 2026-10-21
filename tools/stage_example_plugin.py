@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from plugin_platform import platform_directory
+from stage_host import cargo_target_directory
 from stage_macos_host import stage_macos_host
 
 
@@ -37,6 +38,7 @@ def stage_example_plugin(release: bool) -> list[Path]:
     """Build and copy Host, build daemon, and validator into the addon."""
     profile = "release" if release else "debug"
     profile_argument = ["--release"] if release else []
+    build_directory = cargo_target_directory() / profile
     subprocess.run(
         [
             "cargo",
@@ -74,11 +76,11 @@ def stage_example_plugin(release: bool) -> list[Path]:
     ]
     plugin_bin = PLUGIN_BIN / platform_directory(sys.platform, platform.machine())
     plugin_bin.mkdir(parents=True, exist_ok=True)
-    host_source = ROOT / "target" / profile / host_filename
+    host_source = build_directory / host_filename
     if not host_source.is_file():
         raise FileNotFoundError(
             f"Cargo did not produce expected plugin file: {host_source}"
-    )
+        )
     if sys.platform == "darwin":
         staged = [stage_macos_host(host_source, PLUGIN_BIN)]
     else:
@@ -86,7 +88,7 @@ def stage_example_plugin(release: bool) -> list[Path]:
         shutil.copy2(host_source, host_destination)
         staged = [host_destination]
     for filename in filenames:
-        source = ROOT / "target" / profile / filename
+        source = build_directory / filename
         if not source.is_file():
             raise FileNotFoundError(f"Cargo did not produce expected plugin file: {source}")
         destination = plugin_bin / filename

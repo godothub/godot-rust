@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.3"
+version = "0.9.4"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -21,9 +21,9 @@ homepage = "https://godothub.com"
 
 [workspace.dependencies]
 bindgen = { version = "0.72.1", default-features = false, features = ["runtime"] }
-godot_rs = { version = "0.9.3", path = "crates/godot_rs" }
-godot_macro = { version = "0.9.3", path = "crates/godot_macro" }
-godot_api = { version = "0.9.3", path = "crates/godot_api", default-features = false }
+godot_rs = { version = "0.9.4", path = "crates/godot_rs" }
+godot_macro = { version = "0.9.4", path = "crates/godot_macro" }
+godot_api = { version = "0.9.4", path = "crates/godot_api", default-features = false }
 inventory = "0.3.24"
 libloading = "0.8.9"
 object = { version = "0.37.3", default-features = false, features = ["read", "std", "wasm"] }

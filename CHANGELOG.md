@@ -1,3 +1,23 @@
+## 0.9.4
+
+- Reflect Rust raw identifiers without the `r#` prefix in properties, signals,
+  and argument hints.
+- Reduce completion overhead in large scripts and amortize task registration
+  cleanup when many asynchronous tasks share a scope.
+- Stage example plugin binaries from the configured Cargo target directory,
+  avoiding stale artifacts from the default directory.
+- Share `Array` and `Dictionary` data with Godot, with explicit Rust snapshots
+  when needed.
+- Support script notifications, custom string representations, dynamic Inspector
+  properties, and property revert values.
+- Preserve shared container references during hot reload and add a `_reloaded`
+  callback. Failed updates keep existing asynchronous tasks running.
+- Speed up script callbacks, engine calls, and large container operations.
+- Reduce the overhead of waiting asynchronous tasks and reuse background threads
+  for expensive computation.
+- Reduce repeated source scans during rapid editing and fix source monitoring
+  errors when the plugin shuts down.
+
 ## 0.9.3
 
 - Fix logs missing from Godot's Output panel.

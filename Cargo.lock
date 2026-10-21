@@ -129,7 +129,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "godot_api"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "godot_build"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "godot_api",
  "object",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "godot_codegen"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "bindgen",
  "godot_api",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "godot_host"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "godot_api",
  "libloading",
@@ -178,14 +178,14 @@ dependencies = [
 
 [[package]]
 name = "godot_host_smoke_module"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "godot_rs",
 ]
 
 [[package]]
 name = "godot_macro"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -194,14 +194,14 @@ dependencies = [
 
 [[package]]
 name = "godot_native_smoke"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "godot_rs",
 ]
 
 [[package]]
 name = "godot_rs"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "godot_api",
  "godot_macro",

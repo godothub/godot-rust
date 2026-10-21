@@ -300,7 +300,7 @@ godot = "4.4"
 
 ```rust
 use godot_rs::engine::native_virtual;
-use godot_rs::native::*;
+use godot_rs::native::{Base, ClassRegistrar, NativeClass, NativeResult, NativeVirtualRegistrar};
 use godot_rs::prelude::*;
 
 struct Mover {
@@ -310,7 +310,7 @@ struct Mover {
 
 impl Mover {
     fn process(&mut self, delta: f64) {
-        let _ = self.base.translate(Vector2::new(self.speed * delta, 0.0));
+        let _ = self.base.translate(Vector2::new((self.speed * delta) as f32, 0.0));
     }
 
     fn speed(&self) -> f64 { self.speed }

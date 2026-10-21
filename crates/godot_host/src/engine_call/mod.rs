@@ -16,7 +16,7 @@ use godot_api::abi::{
     AbiStatus, AbiValueType, AbiValueV1, callable_value_ownership_token,
     dynamic_value_ownership_token,
 };
-use godot_api::{GDExtensionConstTypePtr, GDExtensionMethodBindPtr, GDExtensionObjectPtr};
+use godot_api::{GDExtensionMethodBindPtr, GDExtensionObjectPtr};
 
 use self::contract::{ContractError, MethodContract, ValueContract};
 use self::value::{NativeGodotRef, NativeValue, NativeValueInput, NativeValueOutput, ValueError};
@@ -39,6 +39,8 @@ static METHOD_CACHE: OnceLock<Mutex<HashMap<u64, Arc<ResolvedMethod>>>> = OnceLo
 static OWNED_RETURN_VALUES: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
 
 pub(crate) struct EngineCallContext {
+    methods: Mutex<HashMap<usize, Arc<ResolvedMethod>>>,
+    apis: Mutex<HashMap<usize, Arc<api_call::ResolvedApi>>>,
     refs: Mutex<OwnedGodotRefs>,
     dynamics: Mutex<OwnedDynamicValues>,
     callables: Mutex<OwnedCallableValues>,
@@ -62,6 +64,8 @@ struct OwnedCallableValues {
 impl EngineCallContext {
     pub(crate) fn new() -> Self {
         Self {
+            methods: Mutex::new(HashMap::new()),
+            apis: Mutex::new(HashMap::new()),
             refs: Mutex::new(OwnedGodotRefs {
                 next_token: 1,
                 values: HashMap::new(),
@@ -853,12 +857,46 @@ unsafe fn call_godot_method(
     // SAFETY: The Host supplies this retained context for the complete project
     // module generation.
     let engine_context = unsafe { &*context.cast::<EngineCallContext>() };
-    // SAFETY: The project module retains the generated metadata for this
-    // synchronous callback. The contract is deep-copied before caching.
-    let contract = unsafe { MethodContract::copy_from_abi(method) }?;
-    let argument_count =
-        validate_argument_count(argument_count, contract.arguments.len(), contract.is_vararg)?;
-    let resolved = resolve_method(interface, contract)?;
+    if method.is_null() {
+        return Err(EngineCallError::new(
+            AbiStatus::InvalidArgument,
+            "Godot method contract is null",
+        ));
+    }
+    // Generated descriptors are immutable for the whole generation. Cache
+    // their deep-copied contracts in that generation's context, never by a
+    // module address in the global cache where reload could reuse an address.
+    let cached = engine_context
+        .methods
+        .lock()
+        .map_err(|_| EngineCallError::internal("method context cache is poisoned"))?
+        .get(&(method as usize))
+        .cloned();
+    let resolved = match cached {
+        Some(resolved) => resolved,
+        None => {
+            // SAFETY: The module retains immutable generated ABI metadata.
+            let contract = unsafe { MethodContract::copy_from_abi(method) }?;
+            let resolved = resolve_method(interface, contract)?;
+            let mut cache = engine_context
+                .methods
+                .lock()
+                .map_err(|_| EngineCallError::internal("method context cache is poisoned"))?;
+            if cache.len() >= MAX_CACHED_METHODS {
+                return Err(EngineCallError::new(
+                    AbiStatus::Unsupported,
+                    "method context cache limit reached",
+                ));
+            }
+            cache.insert(method as usize, resolved.clone());
+            resolved
+        }
+    };
+    let argument_count = validate_argument_count(
+        argument_count,
+        resolved.contract.arguments.len(),
+        resolved.contract.is_vararg,
+    )?;
     let _profile_scope = crate::profiler::ProfileScope::enter_native(
         &resolved.contract.class_name,
         &resolved.contract.method_name,
@@ -929,10 +967,15 @@ unsafe fn call_godot_method(
             builtin_object_tag.unwrap_or_default(),
         )?);
     }
-    let argument_pointers = native_arguments
-        .iter()
-        .map(NativeValue::as_const_ptr)
-        .collect::<Vec<GDExtensionConstTypePtr>>();
+    let mut argument_pointers =
+        godot_api::call_buffer::CallPointers::new(native_arguments.len(), ptr::null::<c_void>());
+    for (pointer, value) in argument_pointers
+        .as_mut_slice()
+        .iter_mut()
+        .zip(native_arguments.iter())
+    {
+        *pointer = value.as_const_ptr();
+    }
     let mut native_output = NativeValue::empty_output(interface, &resolved.contract.return_value)?;
     let Some(ptrcall) = interface.object_method_bind_ptrcall else {
         return Err(EngineCallError::internal(

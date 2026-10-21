@@ -256,6 +256,7 @@ unsafe extern "C" fn deinitialize_level<L: ExtensionLibrary>(
     context.engine.unregister_level(level);
     if level == L::MINIMUM_LEVEL {
         callable_value::clear_thread_local_state();
+        engine_call::clear_thread_local_state();
     }
     if level == InitializationLevel::Core {
         // SAFETY: Godot deinitializes every library through Core, regardless

@@ -24,6 +24,46 @@ use crate::variant::VariantKind;
 
 const MAX_NATIVE_ENGINE_TEXT_BYTES: usize = 64 * 1024 * 1024;
 
+thread_local! {
+    static API_FUNCTIONS: core::cell::RefCell<std::collections::HashMap<usize, Box<dyn std::any::Any>>> = core::cell::RefCell::new(std::collections::HashMap::new());
+    static METHOD_BINDS: core::cell::RefCell<std::collections::HashMap<usize, usize>> = core::cell::RefCell::new(std::collections::HashMap::new());
+    static CLASS_TAGS: core::cell::RefCell<std::collections::HashMap<String, usize>> = core::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub(super) fn clear_thread_local_state() {
+    API_FUNCTIONS.with(|cache| drop(core::mem::take(&mut *cache.borrow_mut())));
+    METHOD_BINDS.with(|cache| drop(core::mem::take(&mut *cache.borrow_mut())));
+    CLASS_TAGS.with(|cache| drop(core::mem::take(&mut *cache.borrow_mut())));
+}
+
+// The type-erased cache stores Rust-owned function pointers only. Each key is
+// an immutable generated descriptor in this library, so its target signature
+// cannot change and no engine StringName or retired-module pointer is retained.
+fn cached_api_function<F: Copy + 'static>(
+    spec: &'static AbiGodotApiSpecV1,
+    resolve: impl FnOnce() -> EngineResult<F>,
+) -> EngineResult<F> {
+    let key = spec as *const _ as usize;
+    if let Some(value) = API_FUNCTIONS.with(|cache| {
+        cache
+            .borrow()
+            .get(&key)
+            .map(|value| value.downcast_ref::<F>().copied())
+    }) {
+        return value
+            .ok_or_else(|| EngineError::invalid_result("Native API cache target type changed"));
+    }
+    let function = resolve()?;
+    API_FUNCTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 65_536 {
+            return Err(EngineError::unavailable("Native API cache limit reached"));
+        }
+        cache.insert(key, Box::new(function));
+        Ok(function)
+    })
+}
+
 /// Owned result storage used by hidden generated Native call glue.
 #[doc(hidden)]
 pub struct NativeEngineValue {
@@ -1207,24 +1247,20 @@ fn invoke_godot_api_inner(
         reserved_flags: 0,
         reserved: [0; 2],
     };
-    let native_arguments = arguments
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let contract = contracts.get(index).unwrap_or(&variant_contract);
-            NativeCallValue::from_argument(interface, contract, *value).map_err(|error| {
-                EngineError::invalid_argument(format!(
-                    "Native generated API `{owner_name}.{member_name}` rejected argument \
-                     {index} ({} fixed argument(s)): {error}",
-                    contracts.len(),
-                ))
-            })
-        })
-        .collect::<EngineResult<Vec<_>>>()?;
-    let argument_pointers = native_arguments
-        .iter()
-        .map(NativeCallValue::as_const_ptr)
-        .collect::<Vec<_>>();
+    let mut native_arguments = godot_api::call_buffer::CallBuffer::new(arguments.len());
+    for (index, value) in arguments.iter().enumerate() {
+        let contract = contracts.get(index).unwrap_or(&variant_contract);
+        native_arguments.push(NativeCallValue::from_argument(interface, contract, *value).map_err(|error| EngineError::invalid_argument(format!("Native generated API `{owner_name}.{member_name}` rejected argument {index}: {error}")))?);
+    }
+    let mut argument_pointers =
+        godot_api::call_buffer::CallPointers::new(arguments.len(), ptr::null::<c_void>());
+    for (pointer, value) in argument_pointers
+        .as_mut_slice()
+        .iter_mut()
+        .zip(native_arguments.iter())
+    {
+        *pointer = value.as_const_ptr();
+    }
     let argument_pointer = if argument_pointers.is_empty() {
         ptr::null()
     } else {
@@ -1249,49 +1285,54 @@ fn invoke_godot_api_inner(
     };
     match spec.kind {
         AbiGodotApiKind::UTILITY_FUNCTION => {
-            let member = api_member_name(interface, spec)?;
-            let hash = api_numeric_i64(spec.numeric, "utility hash")?;
-            let function =
+            let function = cached_api_function(spec, || {
+                let member = api_member_name(interface, spec)?;
+                let hash = api_numeric_i64(spec.numeric, "utility hash")?;
+
                 // SAFETY: Name and hash are authenticated generated metadata.
                 unsafe { (interface.variant_get_ptr_utility_function)(member.as_ptr(), hash) }
                     .ok_or_else(|| {
                         EngineError::unavailable(
                             "generated Native utility function is unavailable in this engine",
                         )
-                    })?;
+                    })
+            })?;
             let count = i32::try_from(argument_pointers.len())
                 .map_err(|_| EngineError::invalid_argument("Native argument count exceeds i32"))?;
             // SAFETY: Every storage pointer follows the generated contract.
             unsafe { function(output.as_mut_ptr(), argument_pointer, count) };
         }
         AbiGodotApiKind::BUILTIN_CONSTRUCTOR => {
-            let index = i32::try_from(spec.numeric).map_err(|_| {
-                EngineError::invalid_argument("Native builtin constructor index exceeds i32")
-            })?;
-            let type_ = ptrcall_variant_type(spec.return_value.ptrcall_type);
-            // SAFETY: Type and constructor index are authenticated metadata.
-            let function = unsafe { (interface.variant_get_ptr_constructor)(type_, index) }
-                .ok_or_else(|| {
+            let function = cached_api_function(spec, || {
+                let index = i32::try_from(spec.numeric).map_err(|_| {
+                    EngineError::invalid_argument("Native builtin constructor index exceeds i32")
+                })?;
+                let type_ = ptrcall_variant_type(spec.return_value.ptrcall_type);
+                // SAFETY: Type and constructor index are authenticated metadata.
+                unsafe { (interface.variant_get_ptr_constructor)(type_, index) }.ok_or_else(|| {
                     EngineError::unavailable(
                         "generated Native builtin constructor is unavailable in this engine",
                     )
-                })?;
+                })
+            })?;
             // SAFETY: Output is uninitialized for owned pointer values and POD
             // constructors overwrite their complete fixed storage.
             unsafe { function(output.as_mut_ptr(), argument_pointer) };
         }
         AbiGodotApiKind::BUILTIN_METHOD => {
-            let member = api_member_name(interface, spec)?;
-            let hash = api_numeric_i64(spec.numeric, "builtin method hash")?;
-            let type_ = owner_type()?;
-            let function =
+            let function = cached_api_function(spec, || {
+                let member = api_member_name(interface, spec)?;
+                let hash = api_numeric_i64(spec.numeric, "builtin method hash")?;
+                let type_ = owner_type()?;
+
                 // SAFETY: Type, name, and hash are authenticated metadata.
                 unsafe { (interface.variant_get_ptr_builtin_method)(type_, member.as_ptr(), hash) }
                     .ok_or_else(|| {
                         EngineError::unavailable(
                             "generated Native builtin method is unavailable in this engine",
                         )
-                    })?;
+                    })
+            })?;
             let count = i32::try_from(argument_pointers.len())
                 .map_err(|_| EngineError::invalid_argument("Native argument count exceeds i32"))?;
             // SAFETY: Base, arguments, and result use the exact generated storage.
@@ -1307,29 +1348,31 @@ fn invoke_godot_api_inner(
             }
         }
         AbiGodotApiKind::BUILTIN_OPERATOR => {
-            let operator = u32::try_from(spec.numeric)
-                .ok()
-                .filter(|value| *value < 25)
+            let function = cached_api_function(spec, || {
+                let operator = u32::try_from(spec.numeric)
+                    .ok()
+                    .filter(|value| *value < 25)
+                    .ok_or_else(|| {
+                        EngineError::invalid_argument("Native operator ordinal is invalid")
+                    })?;
+                let left_type = owner_type()?;
+                let right_type = contracts.first().map_or(
+                    super::sys::GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_NIL,
+                    |contract| ptrcall_variant_type(contract.ptrcall_type),
+                );
+                // SAFETY: Operator and operand types are authenticated metadata.
+                unsafe {
+                    (interface.variant_get_ptr_operator_evaluator)(
+                        super::sys::GDExtensionVariantOperator(operator),
+                        left_type,
+                        right_type,
+                    )
+                }
                 .ok_or_else(|| {
-                    EngineError::invalid_argument("Native operator ordinal is invalid")
-                })?;
-            let left_type = owner_type()?;
-            let right_type = contracts.first().map_or(
-                super::sys::GDExtensionVariantType::GDEXTENSION_VARIANT_TYPE_NIL,
-                |contract| ptrcall_variant_type(contract.ptrcall_type),
-            );
-            // SAFETY: Operator and operand types are authenticated metadata.
-            let function = unsafe {
-                (interface.variant_get_ptr_operator_evaluator)(
-                    super::sys::GDExtensionVariantOperator(operator),
-                    left_type,
-                    right_type,
-                )
-            }
-            .ok_or_else(|| {
-                EngineError::unavailable(
-                    "generated Native builtin operator is unavailable in this engine",
-                )
+                    EngineError::unavailable(
+                        "generated Native builtin operator is unavailable in this engine",
+                    )
+                })
             })?;
             let left = native_base
                 .as_ref()
@@ -1341,15 +1384,18 @@ fn invoke_godot_api_inner(
             unsafe { function(left.as_const_ptr(), right, output.as_mut_ptr()) };
         }
         AbiGodotApiKind::BUILTIN_MEMBER_GETTER => {
-            let member = api_member_name(interface, spec)?;
-            let type_ = owner_type()?;
-            // SAFETY: Type and member are authenticated generated metadata.
-            let function = unsafe { (interface.variant_get_ptr_getter)(type_, member.as_ptr()) }
-                .ok_or_else(|| {
-                    EngineError::unavailable(
-                        "generated Native builtin getter is unavailable in this engine",
-                    )
-                })?;
+            let function = cached_api_function(spec, || {
+                let member = api_member_name(interface, spec)?;
+                let type_ = owner_type()?;
+                // SAFETY: Type and member are authenticated generated metadata.
+                unsafe { (interface.variant_get_ptr_getter)(type_, member.as_ptr()) }.ok_or_else(
+                    || {
+                        EngineError::unavailable(
+                            "generated Native builtin getter is unavailable in this engine",
+                        )
+                    },
+                )
+            })?;
             let base = native_base
                 .as_ref()
                 .ok_or_else(|| EngineError::invalid_argument("Native getter has no receiver"))?;
@@ -1357,15 +1403,18 @@ fn invoke_godot_api_inner(
             unsafe { function(base.as_const_ptr(), output.as_mut_ptr()) };
         }
         AbiGodotApiKind::BUILTIN_MEMBER_SETTER => {
-            let member = api_member_name(interface, spec)?;
-            let type_ = owner_type()?;
-            // SAFETY: Type and member are authenticated generated metadata.
-            let function = unsafe { (interface.variant_get_ptr_setter)(type_, member.as_ptr()) }
-                .ok_or_else(|| {
-                    EngineError::unavailable(
-                        "generated Native builtin setter is unavailable in this engine",
-                    )
-                })?;
+            let function = cached_api_function(spec, || {
+                let member = api_member_name(interface, spec)?;
+                let type_ = owner_type()?;
+                // SAFETY: Type and member are authenticated generated metadata.
+                unsafe { (interface.variant_get_ptr_setter)(type_, member.as_ptr()) }.ok_or_else(
+                    || {
+                        EngineError::unavailable(
+                            "generated Native builtin setter is unavailable in this engine",
+                        )
+                    },
+                )
+            })?;
             let base = native_base
                 .as_mut()
                 .ok_or_else(|| EngineError::invalid_argument("Native setter has no receiver"))?;
@@ -1376,13 +1425,16 @@ fn invoke_godot_api_inner(
             unsafe { function(base.as_mut_ptr(), value.as_const_ptr()) };
         }
         AbiGodotApiKind::BUILTIN_INDEXED_GETTER => {
-            // SAFETY: Type is authenticated generated metadata.
-            let function = unsafe { (interface.variant_get_ptr_indexed_getter)(owner_type()?) }
-                .ok_or_else(|| {
-                    EngineError::unavailable(
-                        "generated Native indexed getter is unavailable in this engine",
-                    )
-                })?;
+            let function = cached_api_function(spec, || {
+                // SAFETY: Type is authenticated generated metadata.
+                unsafe { (interface.variant_get_ptr_indexed_getter)(owner_type()?) }.ok_or_else(
+                    || {
+                        EngineError::unavailable(
+                            "generated Native indexed getter is unavailable in this engine",
+                        )
+                    },
+                )
+            })?;
             let base = native_base.as_ref().ok_or_else(|| {
                 EngineError::invalid_argument("Native indexed getter has no receiver")
             })?;
@@ -1396,13 +1448,16 @@ fn invoke_godot_api_inner(
             unsafe { function(base.as_const_ptr(), index, output.as_mut_ptr()) };
         }
         AbiGodotApiKind::BUILTIN_INDEXED_SETTER => {
-            // SAFETY: Type is authenticated generated metadata.
-            let function = unsafe { (interface.variant_get_ptr_indexed_setter)(owner_type()?) }
-                .ok_or_else(|| {
-                    EngineError::unavailable(
-                        "generated Native indexed setter is unavailable in this engine",
-                    )
-                })?;
+            let function = cached_api_function(spec, || {
+                // SAFETY: Type is authenticated generated metadata.
+                unsafe { (interface.variant_get_ptr_indexed_setter)(owner_type()?) }.ok_or_else(
+                    || {
+                        EngineError::unavailable(
+                            "generated Native indexed setter is unavailable in this engine",
+                        )
+                    },
+                )
+            })?;
             let base = native_base.as_mut().ok_or_else(|| {
                 EngineError::invalid_argument("Native indexed setter has no receiver")
             })?;
@@ -1419,13 +1474,16 @@ fn invoke_godot_api_inner(
             unsafe { function(base.as_mut_ptr(), index, value.as_const_ptr()) };
         }
         AbiGodotApiKind::BUILTIN_KEYED_GETTER => {
-            // SAFETY: Receiver type is authenticated generated metadata.
-            let function = unsafe { (interface.variant_get_ptr_keyed_getter)(owner_type()?) }
-                .ok_or_else(|| {
-                    EngineError::unavailable(
-                        "generated Native keyed getter is unavailable in this engine",
-                    )
-                })?;
+            let function = cached_api_function(spec, || {
+                // SAFETY: Receiver type is authenticated generated metadata.
+                unsafe { (interface.variant_get_ptr_keyed_getter)(owner_type()?) }.ok_or_else(
+                    || {
+                        EngineError::unavailable(
+                            "generated Native keyed getter is unavailable in this engine",
+                        )
+                    },
+                )
+            })?;
             let base = native_base.as_ref().ok_or_else(|| {
                 EngineError::invalid_argument("Native keyed getter has no receiver")
             })?;
@@ -1439,13 +1497,16 @@ fn invoke_godot_api_inner(
             }
         }
         AbiGodotApiKind::BUILTIN_KEYED_SETTER => {
-            // SAFETY: Receiver type is authenticated generated metadata.
-            let function = unsafe { (interface.variant_get_ptr_keyed_setter)(owner_type()?) }
-                .ok_or_else(|| {
-                    EngineError::unavailable(
-                        "generated Native keyed setter is unavailable in this engine",
-                    )
-                })?;
+            let function = cached_api_function(spec, || {
+                // SAFETY: Receiver type is authenticated generated metadata.
+                unsafe { (interface.variant_get_ptr_keyed_setter)(owner_type()?) }.ok_or_else(
+                    || {
+                        EngineError::unavailable(
+                            "generated Native keyed setter is unavailable in this engine",
+                        )
+                    },
+                )
+            })?;
             let base = native_base.as_mut().ok_or_else(|| {
                 EngineError::invalid_argument("Native keyed setter has no receiver")
             })?;
@@ -1592,40 +1653,44 @@ fn invoke_engine_method_inner(
         receiver
     };
     let method_name = abi_text(method.method_name, "method name")?;
-    let class_name_value = GodotStringName::new(&interface, class_name)
-        .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
-    let method_name_value = GodotStringName::new(&interface, method_name)
-        .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
-    let method_hash = i64::try_from(method.method_hash)
-        .map_err(|_| EngineError::invalid_argument("Godot MethodBind hash exceeds i64"))?;
-    // SAFETY: Names are live and the hash is authenticated generated metadata.
-    let method_bind = unsafe {
-        (interface.classdb_get_method_bind)(
-            class_name_value.as_ptr(),
-            method_name_value.as_ptr(),
-            method_hash,
-        )
+    let cached_bind =
+        METHOD_BINDS.with(|cache| cache.borrow().get(&(method as *const _ as usize)).copied());
+    let method_bind = match cached_bind {
+        Some(method_bind) => method_bind as super::sys::GDExtensionMethodBindPtr,
+        None => {
+            let class_name_value = GodotStringName::new(&interface, class_name)
+                .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
+            let method_name_value = GodotStringName::new(&interface, method_name)
+                .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
+            let method_hash = i64::try_from(method.method_hash)
+                .map_err(|_| EngineError::invalid_argument("Godot MethodBind hash exceeds i64"))?;
+            // SAFETY: Names are live and the hash is authenticated generated metadata.
+            let method_bind = unsafe {
+                (interface.classdb_get_method_bind)(
+                    class_name_value.as_ptr(),
+                    method_name_value.as_ptr(),
+                    method_hash,
+                )
+            };
+            if method_bind.is_null() {
+                return Err(EngineError::unavailable(
+                    "Godot did not return the generated Native MethodBind",
+                ));
+            }
+            METHOD_BINDS.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .insert(method as *const _ as usize, method_bind as usize)
+            });
+            method_bind
+        }
     };
-    if method_bind.is_null() {
-        return Err(EngineError::unavailable(
-            "Godot did not return the generated Native MethodBind",
-        ));
+    let mut native_arguments = godot_api::call_buffer::CallBuffer::new(arguments.len());
+    for (index, value) in arguments.iter().enumerate() {
+        let fallback = vararg_contract(value.type_)?;
+        let contract = contracts.get(index).unwrap_or(&fallback);
+        native_arguments.push(NativeCallValue::from_argument(interface, contract, *value).map_err(|error| EngineError::invalid_argument(format!("Native engine call `{class_name}.{method_name}` rejected argument {index}: {error}")))?);
     }
-    let native_arguments = arguments
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let fallback = vararg_contract(value.type_)?;
-            let contract = contracts.get(index).unwrap_or(&fallback);
-            NativeCallValue::from_argument(interface, contract, *value).map_err(|error| {
-                EngineError::invalid_argument(format!(
-                    "Native engine call `{class_name}.{method_name}` rejected argument \
-                         {index} ({} fixed argument(s)): {error}",
-                    contracts.len(),
-                ))
-            })
-        })
-        .collect::<EngineResult<Vec<_>>>()?;
     if is_vararg {
         let variants = native_arguments
             .iter()
@@ -1679,10 +1744,15 @@ fn invoke_engine_method_inner(
         return NativeCallValue::from_rust_variant(interface, &method.return_value, &rust)?
             .into_abi(interface, &method.return_value);
     }
-    let argument_pointers = native_arguments
-        .iter()
-        .map(NativeCallValue::as_const_ptr)
-        .collect::<Vec<_>>();
+    let mut argument_pointers =
+        godot_api::call_buffer::CallPointers::new(arguments.len(), ptr::null::<c_void>());
+    for (pointer, value) in argument_pointers
+        .as_mut_slice()
+        .iter_mut()
+        .zip(native_arguments.iter())
+    {
+        *pointer = value.as_const_ptr();
+    }
     let mut output = NativeCallValue::output(interface, &method.return_value)?;
     // SAFETY: MethodBind, receiver, argument storage, and output storage all
     // match the authenticated generated ptrcall contract.
@@ -1720,16 +1790,27 @@ pub(super) fn validate_object_class(
     class_name: &str,
     role: &str,
 ) -> EngineResult<()> {
-    let class_name_value = GodotStringName::new(&interface, class_name)
-        .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
-    // SAFETY: The StringName remains initialized for the lookup and Godot owns
-    // the ClassDB tag for the engine lifetime.
-    let class_tag = unsafe { (interface.classdb_get_class_tag)(class_name_value.as_ptr()) };
-    if class_tag.is_null() {
-        return Err(EngineError::invalid_argument(format!(
-            "Godot has no ClassDB tag for Native {role} class `{class_name}`"
-        )));
-    }
+    let cached_tag = CLASS_TAGS.with(|cache| cache.borrow().get(class_name).copied());
+    let class_tag = match cached_tag {
+        Some(tag) => tag as *mut c_void,
+        None => {
+            let class_name_value = GodotStringName::new(&interface, class_name)
+                .map_err(|error| EngineError::invalid_argument(error.to_string()))?;
+            // SAFETY: The name is live and Godot owns this class tag for its lifetime.
+            let tag = unsafe { (interface.classdb_get_class_tag)(class_name_value.as_ptr()) };
+            if tag.is_null() {
+                return Err(EngineError::invalid_argument(format!(
+                    "Godot has no ClassDB tag for Native {role} class `{class_name}`"
+                )));
+            }
+            CLASS_TAGS.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .insert(class_name.to_owned(), tag as usize)
+            });
+            tag
+        }
+    };
     // SAFETY: Both values are engine-owned live pointers and the cast only
     // performs Godot's ClassDB inheritance check.
     if unsafe { (interface.object_cast_to)(object, class_tag) }.is_null() {

@@ -38,7 +38,7 @@ const OBJECT_NOTIFICATION_HASH: i64 = 4_023_243_586;
 static API_CACHE: OnceLock<Mutex<HashMap<u64, Arc<ResolvedApi>>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
-struct ResolvedApi {
+pub(super) struct ResolvedApi {
     contract: ApiContract,
     target: ResolvedTarget,
     base_tag: usize,
@@ -136,10 +136,43 @@ unsafe fn call_godot_api(
     // SAFETY: The Host owns this context for the module generation.
     let engine_context = unsafe { &*context.cast::<EngineCallContext>() };
     // SAFETY: Generated static metadata remains readable for this call.
-    let contract = unsafe { ApiContract::copy_from_abi(spec) }?;
-    let count =
-        validate_argument_count(argument_count, contract.arguments.len(), contract.is_vararg)?;
-    let resolved = resolve_api(interface, contract)?;
+    if spec.is_null() {
+        return Err(EngineCallError::new(
+            AbiStatus::InvalidArgument,
+            "Godot API contract is null",
+        ));
+    }
+    let cached = engine_context
+        .apis
+        .lock()
+        .map_err(|_| EngineCallError::internal("API context cache is poisoned"))?
+        .get(&(spec as usize))
+        .cloned();
+    let resolved = match cached {
+        Some(resolved) => resolved,
+        None => {
+            // SAFETY: The module retains immutable generated ABI metadata.
+            let contract = unsafe { ApiContract::copy_from_abi(spec) }?;
+            let resolved = resolve_api(interface, contract)?;
+            let mut cache = engine_context
+                .apis
+                .lock()
+                .map_err(|_| EngineCallError::internal("API context cache is poisoned"))?;
+            if cache.len() >= MAX_CACHED_API_ENTRIES {
+                return Err(EngineCallError::new(
+                    AbiStatus::Unsupported,
+                    "API context cache limit reached",
+                ));
+            }
+            cache.insert(spec as usize, resolved.clone());
+            resolved
+        }
+    };
+    let count = validate_argument_count(
+        argument_count,
+        resolved.contract.arguments.len(),
+        resolved.contract.is_vararg,
+    )?;
     let profile_owner = resolved.contract.owner_name.as_deref().unwrap_or("Godot");
     let profile_member = resolved
         .contract
@@ -186,7 +219,7 @@ unsafe fn call_godot_api(
         class_name: None,
         typed_array_element: None,
     };
-    let mut native_arguments = Vec::with_capacity(arguments.len());
+    let mut native_arguments = godot_api::call_buffer::CallBuffer::new(arguments.len());
     for (index, value) in arguments.iter().copied().enumerate() {
         let (contract, tag) = if index < resolved.contract.arguments.len() {
             (
@@ -205,10 +238,15 @@ unsafe fn call_godot_api(
             resolved.object_tag,
         )?);
     }
-    let argument_pointers = native_arguments
-        .iter()
-        .map(NativeValue::as_const_ptr)
-        .collect::<Vec<GDExtensionConstTypePtr>>();
+    let mut argument_pointers =
+        godot_api::call_buffer::CallPointers::new(native_arguments.len(), ptr::null::<c_void>());
+    for (pointer, value) in argument_pointers
+        .as_mut_slice()
+        .iter_mut()
+        .zip(native_arguments.iter())
+    {
+        *pointer = value.as_const_ptr();
+    }
     let mut native_output = NativeValue::empty_output(interface, &resolved.contract.return_value)?;
 
     match resolved.target {

@@ -112,6 +112,12 @@ const DiagnosticsPanel = preload("res://addons/godot-rust/diagnostics_panel.gd")
 const RustPlugin = preload("res://addons/godot-rust/plugin.gd")
 const RustSyntaxHighlighter = preload("res://addons/godot-rust/syntax_highlighter.gd")
 
+class CountingMonitor:
+    extends SourceMonitor
+    var scans := 0
+    func _refresh_signature(_schedule_check: bool) -> void:
+        scans += 1
+
 class PendingRequest:
     extends RefCounted
 
@@ -146,6 +152,19 @@ func _run() -> void:
         if monitor._is_tracked_path(path):
             _fail("Generated script index would retrigger automatic checks")
             return
+    var counting_monitor = CountingMonitor.new()
+    add_child(counting_monitor)
+    for _event in 100:
+        counting_monitor._on_filesystem_changed()
+    if counting_monitor.scans != 0:
+        _fail("Source monitor fingerprints inputs before debounce")
+        return
+    await get_tree().create_timer(0.6).timeout
+    if counting_monitor.scans != 1:
+        _fail("Source monitor did not coalesce filesystem events")
+        return
+    counting_monitor.queue_free()
+    print("GODOT_RUST_MONITOR_DEBOUNCE_OK")
     monitor.queue_free()
 
     var panel = DiagnosticsPanel.new()

@@ -21,6 +21,7 @@ var _signature := ""
 var _revision := 0
 var _last_requested_revision := 0
 var _last_error := ""
+var _dirty := false
 
 
 func _ready() -> void:
@@ -29,6 +30,19 @@ func _ready() -> void:
 	_timer.wait_time = DEBOUNCE_SECONDS
 	_timer.timeout.connect(_on_debounce_timeout)
 	add_child(_timer)
+
+
+func _exit_tree() -> void:
+	_enabled = false
+	if is_instance_valid(_timer):
+		_timer.stop()
+	if is_instance_valid(_filesystem):
+		if _filesystem.filesystem_changed.is_connected(_on_filesystem_changed):
+			_filesystem.filesystem_changed.disconnect(_on_filesystem_changed)
+		if _filesystem.resources_reload.is_connected(_on_resources_changed):
+			_filesystem.resources_reload.disconnect(_on_resources_changed)
+		if _filesystem.resources_reimported.is_connected(_on_resources_changed):
+			_filesystem.resources_reimported.disconnect(_on_resources_changed)
 
 
 func start(filesystem: EditorFileSystem) -> void:
@@ -44,34 +58,45 @@ func start(filesystem: EditorFileSystem) -> void:
 
 func set_auto_check_enabled(enabled: bool) -> void:
 	_enabled = enabled
-	if not _enabled and is_instance_valid(_timer):
-		_timer.stop()
 	if not _initialized:
 		_refresh_signature(false)
 	if (
 		_enabled
 		and _revision > _last_requested_revision
 		and is_instance_valid(_timer)
+		and _timer.is_inside_tree()
 	):
 		_timer.start()
 
 
 func revision() -> int:
+	# Explicit builds must observe edits even before the debounce expires.
+	if _dirty:
+		_dirty = false
+		_refresh_signature(false)
 	return _revision
 
 
 func notify_resource_saved(resource: Resource) -> void:
 	if resource == null or not _is_tracked_path(resource.resource_path):
 		return
-	_refresh_signature(true)
+	_schedule_refresh()
 
 
 func _on_filesystem_changed() -> void:
-	_refresh_signature(true)
+	_schedule_refresh()
 
 
 func _on_resources_changed(_paths: PackedStringArray) -> void:
-	_refresh_signature(true)
+	_schedule_refresh()
+
+
+func _schedule_refresh() -> void:
+	if not is_inside_tree():
+		return
+	_dirty = true
+	if is_instance_valid(_timer):
+		_timer.start()
 
 
 func _refresh_signature(schedule_check: bool) -> void:
@@ -125,7 +150,7 @@ func _refresh_signature(schedule_check: bool) -> void:
 	_signature = signature
 	_revision += 1
 	revision_changed.emit(_revision)
-	if schedule_check and _enabled:
+	if schedule_check and _enabled and is_instance_valid(_timer) and _timer.is_inside_tree():
 		_timer.start()
 
 
@@ -169,7 +194,10 @@ func _is_tracked_path(path: String) -> bool:
 
 
 func _on_debounce_timeout() -> void:
-	if _enabled:
+	if _dirty:
+		_dirty = false
+		_refresh_signature(false)
+	if _enabled and _revision > _last_requested_revision:
 		_last_requested_revision = _revision
 		check_requested.emit(_revision)
 
